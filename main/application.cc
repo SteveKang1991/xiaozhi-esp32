@@ -460,7 +460,7 @@ void Application::Start() {
     protocol_->Start();
 
     // Check for new firmware version or get the MQTT broker address
-    ota_.SetCheckVersionUrl(CONFIG_OTA_VERSION_URL);
+    /**ota_.SetCheckVersionUrl(CONFIG_OTA_VERSION_URL);
     ota_.SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     ota_.SetHeader("Client-Id", board.GetUuid());
     ota_.SetHeader("Accept-Language", Lang::CODE);
@@ -471,7 +471,7 @@ void Application::Start() {
         Application* app = (Application*)arg;
         app->CheckNewVersion();
         vTaskDelete(NULL);
-    }, "check_new_version", 4096 * 2, this, 2, nullptr);
+    }, "check_new_version", 4096 * 2, this, 2, nullptr);**/
 
 #if CONFIG_USE_AUDIO_PROCESSOR
     audio_processor_.Initialize(codec->input_channels(), codec->input_reference());
