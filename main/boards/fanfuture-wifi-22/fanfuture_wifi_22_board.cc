@@ -11,6 +11,7 @@
 #include "led/circular_strip.h"
 #include "assets/lang_config.h"
 #include "power_manager.h"
+#include "lamp_controller.h"
 
 #include <wifi_station.h>
 #include <esp_log.h>
@@ -268,11 +269,15 @@ private:
 
     // 物联网初始化，添加对 AI 可见设备
     void InitializeIot() {
+#if CONFIG_IOT_PROTOCOL_XIAOZHI
         auto& thing_manager = iot::ThingManager::GetInstance();
         thing_manager.AddThing(iot::CreateThing("Speaker"));
         thing_manager.AddThing(iot::CreateThing("Screen"));
         thing_manager.AddThing(iot::CreateThing("Lamp"));
         thing_manager.AddThing(iot::CreateThing("Battery"));
+#elif CONFIG_IOT_PROTOCOL_MCP
+        static LampController lamp(LAMP_GPIO);
+#endif
     }
 
 public:
