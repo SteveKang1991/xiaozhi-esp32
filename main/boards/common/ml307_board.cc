@@ -67,7 +67,7 @@ void Ml307Board::WaitForNetworkReady() {
     modem_.ResetConnections();
 
     // Enable sleep mode
-    modem_.SetSleepMode(true, 30);
+    //modem_.SetSleepMode(true, 30);
 }
 
 Http* Ml307Board::CreateHttp() {

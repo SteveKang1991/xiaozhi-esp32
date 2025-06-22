@@ -18,7 +18,7 @@
         "SWITCH_TO_WIFI_NETWORK":"切换到 Wi-Fi...",
         "SWITCH_TO_4G_NETWORK":"切换到 4G...",
 
-        "STANDBY":"待命",
+        "STANDBY":"幻次元AI",
         "CONNECT_TO":"连接 ",
         "CONNECTING":"连接中...",
         "CONNECTED_TO":"已连接 ",
@@ -53,6 +53,7 @@
         "MAX_VOLUME":"最大音量",
 
         "RTC_MODE_OFF":"AEC 关闭",
-        "RTC_MODE_ON":"AEC 开启"
+        "RTC_MODE_ON":"AEC 开启",
+        "MUSIC":"正在播放音乐"
     }
 }
