@@ -16,12 +16,43 @@
 #define TAG "LcdDisplay"
 
 #if CONFIG_USE_GIF_EMOTION_STYLE
-LV_IMG_DECLARE(staticstate);
-LV_IMG_DECLARE(sad);
-LV_IMG_DECLARE(happy);
-LV_IMG_DECLARE(scare);
-LV_IMG_DECLARE(buxue);
-LV_IMG_DECLARE(anger);
+// 表情映射表 - 将原版21种表情映射到现有6个GIF
+const LcdDisplay::EmotionMap LcdDisplay::emotion_maps_[] = {
+    // 中性/平静类表情 -> staticstate
+    {"neutral", &staticstate},
+    {"relaxed", &staticstate},
+    {"sleepy", &staticstate},
+
+    // 积极/开心类表情 -> happy
+    {"happy", &happy},
+    {"laughing", &happy},
+    {"funny", &happy},
+    {"loving", &happy},
+    {"confident", &happy},
+    {"winking", &happy},
+    {"cool", &happy},
+    {"delicious", &happy},
+    {"kissy", &happy},
+    {"silly", &happy},
+
+    // 悲伤类表情 -> sad
+    {"sad", &sad},
+    {"crying", &sad},
+
+    // 愤怒类表情 -> anger
+    {"angry", &anger},
+
+    // 惊讶类表情 -> scare
+    {"surprised", &scare},
+    {"shocked", &scare},
+
+    // 思考/困惑类表情 -> buxue
+    {"thinking", &buxue},
+    {"confused", &buxue},
+    {"embarrassed", &buxue},
+
+    {nullptr, nullptr}  // 结束标记
+};
 #endif
 
 // Color definitions for dark theme
@@ -882,30 +913,22 @@ void LcdDisplay::SetPreviewImage(const lv_img_dsc_t* img_dsc) {
 
 void LcdDisplay::SetEmotion(const char* emotion) {
 #if CONFIG_USE_GIF_EMOTION_STYLE
-    struct Emotion {
-        const lv_img_dsc_t* gif;
-        const char* text;
-    };
-
-    static const std::vector<Emotion> emotions = {
-        {&staticstate, "neutral"}, {&happy, "happy"},   {&happy, "laughing"},
-        {&happy, "funny"},         {&sad, "sad"},       {&anger, "angry"},
-        {&scare, "surprised"},     {&buxue, "confused"}};
-
-    std::string_view emotion_view(emotion);
-    auto it = std::find_if(emotions.begin(), emotions.end(),
-                           [&emotion_view](const Emotion& e) { return e.text == emotion_view; });
-
-    DisplayLockGuard lock(this);
-    if (emotion_gif == nullptr) {
+    if (!emotion || !emotion_gif) {
         return;
     }
 
-    if (it != emotions.end()) {
-        lv_gif_set_src(emotion_gif, it->gif);
-    } else {
-        lv_gif_set_src(emotion_gif, &staticstate);
+    DisplayLockGuard lock(this);
+
+    for (const auto& map : emotion_maps_) {
+        if (map.name && strcmp(map.name, emotion) == 0) {
+            lv_gif_set_src(emotion_gif, map.gif);
+            ESP_LOGI(TAG, "设置表情: %s", emotion);
+            return;
+        }
     }
+
+    lv_gif_set_src(emotion_gif, &staticstate);
+    ESP_LOGI(TAG, "未知表情'%s'，使用默认", emotion);
 #else
     struct Emotion {
         const char* icon;

@@ -6,6 +6,7 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <font_emoji.h>
+#include "otto_emoji_gif.h"
 
 #include <atomic>
 
@@ -36,6 +37,14 @@ protected:
     lv_obj_t* preview_image_ = nullptr;
 #if CONFIG_USE_GIF_EMOTION_STYLE
     lv_obj_t* emotion_gif = nullptr;
+
+    // 表情映射
+    struct EmotionMap {
+        const char* name;
+        const lv_img_dsc_t* gif;
+    };
+
+    static const EmotionMap emotion_maps_[];
 #endif
 
     DisplayFonts fonts_;
