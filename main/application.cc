@@ -1154,6 +1154,7 @@ void Application::SetAecMode(AecMode mode) {
 
 // 新增：接收外部音频数据（如音乐播放）
 void Application::StartAudio() {
+    ESP_LOGI(TAG, "StartAudio StartAudio");
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
     display->SetStatus(Lang::Strings::MUSIC);
@@ -1161,6 +1162,7 @@ void Application::StartAudio() {
 }
 
 void Application::EndAudio() {
+    ESP_LOGI(TAG, "EndAudio EndAudio");
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
     display->SetEmotion("neutral");

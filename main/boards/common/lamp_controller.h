@@ -22,19 +22,19 @@ public:
         gpio_set_level(gpio_num_, 0);
 
         auto& mcp_server = McpServer::GetInstance();
-        mcp_server.AddTool("self.lamp.get_state", "Get the power state of the lamp", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+        mcp_server.AddTool("self.lamp.get_state", "获取灯光的开关状态。当用户询问是否开灯，会调用此方法获取开关状态", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
             return power_ ? "{\"power\": true}" : "{\"power\": false}";
         });
 
-        mcp_server.AddTool("self.lamp.turn_on", "Turn on the lamp", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+        mcp_server.AddTool("self.lamp.turn_on", "打开灯/灯光/氛围灯/背后灯/台灯", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
             power_ = true;
-            gpio_set_level(gpio_num_, 1);
+            gpio_set_level(gpio_num_, 0);
             return true;
         });
 
-        mcp_server.AddTool("self.lamp.turn_off", "Turn off the lamp", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+        mcp_server.AddTool("self.lamp.turn_off", "关闭灯/灯光/氛围灯/背后灯/台灯", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
             power_ = false;
-            gpio_set_level(gpio_num_, 0);
+            gpio_set_level(gpio_num_, 1);
             return true;
         });
     }
