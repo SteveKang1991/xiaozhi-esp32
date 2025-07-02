@@ -18,7 +18,7 @@
         "SWITCH_TO_WIFI_NETWORK": "Switching to Wi-Fi...",
         "SWITCH_TO_4G_NETWORK": "Switching to 4G...",
 
-        "STANDBY": "Standby",
+        "STANDBY": "FanFuture AI",
         "CONNECT_TO": "Connect to ",
         "CONNECTING": "Connecting...",
         "CONNECTION_SUCCESSFUL": "Connection Successful",
@@ -54,6 +54,7 @@
         "MAX_VOLUME": "Max volume",
 
         "RTC_MODE_OFF": "AEC Off",
-        "RTC_MODE_ON": "AEC On"
+        "RTC_MODE_ON": "AEC On",
+        "MUSIC":"Music Playing"
     }
 }

@@ -791,6 +791,13 @@ void LcdDisplay::SetupUI() {
     lv_obj_center(emotion_gif);
     lv_gif_set_src(emotion_gif, &staticstate);
 
+    emotion_label_ = lv_label_create(overlay_container);
+    lv_obj_set_style_text_font(emotion_label_, &font_awesome_30_4, 0);
+    lv_obj_set_style_text_color(emotion_label_, current_theme_.text, 0);
+    lv_label_set_text(emotion_label_, FONT_AWESOME_AI_CHIP);
+    lv_obj_align(emotion_label_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
+
     chat_message_label_ = lv_label_create(overlay_container);
     lv_label_set_text(chat_message_label_, "");
     lv_obj_set_width(chat_message_label_, LV_HOR_RES * 0.9);
@@ -1009,7 +1016,7 @@ void LcdDisplay::SetMusicInfo(const char* song_name) {
 #if CONFIG_USE_WECHAT_MESSAGE_STYLE
     // 微信模式下不显示歌名，保持原有聊天功能
     return;
-#else
+#elif CONFIG_USE_GIF_EMOTION_STYLE
     // 非微信模式：在表情下方显示歌名
     /**DisplayLockGuard lock(this);
     if (chat_message_label_ == nullptr) {
@@ -1032,6 +1039,17 @@ void LcdDisplay::SetMusicInfo(const char* song_name) {
         // 清空歌名显示
         lv_label_set_text(chat_message_label_, "");
     }**/
+    DisplayLockGuard lock(this);
+
+    if (song_name != nullptr && strlen(song_name) > 0) {
+        // 显示emotion_label_，隐藏emotion_gif
+        lv_obj_clear_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(emotion_gif, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        // 显示emotion_gif，隐藏显示emotion_label_
+        lv_obj_clear_flag(emotion_gif, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
+    }
    return;
 #endif
 }
