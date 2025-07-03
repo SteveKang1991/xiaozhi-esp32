@@ -929,13 +929,13 @@ void LcdDisplay::SetEmotion(const char* emotion) {
     for (const auto& map : emotion_maps_) {
         if (map.name && strcmp(map.name, emotion) == 0) {
             lv_gif_set_src(emotion_gif, map.gif);
-            ESP_LOGI(TAG, "设置表情: %s", emotion);
+            //ESP_LOGI(TAG, "设置表情: %s", emotion);
             return;
         }
     }
 
     lv_gif_set_src(emotion_gif, &staticstate);
-    ESP_LOGI(TAG, "未知表情'%s'，使用默认", emotion);
+    //ESP_LOGI(TAG, "未知表情'%s'，使用默认", emotion);
 #else
     struct Emotion {
         const char* icon;
@@ -1016,7 +1016,7 @@ void LcdDisplay::SetMusicInfo(const char* song_name) {
 #if CONFIG_USE_WECHAT_MESSAGE_STYLE
     // 微信模式下不显示歌名，保持原有聊天功能
     return;
-#elif CONFIG_USE_GIF_EMOTION_STYLE
+#else
     // 非微信模式：在表情下方显示歌名
     /**DisplayLockGuard lock(this);
     if (chat_message_label_ == nullptr) {
@@ -1039,9 +1039,18 @@ void LcdDisplay::SetMusicInfo(const char* song_name) {
         // 清空歌名显示
         lv_label_set_text(chat_message_label_, "");
     }**/
+#endif
+}
+
+void LcdDisplay::SetMusicState(bool isPlayMusic) {
+#if CONFIG_USE_WECHAT_MESSAGE_STYLE
+    // 微信模式下
+    return;
+#elif CONFIG_USE_GIF_EMOTION_STYLE
+    // 非微信模式
     DisplayLockGuard lock(this);
 
-    if (song_name != nullptr && strlen(song_name) > 0) {
+    if (isPlayMusic) {
         // 显示emotion_label_，隐藏emotion_gif
         lv_obj_clear_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(emotion_gif, LV_OBJ_FLAG_HIDDEN);

@@ -1163,6 +1163,7 @@ void Application::StartAudio() {
     auto display = board.GetDisplay();
     display->SetStatus(Lang::Strings::MUSIC);
     display->SetIcon(FONT_AWESOME_MUSIC);
+    display->SetMusicState(true);
 }
 
 void Application::EndAudio() {
@@ -1170,6 +1171,7 @@ void Application::EndAudio() {
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
     display->SetEmotion("neutral");
+    display->SetMusicState(false);
 }
 
 void Application::AddAudioData(AudioStreamPacket&& packet) {

@@ -629,7 +629,9 @@ void Esp32Music::PlayAudioStream() {
         is_playing_ = false;
         return;
     }
-    
+
+    auto& app = Application::GetInstance();
+    app.StartAudio(); // 变成播放状态
     
     // 等待缓冲区有足够数据开始播放
     {
@@ -657,8 +659,6 @@ void Esp32Music::PlayAudioStream() {
     
     // 标记是否已经处理过ID3标签
     bool id3_processed = false;
-
-    auto& app = Application::GetInstance();
     
     while (is_playing_) {
         // 检查设备状态，只有在空闲状态才播放音乐
@@ -670,7 +670,6 @@ void Esp32Music::PlayAudioStream() {
             // 切换状态
             app.ToggleChatState(); // 变成待机状态
             vTaskDelay(pdMS_TO_TICKS(300));
-            app.StartAudio(); // 变成播放状态
             continue;
         } else if (current_state != kDeviceStateIdle) { // 不是待机状态，就一直卡在这里，不让播放音乐
             ESP_LOGD(TAG, "Device state is %d, pausing music playback", current_state);
