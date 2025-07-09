@@ -322,6 +322,8 @@ choice DISPLAY_LCD_TYPE
         屏幕类型选择
     config LCD_ST7789_240X320
         bool "ST7789, 分辨率240*320, IPS"
+    config LCD_ST7789_240X320_CUT
+        bool "ST7789, 分辨率240*320, IPS,左侧遮挡"
     config LCD_ST7789_240X320_NO_IPS
         bool "ST7789, 分辨率240*320, 非IPS"
     config LCD_ST7789_170X320

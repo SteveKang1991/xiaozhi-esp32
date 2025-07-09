@@ -43,9 +43,6 @@
 #define DISPLAY_RST_PIN       GPIO_NUM_6    // 显示屏复位引脚
 #define DISPLAY_CS_PIN        GPIO_NUM_NC    // 显示屏片选引脚（未连接，NC 表示未使用）
 
-// Control a lamp
-#define LAMP_GPIO GPIO_NUM_3
-
 #define ML307_RX_PIN          GPIO_NUM_40    // ml307 RX  42 40
 #define ML307_TX_PIN          GPIO_NUM_39    // ml307 TX  45 39
 

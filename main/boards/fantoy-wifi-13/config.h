@@ -43,9 +43,6 @@
 #define DISPLAY_RST_PIN       GPIO_NUM_6    // 显示屏复位引脚
 #define DISPLAY_CS_PIN        GPIO_NUM_NC    // 显示屏片选引脚（未连接，NC 表示未使用）
 
-// Control a lamp
-#define LAMP_GPIO GPIO_NUM_3
-
 
 #ifdef CONFIG_LCD_ST7789_240X320
 #define LCD_TYPE_ST7789_SERIAL

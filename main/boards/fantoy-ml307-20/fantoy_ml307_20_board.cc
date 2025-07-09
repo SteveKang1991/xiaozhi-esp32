@@ -11,7 +11,6 @@
 #include "led/circular_strip.h"
 #include "assets/lang_config.h"
 #include "../fantoy-wifi-13/power_manager.h"
-#include "lamp_controller.h"
 
 #include <wifi_station.h>
 #include <esp_log.h>
@@ -290,8 +289,6 @@ private:
         thing_manager.AddThing(iot::CreateThing("Screen"));
         thing_manager.AddThing(iot::CreateThing("Lamp"));
         thing_manager.AddThing(iot::CreateThing("Battery"));
-#elif CONFIG_IOT_PROTOCOL_MCP
-        static LampController lamp(LAMP_GPIO);
 #endif
     }
 
