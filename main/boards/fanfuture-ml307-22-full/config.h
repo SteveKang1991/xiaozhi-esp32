@@ -51,15 +51,15 @@
 
 #ifdef CONFIG_LCD_ST7789_240X320
 #define LCD_TYPE_ST7789_SERIAL
-#define DISPLAY_WIDTH   297                  // 显示屏宽度（像素）
-#define DISPLAY_HEIGHT  240                  // 显示屏高度（像素）
-#define DISPLAY_MIRROR_X true                // 是否水平镜像显示（false 表示不镜像）
-#define DISPLAY_MIRROR_Y false               // 是否垂直镜像显示（true 表示镜像）
-#define DISPLAY_SWAP_XY true                 // 是否交换 X 和 Y 轴（true 表示交换）
-#define DISPLAY_INVERT_COLOR    true         // 是否反转颜色（true 表示反转）
+#define DISPLAY_WIDTH   320                   // 显示屏宽度（像素）
+#define DISPLAY_HEIGHT  240                   // 显示屏高度（像素）
+#define DISPLAY_MIRROR_X true                 // 是否水平镜像显示（false 表示不镜像）
+#define DISPLAY_MIRROR_Y false                // 是否垂直镜像显示（true 表示镜像）
+#define DISPLAY_SWAP_XY true                  // 是否交换 X 和 Y 轴（true 表示交换）
+#define DISPLAY_INVERT_COLOR    true          // 是否反转颜色（true 表示反转）
 #define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_RGB  // RGB 颜色顺序（RGB 表示红绿蓝顺序）
-#define DISPLAY_OFFSET_X  23                 // 显示屏 X 轴偏移量（像素）
-#define DISPLAY_OFFSET_Y  0                  // 显示屏 Y 轴偏移量（像素）
+#define DISPLAY_OFFSET_X  0                   // 显示屏 X 轴偏移量（像素）
+#define DISPLAY_OFFSET_Y  0                   // 显示屏 Y 轴偏移量（像素）
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false // 背光输出是否反转（false 表示不反转）
 #define DISPLAY_SPI_MODE 3
 #endif
