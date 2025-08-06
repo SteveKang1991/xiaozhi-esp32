@@ -15,6 +15,46 @@
 
 #define TAG "LcdDisplay"
 
+#if CONFIG_USE_GIF_EMOTION_STYLE
+// 表情映射表 - 将原版21种表情映射到现有6个GIF
+const LcdDisplay::EmotionMap LcdDisplay::emotion_maps_[] = {
+    // 中性/平静类表情 -> staticstate
+    {"neutral", &staticstate},
+    {"relaxed", &staticstate},
+    {"sleepy", &staticstate},
+
+    // 积极/开心类表情 -> happy
+    {"happy", &happy},
+    {"laughing", &happy},
+    {"funny", &happy},
+    {"loving", &happy},
+    {"confident", &happy},
+    {"winking", &happy},
+    {"cool", &happy},
+    {"delicious", &happy},
+    {"kissy", &happy},
+    {"silly", &happy},
+
+    // 悲伤类表情 -> sad
+    {"sad", &sad},
+    {"crying", &sad},
+
+    // 愤怒类表情 -> anger
+    {"angry", &anger},
+
+    // 惊讶类表情 -> scare
+    {"surprised", &scare},
+    {"shocked", &scare},
+
+    // 思考/困惑类表情 -> buxue
+    {"thinking", &buxue},
+    {"confused", &buxue},
+    {"embarrassed", &buxue},
+
+    {nullptr, nullptr}  // 结束标记
+};
+#endif
+
 // Color definitions for dark theme
 #define DARK_BACKGROUND_COLOR       lv_color_hex(0x121212)     // Dark background
 #define DARK_TEXT_COLOR             lv_color_white()           // White text
@@ -74,7 +114,7 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
 
     // Load theme from settings
     Settings settings("display", false);
-    current_theme_name_ = settings.GetString("theme", "light");
+    current_theme_name_ = settings.GetString("theme", "dark");
 
     // Update the theme
     if (current_theme_name_ == "dark") {
@@ -727,7 +767,51 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_radius(status_bar_, 0, 0);
     lv_obj_set_style_bg_color(status_bar_, current_theme_.background, 0);
     lv_obj_set_style_text_color(status_bar_, current_theme_.text, 0);
-    
+
+#if CONFIG_USE_GIF_EMOTION_STYLE
+    // 创建一个容器来放置 GIF 和文本
+    lv_obj_t* overlay_container = lv_obj_create(container_);
+    lv_obj_set_scrollbar_mode(overlay_container, LV_SCROLLBAR_MODE_OFF);
+    //lv_obj_set_size(overlay_container, LV_HOR_RES, LV_HOR_RES);
+    //lv_obj_set_style_bg_opa(overlay_container, LV_OPA_TRANSP, 0);
+    //lv_obj_set_style_border_width(overlay_container, 0, 0);
+    //lv_obj_center(overlay_container);
+    lv_obj_set_style_radius(overlay_container, 0, 0);
+    lv_obj_set_width(overlay_container, LV_HOR_RES);
+    lv_obj_set_flex_grow(overlay_container, 1);
+    lv_obj_set_style_pad_all(overlay_container, 5, 0);
+    lv_obj_set_style_bg_color(overlay_container, lv_color_black(), 0);
+    lv_obj_set_style_border_color(overlay_container, lv_color_black(), 0); // Border color for content
+
+    emotion_gif = lv_gif_create(overlay_container);
+    int gif_size = LV_HOR_RES;
+    lv_obj_set_size(emotion_gif, gif_size, gif_size);
+    lv_obj_set_style_border_width(emotion_gif, 0, 0);
+    lv_obj_set_style_bg_opa(emotion_gif, LV_OPA_TRANSP, 0);
+    lv_obj_center(emotion_gif);
+    lv_gif_set_src(emotion_gif, &staticstate);
+
+    emotion_label_ = lv_label_create(overlay_container);
+    lv_obj_set_style_text_font(emotion_label_, &font_awesome_30_4, 0);
+    lv_obj_set_style_text_color(emotion_label_, current_theme_.text, 0);
+    lv_label_set_text(emotion_label_, FONT_AWESOME_AI_CHIP);
+    lv_obj_align(emotion_label_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
+
+    chat_message_label_ = lv_label_create(overlay_container);
+    lv_label_set_text(chat_message_label_, "");
+    lv_obj_set_width(chat_message_label_, LV_HOR_RES * 0.9);
+    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(chat_message_label_, lv_color_white(), 0);
+    lv_obj_set_style_border_width(chat_message_label_, 0, 0);
+
+    lv_obj_set_style_bg_opa(chat_message_label_, LV_OPA_50, 0);
+    lv_obj_set_style_bg_color(chat_message_label_, lv_color_black(), 0);
+    lv_obj_set_style_pad_ver(chat_message_label_, 5, 0);
+
+    lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_MID, 0, 0);
+#else
     /* Content */
     content_ = lv_obj_create(container_);
     lv_obj_set_scrollbar_mode(content_, LV_SCROLLBAR_MODE_OFF);
@@ -757,6 +841,7 @@ void LcdDisplay::SetupUI() {
     lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP); // 设置为自动换行模式
     lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0); // 设置文本居中对齐
     lv_obj_set_style_text_color(chat_message_label_, current_theme_.text, 0);
+#endif
 
     /* Status bar */
     lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
@@ -834,6 +919,24 @@ void LcdDisplay::SetPreviewImage(const lv_img_dsc_t* img_dsc) {
 #endif
 
 void LcdDisplay::SetEmotion(const char* emotion) {
+#if CONFIG_USE_GIF_EMOTION_STYLE
+    if (!emotion || !emotion_gif) {
+        return;
+    }
+
+    DisplayLockGuard lock(this);
+
+    for (const auto& map : emotion_maps_) {
+        if (map.name && strcmp(map.name, emotion) == 0) {
+            lv_gif_set_src(emotion_gif, map.gif);
+            //ESP_LOGI(TAG, "设置表情: %s", emotion);
+            return;
+        }
+    }
+
+    lv_gif_set_src(emotion_gif, &staticstate);
+    //ESP_LOGI(TAG, "未知表情'%s'，使用默认", emotion);
+#else
     struct Emotion {
         const char* icon;
         const char* text;
@@ -887,6 +990,8 @@ void LcdDisplay::SetEmotion(const char* emotion) {
     if (preview_image_ != nullptr) {
         lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
     }
+#endif
+
 #endif
 }
 

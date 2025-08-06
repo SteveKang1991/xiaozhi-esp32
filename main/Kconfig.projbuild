@@ -79,6 +79,12 @@ choice BOARD_TYPE
     config BOARD_TYPE_ESP_BOX_LITE
         bool "ESP BOX Lite"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_FANFUTURE_WIFI_22
+        bool "幻次元 WiFi 22"
+        depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_FANFUTURE_ML307_22
+        bool "幻次元 ML307 22"  
+        depends on IDF_TARGET_ESP32S3  
     config BOARD_TYPE_KEVIN_BOX_1
         bool "Kevin Box 1"
         depends on IDF_TARGET_ESP32S3
@@ -333,7 +339,7 @@ choice DISPLAY_OLED_TYPE
 endchoice
 
 choice DISPLAY_LCD_TYPE
-    depends on BOARD_TYPE_BREAD_COMPACT_WIFI_LCD || BOARD_TYPE_BREAD_COMPACT_ESP32_LCD || BOARD_TYPE_ESP32_CGC || BOARD_TYPE_ESP32P4_NANO || BOARD_TYPE_ESP32P4_WIFI6_Touch_LCD_XC || BOARD_TYPE_BREAD_COMPACT_WIFI_CAM
+    depends on BOARD_TYPE_BREAD_COMPACT_WIFI_LCD || BOARD_TYPE_BREAD_COMPACT_ESP32_LCD || BOARD_TYPE_ESP32_CGC || BOARD_TYPE_ESP32P4_NANO || BOARD_TYPE_ESP32P4_WIFI6_Touch_LCD_XC || BOARD_TYPE_BREAD_COMPACT_WIFI_CAM || BOARD_TYPE_FANFUTURE_WIFI_22 || BOARD_TYPE_FANFUTURE_ML307_22
     prompt "LCD Type"
     default LCD_ST7789_240X320
     help
@@ -392,11 +398,26 @@ choice DISPLAY_ESP32S3_KORVO2_V3
         bool "ILI9341, 分辨率240*320"
 endchoice
 
-config USE_WECHAT_MESSAGE_STYLE
-    bool "Enable WeChat Message Style"
-    default n
+#config USE_WECHAT_MESSAGE_STYLE
+#    bool "Enable WeChat Message Style"
+#    default n
+#    help
+#        使用微信聊天界面风格
+choice MESSAGE_STYLE_TYPE
+    prompt "界面风格"
+    default MESSAGE_STYLE_NORMAL
     help
-        使用微信聊天界面风格
+        选择消息显示的风格
+
+    config MESSAGE_STYLE_NORMAL
+        bool "默认"
+    config USE_WECHAT_MESSAGE_STYLE
+        bool "微信聊天"
+    config USE_GIF_EMOTION_STYLE
+        bool "GIF眨眼睛"
+        select LV_USE_GIF
+        select LV_GIF_CACHE_DECODE_DATA
+endchoice
 
 config USE_ESP_WAKE_WORD
     bool "Enable Wake Word Detection (without AFE)"
