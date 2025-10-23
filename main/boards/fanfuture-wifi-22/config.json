@@ -1,0 +1,17 @@
+{
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "fanfuture-wifi-22",
+            "sdkconfig_append": [
+                "CONFIG_LCD_CUSTOM=y"
+            ]
+        },
+        {
+            "name": "fanfuture-wifi-22_240X320",
+            "sdkconfig_append": [
+                "CONFIG_LCD_ST7789_240X320=y"
+            ]
+        }
+    ]
+}
