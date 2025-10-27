@@ -17,80 +17,9 @@
 
 #define TAG "FanLcdDisplay"
 
-LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
-LV_FONT_DECLARE(BUILTIN_ICON_FONT);
-LV_FONT_DECLARE(font_awesome_30_4);
-
-void FanLcdDisplay::InitializeLcdThemes() {
-    auto text_font = std::make_shared<LvglBuiltInFont>(&BUILTIN_TEXT_FONT);
-    auto icon_font = std::make_shared<LvglBuiltInFont>(&BUILTIN_ICON_FONT);
-    auto large_icon_font = std::make_shared<LvglBuiltInFont>(&font_awesome_30_4);
-
-    // light theme
-    auto light_theme = new LvglTheme("light");
-    light_theme->set_background_color(lv_color_hex(0xFFFFFF));          //rgb(255, 255, 255)
-    light_theme->set_text_color(lv_color_hex(0x000000));                //rgb(0, 0, 0)
-    light_theme->set_chat_background_color(lv_color_hex(0xE0E0E0));     //rgb(224, 224, 224)
-    light_theme->set_user_bubble_color(lv_color_hex(0x00FF00));         //rgb(0, 128, 0)
-    light_theme->set_assistant_bubble_color(lv_color_hex(0xDDDDDD));    //rgb(221, 221, 221)
-    light_theme->set_system_bubble_color(lv_color_hex(0xFFFFFF));       //rgb(255, 255, 255)
-    light_theme->set_system_text_color(lv_color_hex(0x000000));         //rgb(0, 0, 0)
-    light_theme->set_border_color(lv_color_hex(0x000000));              //rgb(0, 0, 0)
-    light_theme->set_low_battery_color(lv_color_hex(0x000000));         //rgb(0, 0, 0)
-    light_theme->set_text_font(text_font);
-    light_theme->set_icon_font(icon_font);
-    light_theme->set_large_icon_font(large_icon_font);
-
-    // dark theme
-    auto dark_theme = new LvglTheme("dark");
-    dark_theme->set_background_color(lv_color_hex(0x000000));           //rgb(0, 0, 0)
-    dark_theme->set_text_color(lv_color_hex(0xFFFFFF));                 //rgb(255, 255, 255)
-    dark_theme->set_chat_background_color(lv_color_hex(0x1F1F1F));      //rgb(31, 31, 31)
-    dark_theme->set_user_bubble_color(lv_color_hex(0x00FF00));          //rgb(0, 128, 0)
-    dark_theme->set_assistant_bubble_color(lv_color_hex(0x222222));     //rgb(34, 34, 34)
-    dark_theme->set_system_bubble_color(lv_color_hex(0x000000));        //rgb(0, 0, 0)
-    dark_theme->set_system_text_color(lv_color_hex(0xFFFFFF));          //rgb(255, 255, 255)
-    dark_theme->set_border_color(lv_color_hex(0xFFFFFF));               //rgb(255, 255, 255)
-    dark_theme->set_low_battery_color(lv_color_hex(0xFF0000));          //rgb(255, 0, 0)
-    dark_theme->set_text_font(text_font);
-    dark_theme->set_icon_font(icon_font);
-    dark_theme->set_large_icon_font(large_icon_font);
-
-    auto& theme_manager = LvglThemeManager::GetInstance();
-    theme_manager.RegisterTheme("light", light_theme);
-    theme_manager.RegisterTheme("dark", dark_theme);
-}
-
-FanLcdDisplay::FanLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, int width, int height)
-    : panel_io_(panel_io), panel_(panel) {
-    width_ = width;
-    height_ = height;
-
-    // Initialize LCD themes
-    InitializeLcdThemes();
-
-    // Load theme from settings
-    Settings settings("display", false);
-    std::string theme_name = settings.GetString("theme", "dark");
-    current_theme_ = LvglThemeManager::GetInstance().GetTheme(theme_name);
-
-    // Create a timer to hide the preview image
-    esp_timer_create_args_t preview_timer_args = {
-        .callback = [](void* arg) {
-            FanLcdDisplay* display = static_cast<FanLcdDisplay*>(arg);
-            display->SetPreviewImage(nullptr);
-        },
-        .arg = this,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "preview_timer",
-        .skip_unhandled_events = false,
-    };
-    esp_timer_create(&preview_timer_args, &preview_timer_);
-}
-
-FanSpiLcdDisplay::FanSpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
+FanLcdDisplay::FanLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
                            int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool swap_xy)
-    : FanLcdDisplay(panel_io, panel, width, height) {
+    : LcdDisplay(panel_io, panel, width, height) {
 
     // draw white
     std::vector<uint16_t> buffer(width_, 0xFFFF);
@@ -163,67 +92,6 @@ FanSpiLcdDisplay::FanSpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
     }
 
     SetupUI();
-}
-
-FanLcdDisplay::~FanLcdDisplay() {
-    SetPreviewImage(nullptr);
-    
-    // Clean up GIF controller
-    if (gif_controller_) {
-        gif_controller_->Stop();
-        gif_controller_.reset();
-    }
-    
-    if (preview_timer_ != nullptr) {
-        esp_timer_stop(preview_timer_);
-        esp_timer_delete(preview_timer_);
-    }
-
-    if (preview_image_ != nullptr) {
-        lv_obj_del(preview_image_);
-    }
-    if (chat_message_label_ != nullptr) {
-        lv_obj_del(chat_message_label_);
-    }
-    if (emoji_label_ != nullptr) {
-        lv_obj_del(emoji_label_);
-    }
-    if (emoji_image_ != nullptr) {
-        lv_obj_del(emoji_image_);
-    }
-    if (emoji_box_ != nullptr) {
-        lv_obj_del(emoji_box_);
-    }
-    if (content_ != nullptr) {
-        lv_obj_del(content_);
-    }
-    if (status_bar_ != nullptr) {
-        lv_obj_del(status_bar_);
-    }
-    if (side_bar_ != nullptr) {
-        lv_obj_del(side_bar_);
-    }
-    if (container_ != nullptr) {
-        lv_obj_del(container_);
-    }
-    if (display_ != nullptr) {
-        lv_display_delete(display_);
-    }
-
-    if (panel_ != nullptr) {
-        esp_lcd_panel_del(panel_);
-    }
-    if (panel_io_ != nullptr) {
-        esp_lcd_panel_io_del(panel_io_);
-    }
-}
-
-bool FanLcdDisplay::Lock(int timeout_ms) {
-    return lvgl_port_lock(timeout_ms);
-}
-
-void FanLcdDisplay::Unlock() {
-    lvgl_port_unlock();
 }
 
 void FanLcdDisplay::SetupUI() {
@@ -347,51 +215,12 @@ void FanLcdDisplay::SetupUI() {
     lv_obj_set_style_text_color(low_battery_label_, lv_color_white(), 0);
     lv_obj_center(low_battery_label_);
     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
-}
 
-void FanLcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
-    DisplayLockGuard lock(this);
-    if (preview_image_ == nullptr) {
-        ESP_LOGE(TAG, "Preview image is not initialized");
-        return;
+    auto& theme_manager = LvglThemeManager::GetInstance();
+    auto theme = theme_manager.GetTheme("dark");
+    if (theme != nullptr) {
+        LcdDisplay::SetTheme(theme);
     }
-
-    if (image == nullptr) {
-        esp_timer_stop(preview_timer_);
-        lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
-        preview_image_cached_.reset();
-        if (gif_controller_) {
-            gif_controller_->Start();
-        }
-        return;
-    }
-
-    preview_image_cached_ = std::move(image);
-    auto img_dsc = preview_image_cached_->image_dsc();
-    // 设置图片源并显示预览图片
-    lv_image_set_src(preview_image_, img_dsc);
-    if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
-        // zoom factor 0.5
-        lv_image_set_scale(preview_image_, 128 * width_ / img_dsc->header.w);
-    }
-
-    // Hide emoji_box_
-    if (gif_controller_) {
-        gif_controller_->Stop();
-    }
-    lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
-    esp_timer_stop(preview_timer_);
-    ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, PREVIEW_IMAGE_DURATION_MS * 1000));
-}
-
-void FanLcdDisplay::SetChatMessage(const char* role, const char* content) {
-    DisplayLockGuard lock(this);
-    if (chat_message_label_ == nullptr) {
-        return;
-    }
-    lv_label_set_text(chat_message_label_, content);
 }
 
 void FanLcdDisplay::SetEmotion(const char* emotion) {
@@ -449,70 +278,4 @@ void FanLcdDisplay::SetEmotion(const char* emotion) {
         lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
     }
-}
-
-void FanLcdDisplay::SetTheme(Theme* theme) {
-    DisplayLockGuard lock(this);
-    
-    auto lvgl_theme = static_cast<LvglTheme*>(theme);
-    
-    // Get the active screen
-    lv_obj_t* screen = lv_screen_active();
-
-    // Set font
-    auto text_font = lvgl_theme->text_font()->font();
-    auto icon_font = lvgl_theme->icon_font()->font();
-    auto large_icon_font = lvgl_theme->large_icon_font()->font();
-
-    if (text_font->line_height >= 40) {
-        lv_obj_set_style_text_font(mute_label_, large_icon_font, 0);
-        lv_obj_set_style_text_font(battery_label_, large_icon_font, 0);
-        lv_obj_set_style_text_font(network_label_, large_icon_font, 0);
-    } else {
-        lv_obj_set_style_text_font(mute_label_, icon_font, 0);
-        lv_obj_set_style_text_font(battery_label_, icon_font, 0);
-        lv_obj_set_style_text_font(network_label_, icon_font, 0);
-    }
-
-    // Set parent text color
-    lv_obj_set_style_text_font(screen, text_font, 0);
-    lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
-
-    // Set background image
-    if (lvgl_theme->background_image() != nullptr) {
-        lv_obj_set_style_bg_image_src(container_, lvgl_theme->background_image()->image_dsc(), 0);
-    } else {
-        lv_obj_set_style_bg_image_src(container_, nullptr, 0);
-        lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
-    }
-    
-    // Update status bar background color with 50% opacity
-    lv_obj_set_style_bg_opa(status_bar_, LV_OPA_50, 0);
-    lv_obj_set_style_bg_color(status_bar_, lvgl_theme->background_color(), 0);
-    
-    // Update status bar elements
-    lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
-    lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
-    lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
-    lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
-    lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
-    lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
-
-    // Set content background opacity
-    lv_obj_set_style_bg_opa(content_, LV_OPA_TRANSP, 0);
-
-    // Simple UI mode - just update the main chat message
-    if (chat_message_label_ != nullptr) {
-        lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
-    }
-    
-    if (emoji_label_ != nullptr) {
-        lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
-    }
-    
-    // Update low battery popup
-    lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
-
-    // No errors occurred. Save theme to settings
-    Display::SetTheme(lvgl_theme);
 }
