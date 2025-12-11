@@ -21,7 +21,6 @@
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
-#include "esp_lcd_st7796.h"
 #include <driver/spi_common.h>
 
 #include <driver/rtc_io.h>
@@ -144,6 +143,18 @@ private:
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
 
+        // Scan for I2C devices
+        /**uint8_t address;
+        ESP_LOGI(TAG, "Scanning I2C bus...");
+        for (address = 1; address < 127; address++) {
+            i2c_master_bus_handle_t cmd = i2c_bus_;
+            esp_err_t ret;
+            ret = i2c_master_probe(cmd, address, -1);
+            if (ret == ESP_OK) {
+                ESP_LOGI(TAG, "Found I2C device at address 0x%02x", address);
+            }
+        }**/
+
         // Initialize PCA9557
         pca9557_ = new Pca9557(i2c_bus_, 0x19);
     }
@@ -220,8 +231,8 @@ private:
             power_save_timer_->WakeUp();
             auto codec = GetAudioCodec();
             auto volume = codec->output_volume() + 10;
-            if (volume > 150) {
-                volume = 150;
+            if (volume > 100) {
+                volume = 100;
             }
             codec->SetOutputVolume(volume);
             GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume));
@@ -229,7 +240,7 @@ private:
 
         volume_up_button_.OnLongPress([this]() {
             power_save_timer_->WakeUp();
-            GetAudioCodec()->SetOutputVolume(150);
+            GetAudioCodec()->SetOutputVolume(100);
             GetDisplay()->ShowNotification(Lang::Strings::MAX_VOLUME);
         });
 
@@ -297,6 +308,7 @@ private:
         };
 
         camera_ = new Esp32Camera(video_config);
+        camera_->SetVFlip(true);
     }
 
 public:

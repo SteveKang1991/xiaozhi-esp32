@@ -273,6 +273,7 @@ private:
         };
 
         camera_ = new Esp32Camera(video_config);
+        camera_->SetVFlip(true);
     }
 
 public:

@@ -21,7 +21,6 @@
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
-#include "esp_lcd_st7796.h"
 #include <driver/spi_common.h>
 
 #include <driver/rtc_io.h>
@@ -232,8 +231,8 @@ private:
             power_save_timer_->WakeUp();
             auto codec = GetAudioCodec();
             auto volume = codec->output_volume() + 10;
-            if (volume > 150) {
-                volume = 150;
+            if (volume > 100) {
+                volume = 100;
             }
             codec->SetOutputVolume(volume);
             GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume));
@@ -241,7 +240,7 @@ private:
 
         volume_up_button_.OnLongPress([this]() {
             power_save_timer_->WakeUp();
-            GetAudioCodec()->SetOutputVolume(150);
+            GetAudioCodec()->SetOutputVolume(100);
             GetDisplay()->ShowNotification(Lang::Strings::MAX_VOLUME);
         });
 
@@ -309,6 +308,7 @@ private:
         };
 
         camera_ = new Esp32Camera(video_config);
+        camera_->SetVFlip(true);
     }
 
 public:

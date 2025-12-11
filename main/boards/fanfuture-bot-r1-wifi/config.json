@@ -4,6 +4,7 @@
         {
             "name": "fanfuture-bot-r1-wifi",
             "sdkconfig_append": [
+                "CONFIG_LCD_ST7796_320X480=y",
                 "CONFIG_USE_DEVICE_AEC=y",
                 "CONFIG_CAMERA_GC0308=y",
                 "CONFIG_CAMERA_GC0308_AUTO_DETECT_DVP_INTERFACE_SENSOR=y",

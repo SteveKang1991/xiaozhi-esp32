@@ -142,6 +142,20 @@ private:
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
 
+        //vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+        // Scan for I2C devices
+        /**uint8_t address;
+        ESP_LOGI(TAG, "Scanning I2C bus...");
+        for (address = 1; address < 127; address++) {
+            i2c_master_bus_handle_t cmd = i2c_bus_;
+            esp_err_t ret;
+            ret = i2c_master_probe(cmd, address, -1);
+            if (ret == ESP_OK) {
+                ESP_LOGI(TAG, "Found I2C device at address 0x%02x", address);
+            }
+        }**/
+
         // Initialize PCA9557
         pca9557_ = new Pca9557(i2c_bus_, 0x19);
     }
@@ -261,6 +275,7 @@ private:
         };
 
         camera_ = new Esp32Camera(video_config);
+        camera_->SetVFlip(true);
     }
 
 public:
