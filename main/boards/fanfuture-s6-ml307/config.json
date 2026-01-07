@@ -5,7 +5,8 @@
             "name": "fanfuture-s6-ml307",
             "sdkconfig_append": [
                 "CONFIG_LCD_CUSTOM=y",
-                "CONFIG_USE_DEVICE_AEC=y"
+                "CONFIG_USE_DEVICE_AEC=y",
+                "CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING=y"
             ]
         },
         {
@@ -13,6 +14,7 @@
             "sdkconfig_append": [
                 "CONFIG_LCD_ST7789_240X320=y",
                 "CONFIG_USE_DEVICE_AEC=y",
+                "CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING=y",
                 "CONFIG_CAMERA_GC0308=y",
                 "CONFIG_CAMERA_GC0308_AUTO_DETECT_DVP_INTERFACE_SENSOR=y",
                 "CONFIG_CAMERA_GC0308_DVP_YUV422_640X480_16FPS=y"

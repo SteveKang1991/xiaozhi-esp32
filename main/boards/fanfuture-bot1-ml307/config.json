@@ -6,6 +6,7 @@
             "sdkconfig_append": [
                 "CONFIG_LCD_ST7796_320X480=y",
                 "CONFIG_USE_DEVICE_AEC=y",
+                "CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING=y",
                 "CONFIG_CAMERA_GC0308=y",
                 "CONFIG_CAMERA_GC0308_AUTO_DETECT_DVP_INTERFACE_SENSOR=y",
                 "CONFIG_CAMERA_GC0308_DVP_YUV422_640X480_16FPS=y"

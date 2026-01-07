@@ -157,10 +157,11 @@ private:
             power_save_timer_->WakeUp();
             auto& app = Application::GetInstance();
             if (GetNetworkType() == NetworkType::WIFI) {
-                if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
+                if (app.GetDeviceState() == kDeviceStateStarting) {
                     // cast to WifiBoard
                     auto& wifi_board = static_cast<WifiBoard&>(GetCurrentBoard());
-                    wifi_board.ResetWifiConfiguration();
+                    wifi_board.EnterWifiConfigMode();
+                    return;
                 }
             }
             app.ToggleChatState();
@@ -343,11 +344,11 @@ public:
         return true;
     }
 
-    virtual void SetPowerSaveMode(bool enabled) override {
-        if (!enabled) {
+    virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
+        if (level != PowerSaveLevel::LOW_POWER) {
             power_save_timer_->WakeUp();
         }
-        DualNetworkBoard::SetPowerSaveMode(enabled);
+        WifiBoard::SetPowerSaveLevel(level);
     }
 
     #if CONFIG_CAMERA_GC0308
