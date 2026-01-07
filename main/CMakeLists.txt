@@ -24,6 +24,7 @@ set(SOURCES "audio/audio_codec.cc"
             "display/lvgl_display/gif/lvgl_gif.cc"
             "display/lvgl_display/gif/gifdec.c"
             "display/lvgl_display/jpg/image_to_jpeg.cpp"
+            "display/lvgl_display/jpg/jpeg_to_image.c"
             "protocols/protocol.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
@@ -32,7 +33,7 @@ set(SOURCES "audio/audio_codec.cc"
             "application.cc"
             "ota.cc"
             "settings.cc"
-            "device_state_event.cc"
+            "device_state_machine.cc"
             "assets.cc"
             "main.cc"
             )
@@ -199,7 +200,9 @@ elseif(CONFIG_BOARD_TYPE_ESP_SPARKBOT)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
 elseif(CONFIG_BOARD_TYPE_ESP_SPOT_S3)
-    set(BOARD_TYPE "esp-spot-s3")
+    set(BOARD_TYPE "esp-spot")
+elseif(CONFIG_BOARD_TYPE_ESP_SPOT_C5)
+    set(BOARD_TYPE "esp-spot")
 elseif(CONFIG_BOARD_TYPE_ESP_HI)
     set(BOARD_TYPE "esp-hi")
     # Set ESP_HI emoji directory for DEFAULT_ASSETS_EXTRA_FILES
@@ -209,6 +212,11 @@ elseif(CONFIG_BOARD_TYPE_ECHOEAR)
     set(BUILTIN_TEXT_FONT font_puhui_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
+elseif(CONFIG_BOARD_TYPE_ESP_SENSAIRSHUTTLE)
+    set(BOARD_TYPE "esp-sensairshuttle")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
+    set(BUILTIN_ICON_FONT font_awesome_16_4)
+    set(DEFAULT_EMOJI_COLLECTION twemoji_32)
 elseif(CONFIG_BOARD_TYPE_WAVESHARE_S3_AUDIO_BOARD)
     set(BOARD_TYPE "waveshare-s3-audio-board")
     set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
@@ -282,6 +290,11 @@ elseif(CONFIG_BOARD_TYPE_WAVESHARE_C6_LCD_1_69)
     set(BOARD_TYPE "waveshare-c6-lcd-1.69")
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
+    set(DEFAULT_EMOJI_COLLECTION twemoji_64)
+elseif(CONFIG_BOARD_TYPE_WAVESHARE_C6_TOUCH_LCD_1_83)
+    set(BOARD_TYPE "waveshare-c6-touch-lcd-1.83")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
+    set(BUILTIN_ICON_FONT font_awesome_16_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
 elseif(CONFIG_BOARD_TYPE_WAVESHARE_C6_TOUCH_AMOLED_1_43)
     set(BOARD_TYPE "waveshare-c6-touch-amoled-1.43")
@@ -364,6 +377,11 @@ elseif(CONFIG_BOARD_TYPE_MOVECALL_MOJI_ESP32S3)
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
+elseif(CONFIG_BOARD_TYPE_MOVECALL_MOJI2_ESP32C5)
+    set(BOARD_TYPE "movecall-moji2-esp32c5")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
+    set(BUILTIN_ICON_FONT font_awesome_20_4)
+    set(DEFAULT_EMOJI_COLLECTION twemoji_64)
 elseif(CONFIG_BOARD_TYPE_MOVECALL_CUICAN_ESP32S3)
     set(BOARD_TYPE "movecall-cuican-esp32s3")
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
@@ -442,6 +460,11 @@ elseif(CONFIG_BOARD_TYPE_XINGZHI_CUBE_1_54TFT_ML307)
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
+elseif(CONFIG_BOARD_TYPE_XINGZHI_METAL_1_54_WIFI)
+    set(BOARD_TYPE "xingzhi-metal-1.54-wifi")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
+    set(BUILTIN_ICON_FONT font_awesome_20_4)
+    set(DEFAULT_EMOJI_COLLECTION twemoji_64)  
 elseif(CONFIG_BOARD_TYPE_SEEED_STUDIO_SENSECAP_WATCHER)
     set(BOARD_TYPE "sensecap-watcher")
     set(BUILTIN_TEXT_FONT font_puhui_basic_30_4)
@@ -550,30 +573,10 @@ elseif(CONFIG_BOARD_TYPE_AIPI_LITE)
     set(BUILTIN_TEXT_FONT font_puhui_basic_14_1)
     set(BUILTIN_ICON_FONT font_awesome_14_1)
     set(DEFAULT_EMOJI_COLLECTION twemoji_32)
-elseif(CONFIG_BOARD_TYPE_FANFUTURE_BOT1_WIFI)
-    set(BOARD_TYPE "fanfuture-bot1-wifi")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
-    set(BUILTIN_ICON_FONT font_awesome_16_4)
-elseif(CONFIG_BOARD_TYPE_FANFUTURE_BOT1_ML307)
-    set(BOARD_TYPE "fanfuture-bot1-ml307")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
-    set(BUILTIN_ICON_FONT font_awesome_16_4)
-elseif(CONFIG_BOARD_TYPE_FANFUTURE_S6_WIFI)
-    set(BOARD_TYPE "fanfuture-s6-wifi")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
-    set(BUILTIN_ICON_FONT font_awesome_16_4)
-elseif(CONFIG_BOARD_TYPE_FANFUTURE_S6_ML307)
-    set(BOARD_TYPE "fanfuture-s6-ml307")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
-    set(BUILTIN_ICON_FONT font_awesome_16_4)
-elseif(CONFIG_BOARD_TYPE_FANFUTURE_WIFI_22)
-    set(BOARD_TYPE "fanfuture-wifi-22")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
-    set(BUILTIN_ICON_FONT font_awesome_16_4)
-elseif(CONFIG_BOARD_TYPE_FANFUTURE_ML307_22)
-    set(BOARD_TYPE "fanfuture-ml307-22")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
-    set(BUILTIN_ICON_FONT font_awesome_16_4)
+elseif(CONFIG_BOARD_TYPE_HU_087)
+    set(BOARD_TYPE "hu-087")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_14_1)
+    set(BUILTIN_ICON_FONT font_awesome_14_1)
 endif()
 
 file(GLOB BOARD_SOURCES
@@ -595,6 +598,10 @@ else()
     list(APPEND SOURCES "audio/wake_words/esp_wake_word.cc")
 endif()
 
+# Auto Select Additional Sources
+if (CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
+    list(APPEND SOURCES "boards/common/blufi.cpp")
+endif ()
 # Select language directory according to Kconfig
 if(CONFIG_LANGUAGE_ZH_CN)
     set(LANG_DIR "zh-CN")
@@ -711,7 +718,8 @@ if(CONFIG_IDF_TARGET_ESP32)
                              "audio/codecs/es8389_audio_codec.cc"
                              "led/gpio_led.cc"
                              "${CMAKE_CURRENT_SOURCE_DIR}/boards/common/esp32_camera.cc"
-                            "display/lvgl_display/jpg/image_to_jpeg.cpp"
+                             "display/lvgl_display/jpg/image_to_jpeg.cpp"
+                             "display/lvgl_display/jpg/jpeg_to_image.c"
                              )
 endif()
 
