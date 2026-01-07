@@ -14,6 +14,7 @@
 #include "power_manager.h"
 #include "lightam_controller.h"
 #include "fan_lcd35_display.h"
+#include "custom_audio_codec.h"
 
 #include <wifi_station.h>
 #include <esp_log.h>
@@ -30,51 +31,6 @@
  
 #define TAG "FanFutureBot1WiFiBoard"
 
-class Pca9557 : public I2cDevice {
-public:
-    Pca9557(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {
-        WriteReg(0x01, 0x03);
-        WriteReg(0x03, 0xf8);
-    }
-
-    void SetOutputState(uint8_t bit, uint8_t level) {
-        uint8_t data = ReadReg(0x01);
-        data = (data & ~(1 << bit)) | (level << bit);
-        WriteReg(0x01, data);
-    }
-};
-
-class CustomAudioCodec : public BoxAudioCodec {
-private:
-    Pca9557* pca9557_;
-
-public:
-    CustomAudioCodec(i2c_master_bus_handle_t i2c_bus, Pca9557* pca9557) 
-        : BoxAudioCodec(i2c_bus, 
-                       AUDIO_INPUT_SAMPLE_RATE, 
-                       AUDIO_OUTPUT_SAMPLE_RATE,
-                       AUDIO_I2S_GPIO_MCLK, 
-                       AUDIO_I2S_GPIO_BCLK, 
-                       AUDIO_I2S_GPIO_WS, 
-                       AUDIO_I2S_GPIO_DOUT, 
-                       AUDIO_I2S_GPIO_DIN,
-                       GPIO_NUM_NC, 
-                       AUDIO_CODEC_ES8311_ADDR, 
-                       AUDIO_CODEC_ES7210_ADDR, 
-                       AUDIO_INPUT_REFERENCE),
-          pca9557_(pca9557) {
-    }
-
-    virtual void EnableOutput(bool enable) override {
-        BoxAudioCodec::EnableOutput(enable);
-        if (enable) {
-            pca9557_->SetOutputState(1, 1);
-        } else {
-            pca9557_->SetOutputState(1, 0);
-        }
-    }
-};
-
 class FanFutureBot1WiFiBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;
@@ -87,6 +43,7 @@ private:
     esp_lcd_panel_handle_t panel_ = nullptr;
     Pca9557* pca9557_;
     Esp32Camera* camera_;
+    bool aec_device = false;
 
     void InitializePowerManager() {
         power_manager_ = new PowerManager(GPIO_NUM_11);
@@ -224,6 +181,14 @@ private:
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateIdle) {
                 app.SetAecMode(app.GetAecMode() == kAecOff ? kAecOnDeviceSide : kAecOff);
+
+                aec_device = app.GetAecMode() == kAecOnDeviceSide ? true : false;
+                Settings settings("aecMode", true);
+                settings.SetBool("aec_device", aec_device);
+
+                auto codec = GetAudioCodec();
+                auto volume = codec->output_volume();
+                codec->SetOutputVolume(volume);
             }
             #endif
         });
@@ -293,6 +258,13 @@ public:
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }  
+
+        #if CONFIG_USE_DEVICE_AEC
+        Settings settings("aecMode", false);
+        aec_device = settings.GetBool("aec_device", aec_device);
+        auto& app = Application::GetInstance();
+        app.SetAecMode(aec_device ? kAecOnDeviceSide : kAecOff);
+        #endif
     }
 
     /**virtual Led* GetLed() override {

@@ -303,7 +303,7 @@ private:
         lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0); // Center text alignment
         lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
         //lv_obj_align(chat_message_label_, LV_ALIGN_CENTER, 0, 0); // Vertically and horizontally centered in bottom_bar_
-        lv_obj_align(chat_message_label_, LV_ALIGN_CENTER, 0, -10);
+        lv_obj_align(chat_message_label_, LV_ALIGN_CENTER, 0, -5);
 
         low_battery_popup_ = lv_obj_create(screen);
         lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
