@@ -38,7 +38,7 @@
 #define DISPLAY_MIRROR_Y false                // 是否垂直镜像显示（true 表示镜像）
 #define DISPLAY_SWAP_XY false                 // 是否交换 X 和 Y 轴（true 表示交换）
 #define DISPLAY_INVERT_COLOR    true          // 是否反转颜色（true 表示反转）
-#define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_RGB  // RGB 颜色顺序（RGB 表示红绿蓝顺序）
+#define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_BGR  // RGB 颜色顺序（RGB 表示红绿蓝顺序）
 #define DISPLAY_OFFSET_X  0                   // 显示屏 X 轴偏移量（像素）
 #define DISPLAY_OFFSET_Y  0                   // 显示屏 Y 轴偏移量（像素）
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false // 背光输出是否反转（false 表示不反转）

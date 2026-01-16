@@ -233,7 +233,7 @@ public:
     virtual void SetOutputVolume(int volume) override {
         auto& app = Application::GetInstance();
         if (app.GetAecMode() == kAecOnDeviceSide) {
-            ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume*0.5));
+            ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume*0.7));
         }
         else {
             ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume*0.9));
@@ -282,7 +282,7 @@ public:
             ESP_ERROR_CHECK(esp_codec_dev_open(output_dev_, &fs));
             auto& app = Application::GetInstance();
             if (app.GetAecMode() == kAecOnDeviceSide) {
-                ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_*0.5));
+                ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_*0.7));
             }
             else {
                 ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_*0.9));
