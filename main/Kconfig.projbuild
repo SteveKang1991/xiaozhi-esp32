@@ -488,6 +488,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_FANFUTURE_S6_ML307
         bool "幻次元FanFuture S6(Ml307)"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_FANFUTURE_HOLO1_P450_WiFI
+        bool "幻次元FanFuture Holo1 P450(WiFi)"
+        depends on IDF_TARGET_ESP32P4
 endchoice
 
 choice
