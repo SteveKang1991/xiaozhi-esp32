@@ -1,5 +1,5 @@
-#ifndef FAN_LCD35_DISPLAY_H
-#define FAN_LCD35_DISPLAY_H
+#ifndef FAN_LCD778928_DISPLAY_H
+#define FAN_LCD778928_DISPLAY_H
 
 #include "lcd_display.h"
 #include "gif/lvgl_gif.h"
@@ -18,12 +18,12 @@
 
 #include "board.h"
 
-#define TAG "FanLcd35Display"
+#define TAG "FanLcd778928Display"
 
-// FAN LCD 3.5寸显示器
-class FanLcd35Display : public LcdDisplay {
+// FAN LCD 2.8寸显示器
+class FanLcd778928Display : public LcdDisplay {
 public:
-    FanLcd35Display(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
+    FanLcd778928Display(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
                            int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool swap_xy)
     : LcdDisplay(panel_io, panel, width, height) {
 
@@ -346,4 +346,4 @@ private:
     }
 };
 
-#endif // FAN_LCD35_DISPLAY_H
+#endif // FAN_LCD778928_DISPLAY_H

@@ -649,6 +649,10 @@ elseif(CONFIG_BOARD_TYPE_FANFUTURE_HOLO1_P450_WiFI)
     set(BOARD_TYPE "fanfuture-holo1-p450-wifi")
     set(BUILTIN_TEXT_FONT font_puhui_basic_30_4)
     set(BUILTIN_ICON_FONT font_awesome_30_4)
+elseif(CONFIG_BOARD_TYPE_FANFUTURE_HOLO1_S3778928_WiFI)
+    set(BOARD_TYPE "fanfuture-holo1-s3778928-wifi")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
+    set(BUILTIN_ICON_FONT font_awesome_16_4)
 endif()
 
 file(GLOB BOARD_SOURCES
