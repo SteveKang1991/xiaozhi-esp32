@@ -15,6 +15,7 @@
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
 #include <cstring>
+#include <src/misc/cache/lv_cache.h>
 
 #include "board.h"
 
@@ -40,7 +41,14 @@ public:
 
         // Set the display to on
         ESP_LOGI(TAG, "Turning display on");
-        ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
+        {
+            esp_err_t __err = esp_lcd_panel_disp_on_off(panel_, true);
+            if (__err == ESP_ERR_NOT_SUPPORTED) {
+                ESP_LOGW(TAG, "Panel does not support disp_on_off; assuming ON");
+            } else {
+                ESP_ERROR_CHECK(__err);
+            }
+        }
 
         ESP_LOGI(TAG, "Initialize LVGL library");
         lv_init();
