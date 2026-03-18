@@ -14,9 +14,9 @@
 #include "esp_ldo_regulator.h"
 #include <esp_lcd_panel_vendor.h>
 
-#define TAG "FanFutureHolo1P450WiFiBoard"
+#define TAG "FanFutureP450WiFiBoard"
 
-class FanFutureHolo1P450WiFiBoard : public WifiBoard {
+class FanFutureP450WiFiBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t codec_i2c_bus_;
     LcdDisplay* display_;
@@ -131,7 +131,7 @@ private:
     }
 
 public:
-    FanFutureHolo1P450WiFiBoard() :
+    FanFutureP450WiFiBoard() :
         boot_button_(BOOT_BUTTON_GPIO) {
         InitializeCodecI2c();
         InitializeIli9881cDisplay();
@@ -157,4 +157,4 @@ public:
 
 };
 
-DECLARE_BOARD(FanFutureHolo1P450WiFiBoard);
+DECLARE_BOARD(FanFutureP450WiFiBoard);

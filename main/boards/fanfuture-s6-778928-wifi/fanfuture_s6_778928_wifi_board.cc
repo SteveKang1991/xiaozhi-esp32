@@ -29,9 +29,9 @@
 #include <esp_sleep.h>
 #include <esp_ota_ops.h> 
  
-#define TAG "FanFutureHolo1S3778928WiFiBoard"
+#define TAG "FanFutureS6778928WiFiBoard"
 
-class FanFutureHolo1S3778928WiFiBoard : public WifiBoard {
+class FanFutureS6778928WiFiBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;
     Button boot_button_;
@@ -237,7 +237,7 @@ private:
     }
 
 public:
-    FanFutureHolo1S3778928WiFiBoard() :
+    FanFutureS6778928WiFiBoard() :
         boot_button_(BOOT_BUTTON_GPIO),
         mode_button_(MODE_BUTTON_GPIO) {
         InitializePowerManager();
@@ -308,4 +308,4 @@ public:
     }
 };
 
-DECLARE_BOARD(FanFutureHolo1S3778928WiFiBoard);
+DECLARE_BOARD(FanFutureS6778928WiFiBoard);
