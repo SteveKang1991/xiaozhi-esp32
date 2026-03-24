@@ -178,6 +178,9 @@ private:
         auto icon_font = lvgl_theme->icon_font()->font();
         auto large_icon_font = lvgl_theme->large_icon_font()->font();
 
+        /* 底部一排：网络 | 状态文案 | 电量等；高度用于字幕与低电量条避让 */
+        const int ui_bottom_inset = lvgl_theme->spacing(2);
+
         auto screen = lv_screen_active();
         lv_obj_set_style_text_font(screen, text_font, 0);
         lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
@@ -216,7 +219,7 @@ private:
         lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
 
         /* Layer 1: Top bar - for status icons */
-        top_bar_ = lv_obj_create(screen);
+        /**top_bar_ = lv_obj_create(screen);
         lv_obj_set_size(top_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
         lv_obj_set_style_radius(top_bar_, 0, 0);
         lv_obj_set_style_bg_opa(top_bar_, LV_OPA_50, 0);  // 50% opacity background
@@ -246,31 +249,24 @@ private:
         lv_obj_set_style_border_width(right_icons, 0, 0);
         lv_obj_set_style_pad_all(right_icons, 0, 0);
         lv_obj_set_flex_flow(right_icons, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(right_icons, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_flex_align(right_icons, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);**/
 
-        // Left icon
-        /**network_label_ = lv_label_create(screen);
+        // Left icon（屏幕最下方一排左侧）
+        network_label_ = lv_label_create(screen);
         lv_label_set_text(network_label_, "");
-        // 保留原字体、文字颜色样式
         lv_obj_set_style_text_font(network_label_, icon_font, 0);
         lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
-        // 对齐：顶部左侧，匹配原top_bar_的左内边距+垂直居中
-        // x偏移=原top_bar_的left padding（spacing(4)），y偏移=垂直居中（top_bar_的上下padding均值）
-        lv_obj_align(network_label_, LV_ALIGN_TOP_LEFT, lvgl_theme->spacing(4), lvgl_theme->spacing(2));
+        lv_obj_align(network_label_, LV_ALIGN_BOTTOM_LEFT, lvgl_theme->spacing(4), -ui_bottom_inset);
 
-        // Right icons container
+        // Right icons container（屏幕最下方一排右侧）
         lv_obj_t* right_icons = lv_obj_create(screen);
-        // 保留原right_icons的样式（透明背景、无边框、无内边距）
         lv_obj_set_size(right_icons, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
         lv_obj_set_style_bg_opa(right_icons, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(right_icons, 0, 0);
         lv_obj_set_style_pad_all(right_icons, 0, 0);
-        // 保留原flex布局（横向排列、右对齐、垂直居中）
         lv_obj_set_flex_flow(right_icons, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(right_icons, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        // 对齐：顶部右侧，匹配原top_bar_的右内边距+垂直居中
-        // x偏移=-原top_bar_的right padding（spacing(4)），y偏移和network_label_一致
-        lv_obj_align(right_icons, LV_ALIGN_TOP_RIGHT, -lvgl_theme->spacing(4), lvgl_theme->spacing(2));**/
+        lv_obj_align(right_icons, LV_ALIGN_BOTTOM_RIGHT, -lvgl_theme->spacing(4), -ui_bottom_inset);
 
         mute_label_ = lv_label_create(right_icons);
         lv_label_set_text(mute_label_, "");
@@ -283,19 +279,19 @@ private:
         lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
         lv_obj_set_style_margin_left(battery_label_, lvgl_theme->spacing(2), 0);
 
-        /* Layer 2: Status bar - for center text labels */
+        /* 状态栏：与网络/电量同一排，居中（屏幕最下方） */
         status_bar_ = lv_obj_create(screen);
         lv_obj_set_size(status_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
         lv_obj_set_style_radius(status_bar_, 0, 0);
         lv_obj_set_style_bg_opa(status_bar_, LV_OPA_TRANSP, 0);  // Transparent background
         lv_obj_set_style_border_width(status_bar_, 0, 0);
         lv_obj_set_style_pad_all(status_bar_, 0, 0);
-        lv_obj_set_style_pad_top(status_bar_, lvgl_theme->spacing(2), 0);
-        lv_obj_set_style_pad_bottom(status_bar_, lvgl_theme->spacing(2), 0);
+        //lv_obj_set_style_pad_top(status_bar_, lvgl_theme->spacing(2), 0);
+        //lv_obj_set_style_pad_bottom(status_bar_, lvgl_theme->spacing(2), 0);
         lv_obj_set_scrollbar_mode(status_bar_, LV_SCROLLBAR_MODE_OFF);
         lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);  // Use absolute positioning
-        lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);  // Overlap with top_bar_
-        lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(status_bar_, LV_ALIGN_BOTTOM_MID, 0, -ui_bottom_inset);
+        //lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
 
         notification_label_ = lv_label_create(status_bar_);
         lv_obj_set_width(notification_label_, LV_HOR_RES * 0.75);
@@ -337,7 +333,7 @@ private:
         lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0); // Center text alignment
         lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
         //lv_obj_align(chat_message_label_, LV_ALIGN_CENTER, 0, 0); // Vertically and horizontally centered in bottom_bar_
-        lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_MID, 0, -15);
+        lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_MID, 0, -35);
 
         low_battery_popup_ = lv_obj_create(screen);
         lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
