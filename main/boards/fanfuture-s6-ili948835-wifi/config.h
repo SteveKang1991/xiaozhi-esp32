@@ -32,19 +32,20 @@
 #define DISPLAY_DC_PIN        GPIO_NUM_7     // 显示屏数据/命令选择引脚
 #define DISPLAY_RST_PIN       GPIO_NUM_15    // 显示屏复位引脚
 
-#ifdef CONFIG_LCD_ST7789_240X320
-#define LCD_TYPE_ST7789_SERIAL
-#define DISPLAY_WIDTH   240                   // 显示屏宽度（像素）
-#define DISPLAY_HEIGHT  320                   // 显示屏高度（像素）
-#define DISPLAY_MIRROR_X false                 // 是否水平镜像显示（false 表示不镜像）
-#define DISPLAY_MIRROR_Y false                // 是否垂直镜像显示（true 表示镜像）
-#define DISPLAY_SWAP_XY false                 // 是否交换 X 和 Y 轴（true 表示交换）
-#define DISPLAY_INVERT_COLOR    true          // 是否反转颜色（true 表示反转）
-#define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_RGB  // RGB 颜色顺序（RGB 表示红绿蓝顺序）
-#define DISPLAY_OFFSET_X  0                   // 显示屏 X 轴偏移量（像素）
-#define DISPLAY_OFFSET_Y  0                   // 显示屏 Y 轴偏移量（像素）
-#define DISPLAY_BACKLIGHT_OUTPUT_INVERT false // 背光输出是否反转（false 表示不反转）
-#define DISPLAY_SPI_MODE 3
+/* ILI9488 320x480 SPI */
+#ifdef CONFIG_LCD_ILI9488_320X480
+#define LCD_TYPE_ILI9488_SERIAL
+#define DISPLAY_WIDTH   320
+#define DISPLAY_HEIGHT  480
+#define DISPLAY_MIRROR_X false
+#define DISPLAY_MIRROR_Y false
+#define DISPLAY_SWAP_XY false
+#define DISPLAY_INVERT_COLOR true
+#define DISPLAY_RGB_ORDER LCD_RGB_ELEMENT_ORDER_RGB
+#define DISPLAY_OFFSET_X  0
+#define DISPLAY_OFFSET_Y  0
+#define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
+#define DISPLAY_SPI_MODE 0
 #endif
 
 /* Camera pins */

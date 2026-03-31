@@ -22,7 +22,7 @@
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
-#include "esp_lcd_st7796.h"
+#include "esp_lcd_ili9488.h"
 #include <driver/spi_common.h>
 
 #include <driver/rtc_io.h>
@@ -141,13 +141,14 @@ private:
         io_config.lcd_param_bits = 8;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io_));
 
-        // 初始化液晶屏驱动芯片
-        ESP_LOGD(TAG, "Install LCD driver");
+        ESP_LOGD(TAG, "Install LCD driver (ILI9488)");
         esp_lcd_panel_dev_config_t panel_config = {};
         panel_config.reset_gpio_num = DISPLAY_RST_PIN;
         panel_config.rgb_ele_order = DISPLAY_RGB_ORDER;
-        panel_config.bits_per_pixel = 16;
-        ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(panel_io_, &panel_config, &panel_));
+        /* atanisoft SPI：非 16bpp + buffer_size(像素) 覆盖单次 draw_bitmap 最大像素（LVGL 约 20 行） */
+        panel_config.bits_per_pixel = 18;
+        const size_t ili9488_spi_buf_pixels = (size_t)DISPLAY_WIDTH * 40;
+        ESP_ERROR_CHECK(esp_lcd_new_panel_ili9488(panel_io_, &panel_config, ili9488_spi_buf_pixels, &panel_));
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_));
         ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_, DISPLAY_INVERT_COLOR));

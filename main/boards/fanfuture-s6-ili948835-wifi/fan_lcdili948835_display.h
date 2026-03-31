@@ -1,5 +1,5 @@
-#ifndef FAN_LCD778928_DISPLAY_H
-#define FAN_LCD778928_DISPLAY_H
+#ifndef FAN_LCD_ILI948835_DISPLAY_H
+#define FAN_LCD_ILI948835_DISPLAY_H
 
 #include "lcd_display.h"
 #include "gif/lvgl_gif.h"
@@ -21,7 +21,7 @@
 
 #define TAG "FanLcdILI948835Display"
 
-// FAN LCD 2.8寸显示器
+// ILI9488 320x480 SPI（与 fan_lcd778928 同结构，LVGL 参数与 FanLcd778928Display 一致）
 class FanLcdILI948835Display : public LcdDisplay {
 public:
     FanLcdILI948835Display(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
@@ -350,4 +350,4 @@ private:
     }
 };
 
-#endif // FanLcdILI948835Display
+#endif // FAN_LCD_ILI948835_DISPLAY_H
