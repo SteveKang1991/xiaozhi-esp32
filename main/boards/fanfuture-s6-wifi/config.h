@@ -20,6 +20,10 @@
 #define AUDIO_CODEC_ES8311_ADDR  ES8311_CODEC_DEFAULT_ADDR
 #define AUDIO_CODEC_ES7210_ADDR  0x82
 
+/** AS5600 磁性角度传感器（与 Codec/PCA9557 共用 I2C 总线） */
+#define AS5600_I2C_ADDR       0x36
+#define AS5600_REG_RAW_ANGLE  0x0C
+
 //#define BUILTIN_LED_GPIO        GPIO_NUM_42  // 板载 LED 引脚，用于状态指示
 #define BOOT_BUTTON_GPIO          GPIO_NUM_0   // BOOT 按钮引脚，通常用于复位或进入下载模式
 #define MODE_BUTTON_GPIO          GPIO_NUM_46  // Mode按钮引脚

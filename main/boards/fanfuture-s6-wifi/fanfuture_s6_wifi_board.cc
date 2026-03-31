@@ -15,10 +15,13 @@
 #include "lightam_controller.h"
 #include "fan_lcd20_display.h"
 #include "custom_audio_codec.h"
+#include "as5600.h"
 
 #include <wifi_station.h>
 #include <esp_log.h>
 #include <driver/i2c_master.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -45,6 +48,17 @@ private:
     Pca9557* pca9557_;
     Esp32Camera* camera_;
     bool aec_device = false;
+    As5600* as5600_ = nullptr;
+
+    static void As5600LogTask(void* arg) {
+        As5600* sensor = static_cast<As5600*>(arg);
+        while (true) {
+            uint16_t raw = sensor->ReadRawAngle();
+            float deg = As5600::RawToDegrees(raw);
+            ESP_LOGI(TAG, "AS5600 angle: %.2f deg (raw=%u)", deg, static_cast<unsigned>(raw));
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+    }
 
     void InitializePowerManager() {
         power_manager_ = new PowerManager(GPIO_NUM_9);
@@ -114,6 +128,19 @@ private:
 
         // Initialize PCA9557
         pca9557_ = new Pca9557(i2c_bus_, 0x19);
+
+        /* AS5600 角度传感器（与音频编解码共用 I2C1） */
+        /**if (i2c_master_probe(i2c_bus_, AS5600_I2C_ADDR, pdMS_TO_TICKS(100)) == ESP_OK) {
+            as5600_ = new As5600(i2c_bus_);
+            ESP_LOGI(TAG, "AS5600 detected at 0x%02x, start angle log task", AS5600_I2C_ADDR);
+            if (xTaskCreate(As5600LogTask, "as5600_log", 4096, as5600_, 3, nullptr) != pdPASS) {
+                ESP_LOGE(TAG, "Failed to create AS5600 log task");
+                delete as5600_;
+                as5600_ = nullptr;
+            }
+        } else {
+            ESP_LOGW(TAG, "AS5600 not found on I2C (0x%02x), skip angle sensor", AS5600_I2C_ADDR);
+        }**/
     }
 
     void InitializeSpi() {
