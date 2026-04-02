@@ -21,7 +21,7 @@
 
 #define TAG "FanLcdILI948835Display"
 
-// ILI9488 320x480 SPI（与 fan_lcd778928 同结构，LVGL 参数与 FanLcd778928Display 一致）
+// ILI9488 320x480 SPI（与 fan_lcd778928 同结构）
 class FanLcdILI948835Display : public LcdDisplay {
 public:
     FanLcdILI948835Display(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
@@ -68,17 +68,18 @@ public:
         ESP_LOGI(TAG, "Initialize LVGL port");
         lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
         port_cfg.task_priority = 1;
-    #if CONFIG_SOC_CPU_CORES_NUM > 1
+#if CONFIG_SOC_CPU_CORES_NUM > 1
         port_cfg.task_affinity = 1;
-    #endif
+#endif
         lvgl_port_init(&port_cfg);
 
+        /* 半屏双缓冲+PSRAM 易 alloc 失败→仅白底无 UI；单缓冲+内部 SRAM 更稳 */
         ESP_LOGI(TAG, "Adding LCD display");
         const lvgl_port_display_cfg_t display_cfg = {
             .io_handle = panel_io_,
             .panel_handle = panel_,
             .control_handle = nullptr,
-            .buffer_size = static_cast<uint32_t>(width_ * 20),
+            .buffer_size = static_cast<uint32_t>(width_ * 28),
             .double_buffer = false,
             .trans_size = 0,
             .hres = static_cast<uint32_t>(width_),

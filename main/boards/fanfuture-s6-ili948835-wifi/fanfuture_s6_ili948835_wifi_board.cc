@@ -23,6 +23,7 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include "esp_lcd_ili9488.h"
+#include <esp_lcd_panel_commands.h>
 #include <driver/spi_common.h>
 
 #include <driver/rtc_io.h>
@@ -30,6 +31,59 @@
 #include <esp_ota_ops.h> 
  
 #define TAG "FanFutureS6ILI948835WiFiBoard"
+
+/*
+ * ILI9488 V090：B1 须 2 参数、B6 须 3 参数；NL=0x3B → 480 行。
+ * 残影/紫边：恢复 CMI 的 C5/B6(0x22)；B4 试列反转 0x00；B1 略抬帧率(RTN↓)；SPI 见 config.h。
+ */
+namespace {
+
+static const uint8_t ili9488_cmi35_e0[] = {0x00, 0x06, 0x0C, 0x07, 0x15, 0x0A, 0x3C, 0x89, 0x47, 0x08, 0x10, 0x0E, 0x1E, 0x22, 0x0F};
+static const uint8_t ili9488_cmi35_e1[] = {0x00, 0x1F, 0x23, 0x07, 0x12, 0x07, 0x32, 0x34, 0x47, 0x04, 0x0D, 0x0B, 0x34, 0x39, 0x0F};
+static const uint8_t ili9488_cmi35_c0[] = {0x13, 0x13};
+static const uint8_t ili9488_cmi35_c1[] = {0x41};
+static const uint8_t ili9488_cmi35_c5[] = {0x00, 0x2E, 0x80};
+/* 0x36：与 DISPLAY_RGB_ORDER 一致；需 BGR 子像素时再改 bit3 */
+static const uint8_t ili9488_cmi35_madctl[] = {0x00};
+/* SPI 18bpp（0x66）；本模组用 16bpp+0x55 易全白/无图 */
+static const uint8_t ili9488_cmi35_colmod[] = {0x66};
+static const uint8_t ili9488_cmi35_b0[] = {0x00};
+/* B1：第二字节 RTNA 略小→帧率略高，减轻液晶保持；异常则改回 {0xA0,0x11} */
+static const uint8_t ili9488_cmi35_b1[] = {0xA0, 0x06};
+/* B4：列反转(DINV=0x00)；紫边仍重再试 0x02(2-dot) 或 0x03 */
+static const uint8_t ili9488_cmi35_b4[] = {0x00};
+static const uint8_t ili9488_cmi35_b6[] = {0x02, 0x22, 0x3B};
+static const uint8_t ili9488_cmi35_b7[] = {0xC6};
+static const uint8_t ili9488_cmi35_be[] = {0x00, 0x04};
+static const uint8_t ili9488_cmi35_e9[] = {0x00};
+static const uint8_t ili9488_cmi35_f7[] = {0xA9, 0x51, 0x2C, 0x82};
+
+static const ili9488_lcd_init_cmd_t ili9488_cmi35_init_cmds[] = {
+    {0xE0, ili9488_cmi35_e0, sizeof(ili9488_cmi35_e0), 0},
+    {0xE1, ili9488_cmi35_e1, sizeof(ili9488_cmi35_e1), 0},
+    {0xC0, ili9488_cmi35_c0, sizeof(ili9488_cmi35_c0), 0},
+    {0xC1, ili9488_cmi35_c1, sizeof(ili9488_cmi35_c1), 0},
+    {0xC5, ili9488_cmi35_c5, sizeof(ili9488_cmi35_c5), 0},
+    {LCD_CMD_MADCTL, ili9488_cmi35_madctl, sizeof(ili9488_cmi35_madctl), 0},
+    {LCD_CMD_COLMOD, ili9488_cmi35_colmod, sizeof(ili9488_cmi35_colmod), 0},
+    {0xB0, ili9488_cmi35_b0, sizeof(ili9488_cmi35_b0), 0},
+    {0xB1, ili9488_cmi35_b1, sizeof(ili9488_cmi35_b1), 0},
+    {0xB4, ili9488_cmi35_b4, sizeof(ili9488_cmi35_b4), 0},
+    {0xB6, ili9488_cmi35_b6, sizeof(ili9488_cmi35_b6), 0},
+    {0xB7, ili9488_cmi35_b7, sizeof(ili9488_cmi35_b7), 0},
+    {0xBE, ili9488_cmi35_be, sizeof(ili9488_cmi35_be), 0},
+    {0xE9, ili9488_cmi35_e9, sizeof(ili9488_cmi35_e9), 0},
+    {0xF7, ili9488_cmi35_f7, sizeof(ili9488_cmi35_f7), 0},
+    {LCD_CMD_SLPOUT, nullptr, 0, 120},
+    {LCD_CMD_DISPON, nullptr, 0, 100},
+};
+
+static const ili9488_vendor_config_t ili9488_cmi35_vendor_config = {
+    ili9488_cmi35_init_cmds,
+    static_cast<uint16_t>(sizeof(ili9488_cmi35_init_cmds) / sizeof(ili9488_cmi35_init_cmds[0])),
+};
+
+}  // namespace
 
 class FanFutureS6ILI948835WiFiBoard : public WifiBoard {
 private:
@@ -135,19 +189,21 @@ private:
         io_config.cs_gpio_num = GPIO_NUM_NC;
         io_config.dc_gpio_num = DISPLAY_DC_PIN;
         io_config.spi_mode = DISPLAY_SPI_MODE;
-        io_config.pclk_hz = 40 * 1000 * 1000;
+        io_config.pclk_hz = DISPLAY_SPI_PCLK_HZ;
         io_config.trans_queue_depth = 10;
         io_config.lcd_cmd_bits = 8;
         io_config.lcd_param_bits = 8;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io_));
 
-        ESP_LOGD(TAG, "Install LCD driver (ILI9488)");
+        /* 面板：CMI 3.5 ILI9488；初始化表见本文件 ili9488_cmi35_init_cmds + vendor_config */
+        ESP_LOGD(TAG, "Install LCD driver (ILI9488 CMI3.5, local esp_lcd_ili9488)");
         esp_lcd_panel_dev_config_t panel_config = {};
         panel_config.reset_gpio_num = DISPLAY_RST_PIN;
         panel_config.rgb_ele_order = DISPLAY_RGB_ORDER;
-        /* atanisoft SPI：非 16bpp + buffer_size(像素) 覆盖单次 draw_bitmap 最大像素（LVGL 约 20 行） */
+        panel_config.vendor_config = (void *)&ili9488_cmi35_vendor_config;
+        /* 18bpp：驱动内 RGB565→24bit 写屏；缓冲须 ≥ LVGL 单次刷新行数 */
         panel_config.bits_per_pixel = 18;
-        const size_t ili9488_spi_buf_pixels = (size_t)DISPLAY_WIDTH * 40;
+        const size_t ili9488_spi_buf_pixels = (size_t)DISPLAY_WIDTH * 28;
         ESP_ERROR_CHECK(esp_lcd_new_panel_ili9488(panel_io_, &panel_config, ili9488_spi_buf_pixels, &panel_));
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_));

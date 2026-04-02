@@ -32,20 +32,25 @@
 #define DISPLAY_DC_PIN        GPIO_NUM_7     // 显示屏数据/命令选择引脚
 #define DISPLAY_RST_PIN       GPIO_NUM_15    // 显示屏复位引脚
 
-/* ILI9488 320x480 SPI */
+/* ILI9488 320x480 SPI — CMI 3.5；MX 清 0：mirror_x=true；驱动：工程 components/esp_lcd_ili9488 */
 #ifdef CONFIG_LCD_ILI9488_320X480
 #define LCD_TYPE_ILI9488_SERIAL
 #define DISPLAY_WIDTH   320
 #define DISPLAY_HEIGHT  480
-#define DISPLAY_MIRROR_X false
+#define DISPLAY_MIRROR_X true
 #define DISPLAY_MIRROR_Y false
 #define DISPLAY_SWAP_XY false
+/*
+ * 21h(INVON) 与 B4 行列反转不同；部分模组在 INVOFF 下肤色/表情会偏蓝，需 INVON 才正常。
+ * 仅通过 esp_lcd_panel_invert_color(true) 发一次 INVON，init 表内不再写 21h，避免与 B4 混淆。
+ */
 #define DISPLAY_INVERT_COLOR true
 #define DISPLAY_RGB_ORDER LCD_RGB_ELEMENT_ORDER_RGB
 #define DISPLAY_OFFSET_X  0
 #define DISPLAY_OFFSET_Y  0
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
 #define DISPLAY_SPI_MODE 0
+#define DISPLAY_SPI_PCLK_HZ (40 * 1000 * 1000)
 #endif
 
 /* Camera pins */

@@ -952,6 +952,7 @@ idf_component_register(SRCS ${SOURCES}
                         efuse
                         bt
                         fatfs
+                        esp_lcd_ili9488
                     )
 
 # Use target_compile_definitions to define BOARD_TYPE, BOARD_NAME
