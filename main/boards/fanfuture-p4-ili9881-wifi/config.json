@@ -1,0 +1,9 @@
+{
+    "target": "esp32p4",
+    "builds": [
+        {
+            "name": "fanfuture_holo1_p450_wifi_board",
+            "sdkconfig_append": []
+        }
+    ]
+}
