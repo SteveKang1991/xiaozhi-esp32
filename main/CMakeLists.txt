@@ -769,6 +769,16 @@ elseif(CONFIG_BOARD_TYPE_Freenove_ESP32S3_DISPLAY_2_8_LCD)
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
+elseif(CONFIG_BOARD_TYPE_FANFUTURE_P4_ILI9881_WiFI)
+    set(BOARD_TYPE "fanfuture-p4-ili9881-wifi")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_30_4)
+    set(BUILTIN_ICON_FONT font_awesome_30_4)
+    set(DEFAULT_EMOJI_COLLECTION noto-emoji_128)
+elseif(CONFIG_BOARD_TYPE_FANFUTURE_P4_JD9165_WiFI6_TOUCH_LCD_7B)
+    set(BOARD_TYPE "fanfuture-p4-jd9165-wifi6-touch-lcd-7b")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_30_4)
+    set(BUILTIN_ICON_FONT font_awesome_30_4)
+    set(DEFAULT_EMOJI_COLLECTION noto-emoji_128)
 endif()
 
 if(MANUFACTURER)
@@ -783,6 +793,11 @@ else()
     )
 endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
+
+# This board provides its own AXP2101 driver implementation.
+if(CONFIG_BOARD_TYPE_FANFUTURE_P4_JD9165_WiFI6_TOUCH_LCD_7B)
+    list(REMOVE_ITEM SOURCES "boards/common/axp2101.cc")
+endif()
 
 # Select audio processor according to Kconfig
 if(CONFIG_USE_AUDIO_PROCESSOR)

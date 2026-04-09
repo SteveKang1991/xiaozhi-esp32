@@ -1,0 +1,68 @@
+#ifndef _BOARD_CONFIG_H_
+#define _BOARD_CONFIG_H_
+
+#include <driver/gpio.h>
+
+#define AUDIO_INPUT_SAMPLE_RATE  24000
+#define AUDIO_OUTPUT_SAMPLE_RATE 24000
+
+#define AUDIO_INPUT_REFERENCE    true
+
+#define AUDIO_I2S_GPIO_MCLK GPIO_NUM_13
+#define AUDIO_I2S_GPIO_WS GPIO_NUM_10
+#define AUDIO_I2S_GPIO_BCLK GPIO_NUM_12
+#define AUDIO_I2S_GPIO_DIN  GPIO_NUM_11
+#define AUDIO_I2S_GPIO_DOUT GPIO_NUM_9
+
+#define AUDIO_CODEC_PA_PIN       GPIO_NUM_20
+#define AUDIO_CODEC_I2C_SDA_PIN  GPIO_NUM_7
+#define AUDIO_CODEC_I2C_SCL_PIN  GPIO_NUM_8
+#define AUDIO_CODEC_ES8311_ADDR  ES8311_CODEC_DEFAULT_ADDR
+#define AUDIO_CODEC_ES7210_ADDR  ES7210_CODEC_DEFAULT_ADDR
+
+#define BOOT_BUTTON_GPIO        GPIO_NUM_35
+
+#define DISPLAY_WIDTH 1024
+#define DISPLAY_HEIGHT 600
+
+#define LCD_BIT_PER_PIXEL          (16)
+#define PIN_NUM_LCD_RST            GPIO_NUM_26
+
+#define DELAY_TIME_MS                      (3000)
+#define LCD_MIPI_DSI_LANE_NUM          (2)    // 2 data lanes
+
+#define MIPI_DSI_PHY_PWR_LDO_CHAN          (3)
+#define MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV    (2500)
+
+#define DISPLAY_SWAP_XY false
+#define DISPLAY_MIRROR_X false
+#define DISPLAY_MIRROR_Y false
+
+#define DISPLAY_OFFSET_X  0
+#define DISPLAY_OFFSET_Y  0
+
+#define DISPLAY_BACKLIGHT_PIN GPIO_NUM_27
+#define DISPLAY_BACKLIGHT_OUTPUT_INVERT true
+
+// Touch screen configuration
+#define TOUCH_SCL_PIN       GPIO_NUM_29
+#define TOUCH_SDA_PIN       GPIO_NUM_28
+#define TOUCH_RST_PIN       GPIO_NUM_30
+#define TOUCH_INT_PIN       GPIO_NUM_31
+
+// ML307 4G module configuration
+#define ML307_TX_PIN        GPIO_NUM_32
+#define ML307_RX_PIN        GPIO_NUM_33
+#define ML307_UART_NUM      UART_NUM_1
+#define ML307_POWER_PIN     GPIO_NUM_NC  // Using AXP2101 DCDC3 instead
+
+// Camera configuration - OV2710 MIPI CSI
+// Note: Camera shares I2C1 with ES8311 audio codec (GPIO7/8)
+#define CAMERA_I2C_SDA      AUDIO_CODEC_I2C_SDA_PIN  // GPIO_NUM_7 (shared with ES8311)
+#define CAMERA_I2C_SCL      AUDIO_CODEC_I2C_SCL_PIN  // GPIO_NUM_8 (shared with ES8311)
+#define CAMERA_RESET_PIN    GPIO_NUM_NC    // No reset pin used
+#define CAMERA_PWDN_PIN     GPIO_NUM_NC    // No power-down pin used
+#define CAMERA_SENSOR_NAME  "OV2710"
+#define CAMERA_SCCB_ADDR    0x36           // OV2710 I2C address
+
+#endif // _BOARD_CONFIG_H_

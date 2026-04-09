@@ -80,6 +80,10 @@ dependencies:
     version: '*'
     rules:
     - if: target in [esp32p4]
+  waveshare/esp_lcd_jd9165:
+    version: ^1.0.2
+    rules:
+    - if: target in [esp32p4]
   espressif/esp32_p4_function_ev_board:
     version: ^5.0.3
     rules:

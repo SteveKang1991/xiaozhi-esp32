@@ -539,6 +539,12 @@ choice BOARD_TYPE
     config BOARD_TYPE_Freenove_ESP32S3_DISPLAY_2_8_LCD
         bool "Freenove ESP32S3 Display 2.8 LCD"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_FANFUTURE_P4_ILI9881_WiFI
+        bool "幻次元FanFuture P4 ILI9881(WiFi)"
+        depends on IDF_TARGET_ESP32P4
+    config BOARD_TYPE_FANFUTURE_P4_JD9165_WiFI6_TOUCH_LCD_7B
+        bool "幻次元FanFuture P4 JD9165 7B(WiFi6)"
+        depends on IDF_TARGET_ESP32P4
 endchoice
 
 choice
