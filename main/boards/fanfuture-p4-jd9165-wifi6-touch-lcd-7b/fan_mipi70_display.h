@@ -1,5 +1,5 @@
-#ifndef FAN_MIPI50_DISPLAY_H
-#define FAN_MIPI50_DISPLAY_H
+#ifndef FAN_MIPI70_DISPLAY_H
+#define FAN_MIPI70_DISPLAY_H
 
 #include "lcd_display.h"
 #include "gif/lvgl_gif.h"
@@ -18,12 +18,12 @@
 
 #include "board.h"
 
-#define TAG "FanMIPI50Display"
+#define TAG "FanMIPI70Display"
 
-// FAN MIPI 5.0寸显示器
-class FanMIPI50Display : public LcdDisplay {
+// FAN MIPI 7.0寸显示器
+class FanMIPI70Display : public LcdDisplay {
 public:
-    FanMIPI50Display(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
+    FanMIPI70Display(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
                            int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool swap_xy)
     : LcdDisplay(panel_io, panel, width, height) {
 
@@ -198,7 +198,7 @@ private:
         lv_obj_set_flex_align(top_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_scrollbar_mode(top_bar_, LV_SCROLLBAR_MODE_OFF);
         lv_obj_align(top_bar_, LV_ALIGN_TOP_MID, 0, 0);
-        lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
+        //lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
 
         // Left icon
         network_label_ = lv_label_create(top_bar_);
@@ -238,7 +238,7 @@ private:
         lv_obj_set_scrollbar_mode(status_bar_, LV_SCROLLBAR_MODE_OFF);
         lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);  // Use absolute positioning
         lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);  // Overlap with top_bar_
-        lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+        //lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
 
         notification_label_ = lv_label_create(status_bar_);
         lv_obj_set_width(notification_label_, LV_HOR_RES * 0.75);
@@ -246,7 +246,7 @@ private:
         lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
         lv_label_set_text(notification_label_, "");
         lv_obj_align(notification_label_, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+        //lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
 
         status_label_ = lv_label_create(status_bar_);
         lv_obj_set_width(status_label_, LV_HOR_RES * 0.75);
@@ -297,4 +297,4 @@ private:
     }
 };
 
-#endif // FAN_MIPI50_DISPLAY_H
+#endif // FAN_MIPI70_DISPLAY_H

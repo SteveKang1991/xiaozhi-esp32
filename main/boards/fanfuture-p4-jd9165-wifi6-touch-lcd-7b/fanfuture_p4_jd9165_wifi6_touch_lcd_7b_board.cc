@@ -1,6 +1,6 @@
 #include "codecs/box_audio_codec.h"
 #include "application.h"
-#include "display/lcd_display.h"
+#include "fan_mipi70_display.h"
 #include "button.h"
 #include "config.h"
 #include "esp_video.h"
@@ -239,8 +239,8 @@ private:
         ESP_LOGI(TAG, "   分辨率: %dx%d", DISPLAY_WIDTH, DISPLAY_HEIGHT);
         ESP_LOGI(TAG, "   DPI时钟: %d MHz", dpi_config.dpi_clock_freq_mhz);
 
-        display_ = new MipiLcdDisplay(io, disp_panel, DISPLAY_WIDTH, DISPLAY_HEIGHT,
-                                       DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+        display_ = new FanMIPI70Display(io, disp_panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
+                                      DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
         ESP_LOGI(TAG, "✅ JD9165 LCD初始化完成");
 
         lv_display_t *disp = lv_display_get_default();
