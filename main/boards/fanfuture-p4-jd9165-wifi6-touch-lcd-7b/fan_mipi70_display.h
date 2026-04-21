@@ -15,10 +15,16 @@
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
 #include <cstring>
+#include <sys/stat.h>
 
 #include "board.h"
 
-#define TAG "FanMIPI70Display"
+#define FAN_MIPI70_DISPLAY_TAG "FanMIPI70Display"
+
+extern "C" {
+#include "mjpeg_player.h"
+#include "sd_scanner.h"
+}
 
 // FAN MIPI 7.0寸显示器
 class FanMIPI70Display : public LcdDisplay {
@@ -32,14 +38,14 @@ public:
         std::string theme_name = settings.GetString("theme", "dark");
         current_theme_ = LvglThemeManager::GetInstance().GetTheme(theme_name);
 
-        ESP_LOGI(TAG, "Initialize LVGL library");
+        ESP_LOGI(FAN_MIPI70_DISPLAY_TAG, "Initialize LVGL library");
         lv_init();
 
-        ESP_LOGI(TAG, "Initialize LVGL port");
+        ESP_LOGI(FAN_MIPI70_DISPLAY_TAG, "Initialize LVGL port");
         lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
         lvgl_port_init(&port_cfg);
 
-        ESP_LOGI(TAG, "Adding LCD display");
+        ESP_LOGI(FAN_MIPI70_DISPLAY_TAG, "Adding LCD display");
         const lvgl_port_display_cfg_t disp_cfg = {
             .io_handle = panel_io,
             .panel_handle = panel,
@@ -69,7 +75,7 @@ public:
         };
         display_ = lvgl_port_add_disp_dsi(&disp_cfg, &dpi_cfg);
         if (display_ == nullptr) {
-            ESP_LOGE(TAG, "Failed to add display");
+            ESP_LOGE(FAN_MIPI70_DISPLAY_TAG, "Failed to add display");
             return;
         }
 
@@ -78,6 +84,10 @@ public:
         }
 
         SetupUI();
+    }
+
+    ~FanMIPI70Display() override {
+        StopMjpegIfRunning();
     }
 
     virtual void SetEmotion(const char* emotion) override {
@@ -92,12 +102,20 @@ public:
             return;
         }
 
+        if (StartMjpegEmotion(emotion)) {
+            DisplayLockGuard lock(this);
+            lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+
         auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
         auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
         if (image == nullptr) {
             image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage("neutral") : nullptr;
         }
         if (image == nullptr) {
+            StopMjpegIfRunning();
             const char* utf8 = font_awesome_get_utf8(emotion);
             if (utf8 != nullptr && emoji_label_ != nullptr) {
                 DisplayLockGuard lock(this);
@@ -108,6 +126,7 @@ public:
             return;
         }
 
+        StopMjpegIfRunning();
         DisplayLockGuard lock(this);
         if (image->IsGif()) {
             // Create new GIF controller
@@ -127,7 +146,7 @@ public:
                 lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
             } else {
-                ESP_LOGE(TAG, "Failed to load GIF for emotion: %s", emotion);
+                ESP_LOGE(FAN_MIPI70_DISPLAY_TAG, "Failed to load GIF for emotion: %s", emotion);
                 gif_controller_.reset();
             }
         } else {
@@ -138,7 +157,101 @@ public:
     }
 
 private:
+    static constexpr uint16_t kMjpegVideoWidth = 960;
+    static constexpr uint16_t kMjpegVideoHeight = 592;
+    static constexpr uint8_t kMjpegTargetFps = 24;
+    std::string current_mjpeg_path_;
+
+    static bool FileExists(const std::string& path) {
+        struct stat st = {};
+        return stat(path.c_str(), &st) == 0;
+    }
+
+    static std::string BuildMjpegPath(const char* name) {
+        return std::string("/sdcard/Emotion/") + name + "-960x592.mjpeg";
+    }
+
+    static const char* MapEmotionToClip(const char* emotion) {
+        if (emotion == nullptr || std::strlen(emotion) == 0) {
+            return "idle";
+        }
+        if (strcmp(emotion, "neutral") == 0) {
+            return "idle";
+        }
+        return emotion;
+    }
+
+    bool StartMjpegEmotion(const char* emotion) {
+        if (!sd_scanner_is_mounted()) {
+            return false;
+        }
+
+        const char* clip_name = MapEmotionToClip(emotion);
+        std::string clip_path = BuildMjpegPath(clip_name);
+        if (!FileExists(clip_path)) {
+            clip_path = BuildMjpegPath("idle");
+            if (!FileExists(clip_path)) {
+                return false;
+            }
+        }
+
+        if (mjpeg_player_is_running()) {
+            if (clip_path == current_mjpeg_path_) {
+                return true;
+            }
+            mjpeg_player_stop();
+        }
+
+        int rx = (width_ - static_cast<int>(kMjpegVideoWidth)) / 2;
+        int ry = (height_ - static_cast<int>(kMjpegVideoHeight)) / 2;
+        if (rx < 0) {
+            rx = 0;
+        }
+        if (ry < 0) {
+            ry = 0;
+        }
+
+        current_mjpeg_path_ = clip_path;
+        mjpeg_player_cfg_t cfg = {};
+        cfg.file_path = current_mjpeg_path_.c_str();
+        cfg.panel = panel_;
+        cfg.fb[0] = nullptr;
+        cfg.fb[1] = nullptr;
+        cfg.screen_width = kMjpegVideoWidth;
+        cfg.screen_height = kMjpegVideoHeight;
+        cfg.target_fps = kMjpegTargetFps;
+        cfg.loop = true;
+        cfg.fb_stride = 0;
+        cfg.fb_size = 0;
+        cfg.lv_video_canvas = nullptr;
+        cfg.panel_blit_roi = true;
+        cfg.panel_roi_x = static_cast<uint16_t>(rx);
+        cfg.panel_roi_y = static_cast<uint16_t>(ry);
+
+        const esp_err_t ret = mjpeg_player_start(&cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGW(FAN_MIPI70_DISPLAY_TAG, "MJPEG启动失败(%s): %s", current_mjpeg_path_.c_str(), esp_err_to_name(ret));
+            current_mjpeg_path_.clear();
+            return false;
+        }
+
+        ESP_LOGI(FAN_MIPI70_DISPLAY_TAG, "🎬 MJPEG表情播放: %s", current_mjpeg_path_.c_str());
+        return true;
+    }
+
+    void StopMjpegIfRunning() {
+        if (mjpeg_player_is_running()) {
+            mjpeg_player_stop();
+        }
+        current_mjpeg_path_.clear();
+    }
+
     void SetupUI() {
+        if (setup_ui_called_) {
+            ESP_LOGW(FAN_MIPI70_DISPLAY_TAG, "SetupUI() called multiple times, skipping duplicate call");
+            return;
+        }
+        Display::SetupUI();
         DisplayLockGuard lock(this);
         LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
         auto text_font = lvgl_theme->text_font()->font();

@@ -797,6 +797,10 @@ list(APPEND SOURCES ${BOARD_SOURCES})
 # This board provides its own AXP2101 driver implementation.
 if(CONFIG_BOARD_TYPE_FANFUTURE_P4_JD9165_WiFI6_TOUCH_LCD_7B)
     list(REMOVE_ITEM SOURCES "boards/common/axp2101.cc")
+    list(APPEND SOURCES
+        "boards/common/sd_scanner.c"
+        "boards/common/mjpeg_player.c"
+    )
 endif()
 
 # Select audio processor according to Kconfig

@@ -21,6 +21,7 @@
 #include "freertos/task.h"
 
 #include "axp2101.h"
+#include "sd_scanner.h"
 #include "wifi_board.h"
 
 #define TAG "FanFutureP4JD9165WiFi6TouchLcd7BBoard"
@@ -332,6 +333,16 @@ private:
         });
     }
 
+    void InitializeSdForMjpeg() {
+        ESP_LOGI(TAG, "💾 初始化SD卡扫描器(MJPEG播放准备)...");
+        const esp_err_t ret = sd_scanner_init_and_scan();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "⚠️ SD卡初始化/扫描失败，MJPEG动画将回退到静态表情: %s", esp_err_to_name(ret));
+            return;
+        }
+        ESP_LOGI(TAG, "✅ SD卡已挂载并完成扫描");
+    }
+
     void InitializeCamera() {
 #if CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE
         ESP_LOGI(TAG, "📷 初始化MIPI CSI摄像头...");
@@ -401,6 +412,7 @@ public:
         InitializeAXP2101();
         ResetTouchGT911();
         InitializeLCD();
+        InitializeSdForMjpeg();
         InitializeTouch();
         InitializeCamera();
         InitializeButtons();
