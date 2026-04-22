@@ -300,8 +300,6 @@ void Application::HandleActivationDoneEvent() {
     ESP_LOGI(TAG, "Activation done");
 
     SystemInfo::PrintHeapStats();
-    SetDeviceState(kDeviceStateIdle);
-
     has_server_time_ = ota_->HasServerTime();
 
     auto display = Board::GetInstance().GetDisplay();
@@ -314,10 +312,10 @@ void Application::HandleActivationDoneEvent() {
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
-    Schedule([this]() {
-        // Play the success sound to indicate the device is ready
-        audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
-    });
+    // Play success prompt first, then enter idle/wake-word mode.
+    audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
+    audio_service_.WaitForPlaybackQueueEmpty();
+    SetDeviceState(kDeviceStateIdle);
 }
 
 void Application::ActivationTask() {
@@ -883,10 +881,14 @@ void Application::HandleStateChangedEvent() {
                 if (listening_mode_ == kListeningModeAutoStop) {
                     audio_service_.WaitForPlaybackQueueEmpty();
                 }
-                
-                // Send the start listening command
-                protocol_->SendStartListening(listening_mode_);
                 audio_service_.EnableVoiceProcessing(true);
+            }
+
+            // Always send start-listening when entering listening state.
+            // Otherwise in some transitions (e.g. processor already running),
+            // server side may not open a new turn and recording appears stuck.
+            if (protocol_ && protocol_->IsAudioChannelOpened()) {
+                protocol_->SendStartListening(listening_mode_);
             }
 
 #ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
