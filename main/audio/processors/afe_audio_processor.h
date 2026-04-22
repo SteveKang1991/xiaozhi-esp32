@@ -30,6 +30,7 @@ public:
     void EnableDeviceAec(bool enable) override;
 
 private:
+    static constexpr size_t kFeedStageSlots = 4;
     EventGroupHandle_t event_group_ = nullptr;
     const esp_afe_sr_iface_t* afe_iface_ = nullptr;
     esp_afe_sr_data_t* afe_data_ = nullptr;
@@ -39,7 +40,11 @@ private:
     int frame_samples_ = 0;
     bool is_speaking_ = false;
     std::vector<int16_t> input_buffer_;
+    size_t input_buffer_offset_ = 0;
     std::mutex input_buffer_mutex_;
+    int16_t *feed_stage_bufs_[kFeedStageSlots] = {nullptr, nullptr, nullptr, nullptr};
+    size_t feed_stage_samples_ = 0;
+    size_t feed_stage_index_ = 0;
     std::vector<int16_t> output_buffer_;
 
     void AudioProcessorTask();

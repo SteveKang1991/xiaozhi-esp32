@@ -35,6 +35,7 @@ public:
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
 
 private:
+    static constexpr size_t kFeedStageSlots = 4;
     srmodel_list_t *models_ = nullptr;
     const esp_afe_sr_iface_t* afe_iface_ = nullptr;
     esp_afe_sr_data_t* afe_data_ = nullptr;
@@ -45,7 +46,11 @@ private:
     AudioCodec* codec_ = nullptr;
     std::string last_detected_wake_word_;
     std::vector<int16_t> input_buffer_;
+    size_t input_buffer_offset_ = 0;
     std::mutex input_buffer_mutex_;
+    int16_t *feed_stage_bufs_[kFeedStageSlots] = {nullptr, nullptr, nullptr, nullptr};
+    size_t feed_stage_samples_ = 0;
+    size_t feed_stage_index_ = 0;
 
     TaskHandle_t wake_word_encode_task_ = nullptr;
     StaticTask_t* wake_word_encode_task_buffer_ = nullptr;

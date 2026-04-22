@@ -1,25 +1,15 @@
 /**
  * @file mjpeg_player.c
- * @brief 🎬 MJPEG 零拷贝播放器 — 异步读取+硬件解码流水线
+ * @brief 🎬 MJPEG 异步读 + 硬件解码 + 送显
  *
  * 架构：
- *   读取任务（SD→提取帧→校验→DMA缓冲区）
- *        ↓ frame_queue
- *   解码任务（硬件JPEG解码→面板帧缓冲区→送显）
- *        ↓ free_queue
- *   读取任务（回收DMA缓冲区，继续读取）
+ *   读取任务（SD→提取帧→校验→DMA 输入缓冲）→ frame_queue
+ *   解码任务（硬解 RGB565）→ 紧密缓冲 →（ROI 模式）esp_lcd_panel_draw_bitmap /（全屏）DPI 帧缓冲
+ *        → free_queue
  *
- * 优化点：
- *   1. 异步流水线：SD 读取与 JPEG 硬件解码并行执行
- *   2. 零拷贝输出：JPEG 解码直接写入 DPI 面板帧缓冲区
- *   3. 多枚 DMA 输入缓冲（默认 3）：加深流水线，读卡与解码更好重叠
- *   4. Ring buffer 读取：read position 跟踪，减少 memmove
- *   5. setvbuf 加速 SD 文件读取
- *   6. 帧预校验：EOI + SOF 快速读分辨率（避免每帧 jpeg_decoder_get_info）
- *   7. 视频高度小于面板时，下方 letterbox 固定填 RGB565 黑（0x0000）
- *   8. 小文件预载入 PSRAM（≤12MB）：读任务仅从内存取帧
- *   9. 大环形缓冲 / 5×DMA / 256KB stdio 缓冲；读任务优先级高于解码
- *  10. ROI 直写 DPI（PSRAM）后按 64B 对齐做一次 C2M，与 memcpy 带宽共同决定 ~4–7ms 波动
+ * ROI 模式：硬解只支持紧密输出，用 draw_bitmap 送 ROI，避免对 DPI 做整块 stride 手写 memcpy；
+ *   C2M 仅对解码输出小块或 letterbox 小瓦片。播放任务为中等优先级，减小环形缓冲/并发 DMA
+ *   以减轻对 WiFi/语音/UI 的挤压。
  */
 #include "mjpeg_player.h"
 #include <stdio.h>
@@ -47,6 +37,7 @@ static const char *TAG = "🎬 MJPEG播放器";
 /* Panel geometry for fanfuture-p4-jd9165-wifi6-touch-lcd-7b */
 #define MJPEG_PANEL_WIDTH  1024
 #define MJPEG_PANEL_HEIGHT 600
+#define MJPEG_DRAW_RETRY_MAX 4
 
 static esp_err_t mjpeg_get_frame_buffers(esp_lcd_panel_handle_t panel, void **fb0, void **fb1)
 {
@@ -68,82 +59,115 @@ static esp_err_t mjpeg_get_frame_buffers(esp_lcd_panel_handle_t panel, void **fb
 static bool s_embed_lvgl;
 /** true：小缓冲解码 + esp_lcd_panel_draw_bitmap 仅 ROI，不经 LVGL */
 static bool s_panel_roi_blit;
-/** true：ROI 像素直接写入 DPI 帧缓冲（stride 拷贝），绕过 panel draw_bitmap */
-static bool s_roi_write_dpi_fb;
-static void *s_dpi_fb0;
-static void *s_dpi_fb1;
+static bool s_roi_letterbox_drawn;
+static bool s_output_fb_shared;
 
 /** 首若干帧打印 decode/blit 耗时，便于确认瓶颈（非 0 启用） */
 #ifndef MJPEG_PROFILE_FIRST_FRAMES
 #define MJPEG_PROFILE_FIRST_FRAMES 0
 #endif
 
-static void mjpeg_copy_rgb565_to_fb_stride(uint16_t *dst_base, int dst_stride_px,
-                                         int x0, int y0, int w, int h,
-                                         const uint16_t *src)
-{
-    uint16_t *row = dst_base + (size_t)y0 * (size_t)dst_stride_px + (size_t)x0;
-    const size_t row_bytes = (size_t)w * sizeof(uint16_t);
-    for (int y = 0; y < h; y++) {
-        memcpy(row, src, row_bytes);
-        row += dst_stride_px;
-        src += w;
-    }
-}
+#define MJPEG_READ_TASK_PRIORITY   4
+#define MJPEG_DECODE_TASK_PRIORITY 3
+#define MJPEG_TASK_CORE_ID         0
+#define MJPEG_ROI_DRAW_LETTERBOX_ONCE 0
+/** 顶/底 letterbox 黑条，单次 draw_bitmap 最大行数（高大于视频上下黑边） */
+#define MJPEG_LBAND_MAX_LINES 16
+/** 左右黑边最大半宽 (1024-960)/2=32，留余量 */
+#define MJPEG_PILLAR_MAX_W 48
 
-/** ROI 模式：面板行数大于视频时在物理帧缓冲顶/底刷黑（RGB565 0），避免上下白边 */
-static void mjpeg_roi_fill_letterbox_bands_rgb565(uint16_t *base, int stride_px, int panel_h,
-                                                  int roi_y, int roi_h)
+/** 源缓冲供 DMA/DSI 前：C2M，仅对实际长度（64B 对齐区间） */
+static void mjpeg_cache_c2m_cpu_tight(const void *ptr, size_t nbytes)
 {
-    if (roi_y < 0 || roi_h <= 0 || panel_h <= 0) {
+    if (!ptr || nbytes == 0) {
         return;
     }
-    const size_t row_bytes = (size_t)stride_px * sizeof(uint16_t);
-    if (roi_y > 0) {
-        uint16_t *row = base;
-        for (int y = 0; y < roi_y; y++) {
-            memset(row, 0, row_bytes);
-            row += stride_px;
-        }
-    }
-    const int y_after = roi_y + roi_h;
-    if (y_after < panel_h) {
-        uint16_t *row = base + (size_t)y_after * (size_t)stride_px;
-        for (int y = y_after; y < panel_h; y++) {
-            memset(row, 0, row_bytes);
-            row += stride_px;
-        }
-    }
-}
-
-/**
- * CPU memcpy 解码图到 DPI 帧缓冲（常在 PSRAM）后，须把脏 cache 写回内存，DSI 才能读到新像素。
- * 仅对 ROI 覆盖区间做一次 64B 对齐的 C2M，避免整屏 msync；耗时仍与 w×h×2 及总线竞争相关
- *（prof 里 roi_out 4–7ms 主要来自 memcpy + 本次同步）。
- */
-static void mjpeg_cache_sync_fb_roi(void *fb_base, int stride_px, int x, int y, int w, int h)
-{
-    const size_t bpp = sizeof(uint16_t);
-    uintptr_t start = (uintptr_t)fb_base + ((size_t)y * (size_t)stride_px + (size_t)x) * bpp;
-    size_t nbytes = (size_t)h * (size_t)w * bpp;
     const uintptr_t line = 64;
+    uintptr_t start = (uintptr_t)ptr;
     uintptr_t al_start = start & ~(line - 1);
     uintptr_t al_end = (start + nbytes + line - 1) & ~(line - 1);
     size_t al_len = (size_t)(al_end - al_start);
-    if (al_len > 0) {
-        esp_cache_msync((void *)al_start, al_len, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    if (al_len == 0) {
+        al_len = line;
+    }
+    esp_cache_msync((void *)al_start, al_len, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+}
+
+#define MJPEG_BLACK_TILE_H MJPEG_LBAND_MAX_LINES
+static uint8_t s_mjpeg_black_tile[((size_t)MJPEG_PANEL_WIDTH) * (size_t)MJPEG_BLACK_TILE_H * sizeof(uint16_t)]
+    __attribute__((aligned(64)));
+static uint8_t s_mjpeg_slab[((size_t)MJPEG_PILLAR_MAX_W) * (size_t)MJPEG_BLACK_TILE_H * sizeof(uint16_t)]
+    __attribute__((aligned(64)));
+
+static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int x0, int y0, int x1, int y1, const void *data)
+{
+    esp_err_t ret = ESP_FAIL;
+    for (int i = 0; i < MJPEG_DRAW_RETRY_MAX; i++) {
+        ret = esp_lcd_panel_draw_bitmap(panel, x0, y0, x1, y1, data);
+        if (ret == ESP_OK) {
+            return ret;
+        }
+        /* dpi busy: yield one tick and retry */
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    return ret;
+}
+
+/** 全宽水平黑条 (y0..y0+band_h)，分片 draw_bitmap，不经手写 memcpy 进帧缓冲 */
+static void mjpeg_h_band_black(esp_lcd_panel_handle_t panel, int y0, int band_h, int panel_w)
+{
+    if (band_h <= 0) {
+        return;
+    }
+    for (int y = 0; y < band_h; ) {
+        int ch = band_h - y;
+        if (ch > MJPEG_BLACK_TILE_H) {
+            ch = MJPEG_BLACK_TILE_H;
+        }
+        const size_t bbytes = (size_t)panel_w * (size_t)ch * sizeof(uint16_t);
+        mjpeg_cache_c2m_cpu_tight(s_mjpeg_black_tile, bbytes);
+        (void)mjpeg_panel_draw_bitmap_retry(panel, 0, y0 + y, panel_w, y0 + y + ch, s_mjpeg_black_tile);
+        y += ch;
     }
 }
 
-/** 环形读缓冲：越大越利于顺序 fread，减轻 SD 等待（瓶颈常在读任务） */
-#define READ_BUF_SIZE    (1024 * 1024)
-#define FRAME_BUF_SIZE   (300 * 1024)
-/** 多枚 JPEG DMA 输入缓冲，加深读卡与解码流水线 */
-#define NUM_DMA_BUFS     5
-#define FILE_IO_BUF_SIZE (256 * 1024)
-/** 小于此大小的 MJPEG 整文件预载入 PSRAM，播放期不再 fread（根治 SD 拖后腿） */
+/** 竖条 (x0,y0) 起 col_w×body_h 区域刷黑，用于 ROI 左右边 */
+static void mjpeg_pillar_bands(esp_lcd_panel_handle_t panel, int x0, int col_w, int y0, int body_h)
+{
+    if (col_w <= 0 || col_w > MJPEG_PILLAR_MAX_W || body_h <= 0) {
+        return;
+    }
+    for (int y = 0; y < body_h; ) {
+        int ch = body_h - y;
+        if (ch > MJPEG_BLACK_TILE_H) {
+            ch = MJPEG_BLACK_TILE_H;
+        }
+        const size_t bbytes = (size_t)col_w * (size_t)ch * sizeof(uint16_t);
+        (void)memset(s_mjpeg_slab, 0, bbytes);
+        mjpeg_cache_c2m_cpu_tight(s_mjpeg_slab, bbytes);
+        (void)mjpeg_panel_draw_bitmap_retry(panel, x0, y0 + y, x0 + col_w, y0 + y + ch, s_mjpeg_slab);
+        y += ch;
+    }
+}
+
+/** 顶/底 + 中栏左右黑边（与视频、UI 不重叠时可在无 lvgl 锁下调用） */
+static void mjpeg_roi_letterbox_draw(esp_lcd_panel_handle_t panel, int panel_w, int panel_h, int rx, int ry, int rw,
+                                    int rh)
+{
+    mjpeg_h_band_black(panel, 0, ry, panel_w);
+    mjpeg_pillar_bands(panel, 0, rx, ry, rh);
+    mjpeg_pillar_bands(panel, rx + rw, panel_w - (rx + rw), ry, rh);
+    mjpeg_h_band_black(panel, ry + rh, panel_h - (ry + rh), panel_w);
+}
+
+/** 环形读缓冲（节内存；过小易拖慢流式读） */
+#define READ_BUF_SIZE    (256 * 1024)
+#define FRAME_BUF_SIZE   (320 * 1024)
+#define NUM_DMA_BUFS     3
+#define FILE_IO_BUF_SIZE (32 * 1024)
+/** 0：禁用整文件预载；>0 时小于该字节的 mjpeg 预载入 PSRAM */
 #ifndef MJPEG_PRELOAD_MAX_BYTES
-#define MJPEG_PRELOAD_MAX_BYTES (12 * 1024 * 1024)
+#define MJPEG_PRELOAD_MAX_BYTES 0
 #endif
 
 /* ─────────────── 帧消息（队列传递） ─────────────── */
@@ -546,6 +570,15 @@ static void mjpeg_read_task(void *arg)
                 continue;
             }
 
+            if (frame_len > FRAME_BUF_SIZE) {
+                skip_count++;
+                ESP_LOGW(TAG, "⚠️ 帧过大(%dB > %dB)，跳过", frame_len, FRAME_BUF_SIZE);
+                /* 归还缓冲，避免 free_queue 被耗尽 */
+                msg.len = 0;
+                xQueueSend(s_free_queue, &msg, portMAX_DELAY);
+                continue;
+            }
+
             /* 拷贝到 DMA 缓冲区 + Cache 刷新（长度按 cache 线对齐，满足 DMA 读可见性） */
             memcpy(msg.buf, frame_data, frame_len);
             uint32_t sync_len = (uint32_t)frame_len;
@@ -703,8 +736,9 @@ static void mjpeg_decode_task(void *arg)
         consecutive_errors = 0;
 
         if (!first_frame_logged_once) {
-            ESP_LOGI(TAG, "🎬 首帧: JPEG=%d字节, RGB565=%lu字节, 零拷贝模式",
-                     msg.len, (unsigned long)decoded_size);
+            const char *mode = s_panel_roi_blit ? "紧密缓冲+draw_bitmap" : (s_embed_lvgl ? "LVGL画布" : "DPI 帧缓冲");
+            ESP_LOGI(TAG, "🎬 首帧: JPEG=%d字节, RGB565=%lu字节 (%s)",
+                     msg.len, (unsigned long)decoded_size, mode);
             first_frame_logged_once = true;
         }
 
@@ -715,15 +749,20 @@ static void mjpeg_decode_task(void *arg)
                                         s_cfg.screen_height, MJPEG_PANEL_HEIGHT);
         }
 
-        /* M2C */
+        /* ROI draw_bitmap 直接读解码输出缓冲，先禁用 ROI 的 M2C（稳定性优先验证） */
         {
-            uint32_t n = (has_letterbox || s_embed_lvgl || s_panel_roi_blit) ? fb_size : decoded_size;
+            uint32_t n;
+            if (s_panel_roi_blit) {
+                n = 0;
+            } else {
+                n = (has_letterbox || s_embed_lvgl) ? (uint32_t)fb_size : (uint32_t)decoded_size;
+            }
             if (n == 0) {
-                n = expect_decoded;
+                n = (uint32_t)expect_decoded;
             }
             n = (n + 63u) & ~63u;
-            if (n > fb_size) {
-                n = (fb_size + 63u) & ~63u;
+            if (n > (uint32_t)fb_size) {
+                n = (uint32_t)((fb_size + 63u) & ~63u);
             }
             if (((uintptr_t)s_cfg.fb[fb_idx] & 63u) == 0 && n >= 64u) {
                 esp_cache_msync(s_cfg.fb[fb_idx], n, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
@@ -740,26 +779,19 @@ static void mjpeg_decode_task(void *arg)
                 lvgl_port_unlock();
             }
         } else if (s_panel_roi_blit && s_cfg.panel) {
-            /* ROI：与 LVGL 共用 DPI 双缓冲时必须互斥，避免与 flush/sw_rotate 竞态 */
             const int x1 = (int)s_cfg.panel_roi_x;
             const int y1 = (int)s_cfg.panel_roi_y;
             const int w = (int)s_cfg.screen_width;
             const int h = (int)s_cfg.screen_height;
-            if (lvgl_port_lock(5000)) {
-                if (s_roi_write_dpi_fb && s_dpi_fb0 && s_dpi_fb1) {
-                    void *dst_fb = (fb_idx & 1) ? s_dpi_fb1 : s_dpi_fb0;
-                    uint16_t *dst16 = (uint16_t *)dst_fb;
-                    mjpeg_roi_fill_letterbox_bands_rgb565(dst16, MJPEG_PANEL_WIDTH, MJPEG_PANEL_HEIGHT, y1, h);
-                    mjpeg_copy_rgb565_to_fb_stride(dst16, MJPEG_PANEL_WIDTH,
-                                                   x1, y1, w, h,
-                                                   (const uint16_t *)s_cfg.fb[fb_idx]);
-                    /* 顶/底黑边 + ROI 均可能改动，整幅 C2M 一次避免漏同步条带 */
-                    mjpeg_cache_sync_fb_roi(dst_fb, MJPEG_PANEL_WIDTH, 0, 0,
-                                            MJPEG_PANEL_WIDTH, MJPEG_PANEL_HEIGHT);
-                } else {
-                    const int x2 = x1 + w;
-                    const int y2 = y1 + h;
-                    esp_lcd_panel_draw_bitmap(s_cfg.panel, x1, y1, x2, y2, s_cfg.fb[fb_idx]);
+            /* DSI 提交队列与 LVGL 共享：需要短互斥避免 panel draw reentry */
+            if (lvgl_port_lock(20)) {
+                if (MJPEG_ROI_DRAW_LETTERBOX_ONCE && !s_roi_letterbox_drawn) {
+                    mjpeg_roi_letterbox_draw(s_cfg.panel, MJPEG_PANEL_WIDTH, MJPEG_PANEL_HEIGHT, x1, y1, w, h);
+                    s_roi_letterbox_drawn = true;
+                }
+                esp_err_t blit = mjpeg_panel_draw_bitmap_retry(s_cfg.panel, x1, y1, x1 + w, y1 + h, s_cfg.fb[fb_idx]);
+                if (blit != ESP_OK) {
+                    ESP_LOGW(TAG, "⚠️ ROI draw失败: %s", esp_err_to_name(blit));
                 }
                 lvgl_port_unlock();
             }
@@ -774,11 +806,10 @@ static void mjpeg_decode_task(void *arg)
 #if MJPEG_PROFILE_FIRST_FRAMES > 0
         if (frame_count <= MJPEG_PROFILE_FIRST_FRAMES) {
             const int64_t t_after_blit = esp_timer_get_time();
-            ESP_LOGI(TAG, "⏱ prof #%lu: jpeg_decode=%lldus roi_out=%lldus (roi_dpi=%d)",
+            ESP_LOGI(TAG, "⏱ prof #%lu: jpeg_decode=%lldus blit=%lldus",
                      (unsigned long)frame_count,
                      (long long)(t_after_decode - t_start),
-                     (long long)(t_after_blit - t_after_decode),
-                     (int)s_roi_write_dpi_fb);
+                     (long long)(t_after_blit - t_after_decode));
         }
 #endif
 
@@ -826,14 +857,13 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     s_cfg = *cfg;
     s_embed_lvgl = (s_cfg.lv_video_canvas != NULL);
     s_panel_roi_blit = s_cfg.panel_blit_roi;
-    s_roi_write_dpi_fb = false;
-    s_dpi_fb0 = NULL;
-    s_dpi_fb1 = NULL;
+    s_roi_letterbox_drawn = false;
 
     if (s_embed_lvgl || s_panel_roi_blit) {
         const size_t sz = (size_t)s_cfg.screen_width * (size_t)s_cfg.screen_height * sizeof(uint16_t);
         const size_t sz_al = (sz + 63u) & ~63u;
-        for (int i = 0; i < 2; i++) {
+        const int fb_count = s_panel_roi_blit ? 1 : 2;
+        for (int i = 0; i < fb_count; i++) {
             /* 硬件 JPEG 写 PSRAM 往往明显慢于内部 SRAM；优先 INTERNAL */
             s_cfg.fb[i] = heap_caps_aligned_alloc(64, sz_al, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
             if (!s_cfg.fb[i]) {
@@ -848,6 +878,12 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
                 return ESP_ERR_NO_MEM;
             }
         }
+        if (s_panel_roi_blit) {
+            s_cfg.fb[1] = s_cfg.fb[0];
+            s_output_fb_shared = true;
+        } else {
+            s_output_fb_shared = false;
+        }
         if (s_cfg.fb[0]) {
 #if MJPEG_HAVE_ESP_PTR_EXTERNAL_RAM
             ESP_LOGI(TAG, "解码输出缓冲[0]: %s",
@@ -861,19 +897,12 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
             lv_canvas_set_buffer(cv, s_cfg.fb[0], s_cfg.screen_width, s_cfg.screen_height, LV_COLOR_FORMAT_RGB565);
             ESP_LOGI(TAG, "💾 LVGL 画布模式: 解码缓冲 %dx%d ×2", s_cfg.screen_width, s_cfg.screen_height);
         } else {
-            ESP_LOGI(TAG, "💾 面板 ROI 直送显: %dx%d @ (%u,%u) ×2",
+            (void)memset(s_mjpeg_black_tile, 0, sizeof(s_mjpeg_black_tile));
+            (void)memset(s_mjpeg_slab, 0, sizeof(s_mjpeg_slab));
+            ESP_LOGI(TAG, "💾 面板 ROI: %dx%d @ (%u,%u) draw_bitmap（短互斥，单缓冲 %dx%d）",
                      s_cfg.screen_width, s_cfg.screen_height,
-                     (unsigned)s_cfg.panel_roi_x, (unsigned)s_cfg.panel_roi_y);
-            esp_err_t gfb = mjpeg_get_frame_buffers(s_cfg.panel, &s_dpi_fb0, &s_dpi_fb1);
-            if (gfb == ESP_OK && s_dpi_fb0 && s_dpi_fb1) {
-                s_roi_write_dpi_fb = true;
-                ESP_LOGI(TAG, "ROI: 直接写入 DPI 帧缓冲（绕过 esp_lcd_panel_draw_bitmap）");
-            } else if (gfb == ESP_OK && s_dpi_fb0 && !s_dpi_fb1) {
-                ESP_LOGI(TAG, "ROI: 检测到单帧缓冲面板，使用 draw_bitmap 路径");
-            } else {
-                ESP_LOGW(TAG, "ROI: 无法获取 DPI FB (%s)，仍用 draw_bitmap",
-                         esp_err_to_name(gfb));
-            }
+                     (unsigned)s_cfg.panel_roi_x, (unsigned)s_cfg.panel_roi_y,
+                     s_cfg.screen_width, s_cfg.screen_height);
         }
     } else if (!s_cfg.fb[0] || !s_cfg.fb[1]) {
         esp_err_t gf = mjpeg_get_frame_buffers(s_cfg.panel, &s_cfg.fb[0], &s_cfg.fb[1]);
@@ -887,12 +916,13 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     s_preload_buf = NULL;
     s_preload_size = 0;
     s_preload_is_malloc = false;
+#if MJPEG_PRELOAD_MAX_BYTES > 0
     {
         FILE *pf = fopen(s_cfg.file_path, "rb");
         if (pf) {
             if (fseek(pf, 0, SEEK_END) == 0) {
                 long sz = ftell(pf);
-                if (sz > 0 && (size_t)sz <= MJPEG_PRELOAD_MAX_BYTES) {
+                if (sz > 0 && (size_t)sz <= (size_t)MJPEG_PRELOAD_MAX_BYTES) {
                     uint8_t *pb = heap_caps_malloc((size_t)sz, MALLOC_CAP_SPIRAM);
                     if (!pb) {
                         pb = malloc((size_t)sz);
@@ -924,6 +954,7 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
             fclose(pf);
         }
     }
+#endif
 
     /* 创建队列 */
     s_frame_queue = xQueueCreate(NUM_DMA_BUFS + 2, sizeof(frame_msg_t));
@@ -957,9 +988,9 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
 
     /* 创建双任务 */
     BaseType_t ret;
-    /* 读任务优先：尽快填满 frame_queue，避免解码任务空等 SD（prof 里 jpeg 仅 ~2ms 仍只有 ~17fps 即此因） */
-    ret = xTaskCreate(mjpeg_read_task, "mjpeg_read", 8192,
-                       NULL, configMAX_PRIORITIES - 1, &s_read_task);
+    /* 中等优先级，避免抢占 WiFi/语音/LVGL；读可略高于解码以喂满队列 */
+    ret = xTaskCreatePinnedToCore(mjpeg_read_task, "mjpeg_read", 8192, NULL, MJPEG_READ_TASK_PRIORITY, &s_read_task,
+                                  MJPEG_TASK_CORE_ID);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "❌ 创建读取任务失败");
         mjpeg_release_preload_buf();
@@ -967,8 +998,8 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
         return ESP_ERR_NO_MEM;
     }
 
-    ret = xTaskCreate(mjpeg_decode_task, "mjpeg_dec", 8192,
-                       NULL, configMAX_PRIORITIES - 2, &s_decode_task);
+    ret = xTaskCreatePinnedToCore(mjpeg_decode_task, "mjpeg_dec", 8192, NULL, MJPEG_DECODE_TASK_PRIORITY,
+                                  &s_decode_task, MJPEG_TASK_CORE_ID);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "❌ 创建解码任务失败");
         mjpeg_release_preload_buf();
@@ -1014,14 +1045,16 @@ void mjpeg_player_stop(void)
     mjpeg_release_preload_buf();
 
     if (s_embed_lvgl || s_panel_roi_blit) {
-        heap_caps_free(s_cfg.fb[0]);
-        heap_caps_free(s_cfg.fb[1]);
+        if (s_cfg.fb[0]) {
+            heap_caps_free(s_cfg.fb[0]);
+        }
+        if (!s_output_fb_shared && s_cfg.fb[1]) {
+            heap_caps_free(s_cfg.fb[1]);
+        }
         s_cfg.fb[0] = NULL;
         s_cfg.fb[1] = NULL;
         s_embed_lvgl = false;
-        s_roi_write_dpi_fb = false;
-        s_dpi_fb0 = NULL;
-        s_dpi_fb1 = NULL;
+        s_output_fb_shared = false;
         if (s_panel_roi_blit) {
             (void)lvgl_port_resume();
             s_panel_roi_blit = false;

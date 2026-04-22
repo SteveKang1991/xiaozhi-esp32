@@ -1,5 +1,6 @@
 #include "afe_audio_processor.h"
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 
 #define PROCESSOR_RUNNING 0x01
 
@@ -54,7 +55,7 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
     }
 
     afe_config->agc_init = false;
-    afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
+    afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_INTERNAL;
 
 #ifdef CONFIG_USE_DEVICE_AEC
     afe_config->aec_init = true;
@@ -78,6 +79,12 @@ AfeAudioProcessor::~AfeAudioProcessor() {
     if (afe_data_ != nullptr) {
         afe_iface_->destroy(afe_data_);
     }
+    for (size_t i = 0; i < kFeedStageSlots; ++i) {
+        if (feed_stage_bufs_[i]) {
+            heap_caps_free(feed_stage_bufs_[i]);
+            feed_stage_bufs_[i] = nullptr;
+        }
+    }
     vEventGroupDelete(event_group_);
 }
 
@@ -100,9 +107,32 @@ void AfeAudioProcessor::Feed(std::vector<int16_t>&& data) {
     }
     input_buffer_.insert(input_buffer_.end(), data.begin(), data.end());
     size_t chunk_size = afe_iface_->get_feed_chunksize(afe_data_) * codec_->input_channels();
-    while (input_buffer_.size() >= chunk_size) {
-        afe_iface_->feed(afe_data_, input_buffer_.data());
-        input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + chunk_size);
+    if (feed_stage_samples_ != chunk_size) {
+        for (size_t i = 0; i < kFeedStageSlots; ++i) {
+            if (feed_stage_bufs_[i]) {
+                heap_caps_free(feed_stage_bufs_[i]);
+                feed_stage_bufs_[i] = nullptr;
+            }
+            feed_stage_bufs_[i] = (int16_t *)heap_caps_aligned_alloc(
+                64, chunk_size * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (!feed_stage_bufs_[i]) {
+                ESP_LOGE(TAG, "Failed to alloc feed staging buffer");
+                return;
+            }
+        }
+        feed_stage_samples_ = chunk_size;
+        feed_stage_index_ = 0;
+    }
+    while ((input_buffer_.size() - input_buffer_offset_) >= chunk_size) {
+        int16_t *stage = feed_stage_bufs_[feed_stage_index_];
+        memcpy(stage, input_buffer_.data() + input_buffer_offset_, chunk_size * sizeof(int16_t));
+        afe_iface_->feed(afe_data_, stage);
+        feed_stage_index_ = (feed_stage_index_ + 1) % kFeedStageSlots;
+        input_buffer_offset_ += chunk_size;
+    }
+    if (input_buffer_offset_ > 0 && input_buffer_offset_ >= (chunk_size * 8)) {
+        input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + input_buffer_offset_);
+        input_buffer_offset_ = 0;
     }
 }
 
@@ -118,6 +148,7 @@ void AfeAudioProcessor::Stop() {
         afe_iface_->reset_buffer(afe_data_);
     }
     input_buffer_.clear();
+    input_buffer_offset_ = 0;
 }
 
 bool AfeAudioProcessor::IsRunning() {

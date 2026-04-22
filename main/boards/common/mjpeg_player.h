@@ -25,8 +25,9 @@ typedef struct {
     /** 非 NULL：解码到 lv_canvas（需 LVGL）；NULL：走面板 */
     void *lv_video_canvas;
     /**
-     * true：解码到小缓冲后送 (panel_roi_x, panel_roi_y)，尺寸 screen_width×screen_height。
-     * 须 lv_video_canvas == NULL 且 panel 非空。建议先 bsp_display_lvgl_suspend(true)。
+     * true：解码到紧密 RGB565 缓冲，经 esp_lcd_panel_draw_bitmap 仅刷 ROI。
+     * 须 lv_video_canvas == NULL 且 panel 非空。若 ROI 与 LVGL 合成内容不重叠，可不与 LVGL 互斥
+     *（本实现不取 lvgl_port_lock）；重叠或撕裂敏感时请改用画布模式或自管同步。
      */
     bool panel_blit_roi;
     uint16_t panel_roi_x;

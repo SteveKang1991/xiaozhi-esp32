@@ -1,6 +1,7 @@
 #include "afe_wake_word.h"
 #include "audio_service.h"
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <sstream>
 
 #define DETECTION_RUNNING_EVENT 1
@@ -26,6 +27,12 @@ AfeWakeWord::~AfeWakeWord() {
 
     if (wake_word_encode_task_buffer_ != nullptr) {
         heap_caps_free(wake_word_encode_task_buffer_);
+    }
+    for (size_t i = 0; i < kFeedStageSlots; ++i) {
+        if (feed_stage_bufs_[i]) {
+            heap_caps_free(feed_stage_bufs_[i]);
+            feed_stage_bufs_[i] = nullptr;
+        }
     }
 
     if (models_ != nullptr) {
@@ -71,20 +78,34 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
         input_format.push_back('R');
     }
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), models_, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
-    afe_config->aec_init = codec_->input_reference();
-    afe_config->aec_mode = AEC_MODE_SR_HIGH_PERF;
+    /* Wake-word sensitivity first: avoid AEC suppressing near-field speech */
+    afe_config->aec_init = false;
+    afe_config->aec_mode = AEC_MODE_SR_LOW_COST;
+    afe_config->wakenet_mode = DET_MODE_95;
     afe_config->afe_perferred_core = 1;
-    afe_config->afe_perferred_priority = 1;
-    afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
+    afe_config->afe_perferred_priority = 5;
+    afe_config->afe_ringbuf_size = 50;
+    afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_INTERNAL;
     
     afe_iface_ = esp_afe_handle_from_config(afe_config);
+    if (afe_iface_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to get AFE interface from config");
+        return false;
+    }
     afe_data_ = afe_iface_->create_from_config(afe_config);
+    if (afe_data_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create AFE data from config");
+        return false;
+    }
+    /* Slightly lower threshold than default to improve wake sensitivity in noisy scenes */
+    int th = afe_iface_->set_wakenet_threshold(afe_data_, 1, 0.50f);
+    ESP_LOGI(TAG, "WakeNet threshold set ret=%d, mode=%d", th, (int)afe_config->wakenet_mode);
 
-    xTaskCreate([](void* arg) {
+    xTaskCreatePinnedToCore([](void* arg) {
         auto this_ = (AfeWakeWord*)arg;
         this_->AudioDetectionTask();
         vTaskDelete(NULL);
-    }, "audio_detection", 4096, this, 3, nullptr);
+    }, "audio_detection", 8192, this, 6, nullptr, 1);
 
     return true;
 }
@@ -105,6 +126,7 @@ void AfeWakeWord::Stop() {
         afe_iface_->reset_buffer(afe_data_);
     }
     input_buffer_.clear();
+    input_buffer_offset_ = 0;
 }
 
 void AfeWakeWord::Feed(const std::vector<int16_t>& data) {
@@ -119,9 +141,32 @@ void AfeWakeWord::Feed(const std::vector<int16_t>& data) {
     }
     input_buffer_.insert(input_buffer_.end(), data.begin(), data.end());
     size_t chunk_size = afe_iface_->get_feed_chunksize(afe_data_) * codec_->input_channels();
-    while (input_buffer_.size() >= chunk_size) {
-        afe_iface_->feed(afe_data_, input_buffer_.data());
-        input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + chunk_size);
+    if (feed_stage_samples_ != chunk_size) {
+        for (size_t i = 0; i < kFeedStageSlots; ++i) {
+            if (feed_stage_bufs_[i]) {
+                heap_caps_free(feed_stage_bufs_[i]);
+                feed_stage_bufs_[i] = nullptr;
+            }
+            feed_stage_bufs_[i] = (int16_t *)heap_caps_aligned_alloc(
+                64, chunk_size * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (!feed_stage_bufs_[i]) {
+                ESP_LOGE(TAG, "Failed to alloc feed staging buffer");
+                return;
+            }
+        }
+        feed_stage_samples_ = chunk_size;
+        feed_stage_index_ = 0;
+    }
+    while ((input_buffer_.size() - input_buffer_offset_) >= chunk_size) {
+        int16_t *stage = feed_stage_bufs_[feed_stage_index_];
+        memcpy(stage, input_buffer_.data() + input_buffer_offset_, chunk_size * sizeof(int16_t));
+        afe_iface_->feed(afe_data_, stage);
+        feed_stage_index_ = (feed_stage_index_ + 1) % kFeedStageSlots;
+        input_buffer_offset_ += chunk_size;
+    }
+    if (input_buffer_offset_ > 0 && input_buffer_offset_ >= (chunk_size * 8)) {
+        input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + input_buffer_offset_);
+        input_buffer_offset_ = 0;
     }
 }
 
@@ -137,7 +182,6 @@ void AfeWakeWord::AudioDetectionTask() {
     auto feed_size = afe_iface_->get_feed_chunksize(afe_data_);
     ESP_LOGI(TAG, "Audio detection task started, feed size: %d fetch size: %d",
         feed_size, fetch_size);
-
     while (true) {
         xEventGroupWaitBits(event_group_, DETECTION_RUNNING_EVENT, pdFALSE, pdTRUE, portMAX_DELAY);
 
