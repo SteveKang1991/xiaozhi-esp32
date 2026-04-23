@@ -37,7 +37,7 @@ static const char *TAG = "🎬 MJPEG播放器";
 /* Panel geometry for fanfuture-p4-jd9165-wifi6-touch-lcd-7b */
 #define MJPEG_PANEL_WIDTH  1024
 #define MJPEG_PANEL_HEIGHT 600
-#define MJPEG_DRAW_RETRY_MAX 4
+#define MJPEG_DRAW_RETRY_MAX 12
 
 static esp_err_t mjpeg_get_frame_buffers(esp_lcd_panel_handle_t panel, void **fb0, void **fb1)
 {
@@ -107,8 +107,8 @@ static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int
         if (ret == ESP_OK) {
             return ret;
         }
-        /* dpi busy: yield one tick and retry */
-        vTaskDelay(pdMS_TO_TICKS(1));
+        /* dpi busy: yield and retry (longer under LVGL + WiFi load) */
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
     return ret;
 }
@@ -784,7 +784,7 @@ static void mjpeg_decode_task(void *arg)
             const int w = (int)s_cfg.screen_width;
             const int h = (int)s_cfg.screen_height;
             /* DSI 提交队列与 LVGL 共享：需要短互斥避免 panel draw reentry */
-            if (lvgl_port_lock(20)) {
+            if (lvgl_port_lock(200)) {
                 if (MJPEG_ROI_DRAW_LETTERBOX_ONCE && !s_roi_letterbox_drawn) {
                     mjpeg_roi_letterbox_draw(s_cfg.panel, MJPEG_PANEL_WIDTH, MJPEG_PANEL_HEIGHT, x1, y1, w, h);
                     s_roi_letterbox_drawn = true;

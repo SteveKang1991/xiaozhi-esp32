@@ -874,15 +874,15 @@ void Application::HandleStateChangedEvent() {
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
 
-            // Make sure the audio processor is running
-            if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
-                // For auto mode, wait for playback queue to be empty before enabling voice processing
-                // This prevents audio truncation when STOP arrives late due to network jitter
-                if (listening_mode_ == kListeningModeAutoStop) {
-                    audio_service_.WaitForPlaybackQueueEmpty();
-                }
-                audio_service_.EnableVoiceProcessing(true);
+            // For auto mode, wait for playback queue to be empty before enabling voice processing
+            // This prevents audio truncation when STOP arrives late due to network jitter
+            if (listening_mode_ == kListeningModeAutoStop) {
+                audio_service_.WaitForPlaybackQueueEmpty();
             }
+            // Always (re)enable voice processing on each listening entry.
+            // In realtime AEC mode the processor may already be "running"; skipping EnableVoiceProcessing
+            // used to omit ResetDecoder / resampler reset / warmup and caused intermittent no-uplink.
+            audio_service_.EnableVoiceProcessing(true);
 
             // Always send start-listening when entering listening state.
             // Otherwise in some transitions (e.g. processor already running),
