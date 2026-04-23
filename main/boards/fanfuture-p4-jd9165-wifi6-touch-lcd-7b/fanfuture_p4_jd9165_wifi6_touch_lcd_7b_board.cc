@@ -210,7 +210,9 @@ private:
         dpi_config.dpi_clock_freq_mhz = 51;
         dpi_config.virtual_channel = 0;
         dpi_config.pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565;
-        dpi_config.num_fbs = 1;
+        /* 双帧缓冲：一边扫描输出时，另一块可供 CPU/DMA2D 写入，显著降低
+         * "previous draw operation is not finished" 与 MJPEG+LVGL 抢同一提交槽的概率 */
+        dpi_config.num_fbs = 2;
         dpi_config.video_timing.h_size = 1024;
         dpi_config.video_timing.v_size = 600;
         dpi_config.video_timing.hsync_pulse_width = 24;

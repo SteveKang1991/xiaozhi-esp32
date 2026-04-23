@@ -52,7 +52,8 @@ public:
             .panel_handle = panel,
             .control_handle = nullptr,
             .buffer_size = static_cast<uint32_t>(width_ * 50),
-            .double_buffer = false,
+            /* 双缓冲：降低连续 flush/拷贝与 DSI 提交冲突概率 */
+            .double_buffer = true,
             .hres = static_cast<uint32_t>(width_),
             .vres = static_cast<uint32_t>(height_),
             .monochrome = false,
@@ -64,13 +65,15 @@ public:
             },
             .flags = {
                 .buff_dma = true,
-                .buff_spiram = false,
+                /* 大分辨率的 LVGL 中间缓冲放 PSRAM，避免和 WiFi/编解码/DSI 强抢内部SRAM */
+                .buff_spiram = true,
                 .sw_rotate = true,
             },
         };
 
         const lvgl_port_display_dsi_cfg_t dpi_cfg = {
             .flags = {
+                /* 开启 software rotate 时，此处通常需保持 false，否则与 esp_lvgl_port 内部 buffer 管理冲突 */
                 .avoid_tearing = false,
             }
         };

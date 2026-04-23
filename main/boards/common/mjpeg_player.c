@@ -22,6 +22,7 @@
 #include "esp_timer.h"
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
+#include "esp_rom_sys.h"
 #include "esp_lcd_mipi_dsi.h"
 #if __has_include("esp_memory_utils.h")
 #include "esp_memory_utils.h"
@@ -38,9 +39,15 @@ static const char *TAG = "🎬 MJPEG播放器";
 #define MJPEG_PANEL_WIDTH  1024
 #define MJPEG_PANEL_HEIGHT 600
 /** LVGL 正在 flush（尤其 sw_rotate + 对话刷新）时，持锁前已提交的 DSI 传输可能仍在进行 */
-#define MJPEG_DRAW_RETRY_MAX        64
-#define MJPEG_LVGL_LOCK_TIMEOUT_MS  8000
-#define MJPEG_POST_LOCK_DRAIN_MS    1
+#define MJPEG_DRAW_RETRY_MAX        6
+#define MJPEG_LVGL_LOCK_TIMEOUT_MS  20
+#define MJPEG_POST_LOCK_DRAIN_MS    0
+#define MJPEG_DRAW_RETRY_US_MIN     200
+#define MJPEG_DRAW_RETRY_US_MAX     1200
+/** 严格逐帧校验会重复解析 JPEG（extract+validate），会显著增加 read 侧 CPU 占用 */
+#ifndef MJPEG_STRICT_FRAME_VALIDATE
+#define MJPEG_STRICT_FRAME_VALIDATE 0
+#endif
 
 static esp_err_t mjpeg_get_frame_buffers(esp_lcd_panel_handle_t panel, void **fb0, void **fb1)
 {
@@ -115,13 +122,15 @@ static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int
         if (ret == ESP_OK) {
             return ret;
         }
-        /* dpi_panel_draw_bitmap: previous draw operation is not finished — 退避加长 */
-        int ms = 2 + (i >> 2);
-        if (ms > 12) {
-            ms = 12;
+        /* previous draw not finished: 微秒级退避，避免 tick 量化导致每次至少 1 tick(常见 10ms) */
+        uint32_t us = MJPEG_DRAW_RETRY_US_MIN + (uint32_t)i * MJPEG_DRAW_RETRY_US_MIN;
+        if (us > MJPEG_DRAW_RETRY_US_MAX) {
+            us = MJPEG_DRAW_RETRY_US_MAX;
         }
-        vTaskDelay(pdMS_TO_TICKS(ms));
-        taskYIELD();
+        esp_rom_delay_us(us);
+        if (i >= (MJPEG_DRAW_RETRY_MAX - 2)) {
+            taskYIELD();
+        }
     }
     return ret;
 }
@@ -430,6 +439,7 @@ static bool extract_frame(read_ctx_t *ctx, const uint8_t **out_data, int *out_le
 /**
  * 仅从 SOF 段读取宽高，避免每帧 jpeg_decoder_get_info 与硬件解码重复解析。
  */
+#if MJPEG_STRICT_FRAME_VALIDATE
 static bool jpeg_quick_sof_dimensions(const uint8_t *d, int len, uint16_t *out_w, uint16_t *out_h)
 {
     if (len < 10 || d[0] != 0xFF || d[1] != 0xD8) {
@@ -492,6 +502,7 @@ static bool validate_frame(const uint8_t *data, int len,
 	/* 3. 分辨率匹配 */
     return (w == width && h == height);
 }
+#endif
 
 /* ═══════════════════════════════════════════════════════════
  *  读取任务：从 SD 提取帧 → 校验 → 入队
@@ -582,6 +593,7 @@ static void mjpeg_read_task(void *arg)
         int frame_len;
 
         while (s_running && extract_frame(&ctx, &frame_data, &frame_len)) {
+#if MJPEG_STRICT_FRAME_VALIDATE
             if (!validate_frame(frame_data, frame_len,
                                  s_cfg.screen_width, s_cfg.screen_height)) {
                 skip_count++;
@@ -591,6 +603,13 @@ static void mjpeg_read_task(void *arg)
                 }
                 continue;
             }
+#else
+            /* extract_frame 已保证 SOI/EOI 边界，生产资源建议关闭重复解析提升吞吐 */
+            if (frame_len < 100) {
+                skip_count++;
+                continue;
+            }
+#endif
 
             /* 获取空闲 DMA 缓冲区 */
             frame_msg_t msg;
@@ -789,14 +808,9 @@ static void mjpeg_decode_task(void *arg)
                                         s_cfg.screen_height, MJPEG_PANEL_HEIGHT);
         }
 
-        /* ROI draw_bitmap 直接读解码输出缓冲，先禁用 ROI 的 M2C（稳定性优先验证） */
-        {
-            uint32_t n;
-            if (s_panel_roi_blit) {
-                n = 0;
-            } else {
-                n = (has_letterbox || s_embed_lvgl) ? (uint32_t)fb_size : (uint32_t)decoded_size;
-            }
+        /* ROI draw_bitmap 直接从解码输出读数据：跳过整帧 M2C，减少每帧 cache 维护开销 */
+        if (!s_panel_roi_blit) {
+            uint32_t n = (has_letterbox || s_embed_lvgl) ? (uint32_t)fb_size : (uint32_t)decoded_size;
             if (n == 0) {
                 n = (uint32_t)expect_decoded;
             }
