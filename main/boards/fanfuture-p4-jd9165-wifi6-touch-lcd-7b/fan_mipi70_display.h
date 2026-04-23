@@ -13,6 +13,7 @@
 #include <esp_log.h>
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
+#include <lvgl.h>
 #include <esp_psram.h>
 #include <cstring>
 #include <sys/stat.h>
@@ -63,7 +64,7 @@ public:
             },
             .flags = {
                 .buff_dma = true,
-                .buff_spiram =false,
+                .buff_spiram = false,
                 .sw_rotate = true,
             },
         };
@@ -78,6 +79,12 @@ public:
             ESP_LOGE(FAN_MIPI70_DISPLAY_TAG, "Failed to add display");
             return;
         }
+
+        /* 与 esp32-p4-wifi6-touch-lcd-4c-7c bsp_display：物理 1024×600，LVGL 逻辑竖屏 600×1024 */
+        lv_display_set_rotation(display_, LV_DISPLAY_ROTATION_90);
+        ESP_LOGI(FAN_MIPI70_DISPLAY_TAG, "LVGL rotation 90°, logical %dx%d",
+                 (int)lv_display_get_horizontal_resolution(display_),
+                 (int)lv_display_get_vertical_resolution(display_));
 
         if (offset_x != 0 || offset_y != 0) {
             lv_display_set_offset(display_, offset_x, offset_y);
@@ -389,11 +396,11 @@ private:
         chat_message_label_ = lv_label_create(screen);
         lv_label_set_text(chat_message_label_, "");
         lv_obj_set_width(chat_message_label_, LV_HOR_RES - lvgl_theme->spacing(8)); // Subtract left and right padding
-        lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP); // Auto wrap mode
+        lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL_CIRCULAR); // Auto wrap mode
         lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0); // Center text alignment
         lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
         //lv_obj_align(chat_message_label_, LV_ALIGN_CENTER, 0, 0); // Vertically and horizontally centered in bottom_bar_
-        lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_MID, 0, -15);
+        lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_MID, 0, 0);
 
         low_battery_popup_ = lv_obj_create(screen);
         lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);

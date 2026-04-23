@@ -243,11 +243,6 @@ private:
         display_ = new FanMIPI70Display(io, disp_panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
                                       DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
         ESP_LOGI(TAG, "✅ JD9165 LCD初始化完成");
-
-        lv_display_t *disp = lv_display_get_default();
-        if (disp) {
-            lv_disp_set_rotation(disp, LV_DISPLAY_ROTATION_0);
-        }
     }
     void ResetTouchGT911()
     {
