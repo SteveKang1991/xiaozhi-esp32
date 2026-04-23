@@ -37,7 +37,10 @@ static const char *TAG = "🎬 MJPEG播放器";
 /* Panel geometry for fanfuture-p4-jd9165-wifi6-touch-lcd-7b */
 #define MJPEG_PANEL_WIDTH  1024
 #define MJPEG_PANEL_HEIGHT 600
-#define MJPEG_DRAW_RETRY_MAX 12
+/** LVGL 正在 flush（尤其 sw_rotate + 对话刷新）时，持锁前已提交的 DSI 传输可能仍在进行 */
+#define MJPEG_DRAW_RETRY_MAX        64
+#define MJPEG_LVGL_LOCK_TIMEOUT_MS  8000
+#define MJPEG_POST_LOCK_DRAIN_MS    1
 
 static esp_err_t mjpeg_get_frame_buffers(esp_lcd_panel_handle_t panel, void **fb0, void **fb1)
 {
@@ -69,7 +72,12 @@ static bool s_output_fb_shared;
 
 #define MJPEG_READ_TASK_PRIORITY   4
 #define MJPEG_DECODE_TASK_PRIORITY 3
-#define MJPEG_TASK_CORE_ID         0
+/*
+ * mjpeg_read 在 extract_frame 扫 JPEG 时可能长时间占满循环，须离开 CPU0，否则会饿死 IDLE0 触发看门狗。
+ * mjpeg_decode 多数时间在等队列、硬解、持锁 blit，不易长时间占满；与 LVGL 同核利于观感帧率。
+ */
+#define MJPEG_READ_TASK_CORE_ID   1
+#define MJPEG_DECODE_TASK_CORE_ID 0
 #define MJPEG_ROI_DRAW_LETTERBOX_ONCE 0
 /** 顶/底 letterbox 黑条，单次 draw_bitmap 最大行数（高大于视频上下黑边） */
 #define MJPEG_LBAND_MAX_LINES 16
@@ -107,8 +115,13 @@ static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int
         if (ret == ESP_OK) {
             return ret;
         }
-        /* dpi busy: yield and retry (longer under LVGL + WiFi load) */
-        vTaskDelay(pdMS_TO_TICKS(2));
+        /* dpi_panel_draw_bitmap: previous draw operation is not finished — 退避加长 */
+        int ms = 2 + (i >> 2);
+        if (ms > 12) {
+            ms = 12;
+        }
+        vTaskDelay(pdMS_TO_TICKS(ms));
+        taskYIELD();
     }
     return ret;
 }
@@ -491,8 +504,18 @@ static void mjpeg_read_task(void *arg)
     uint32_t skip_count = 0;
     FILE *opened_fp = NULL;
     uint8_t *read_buf = NULL;
-    uint8_t *io_buf = malloc(FILE_IO_BUF_SIZE);
+    uint8_t *io_buf = NULL;
+    bool read_buf_spiram = false;
+    bool io_buf_spiram = false;
     read_ctx_t ctx;
+
+    /* 读环 + stdio 缓冲放 PSRAM，省出 ~288KB 内部 SRAM，避免与 WiFi/SDIO(transport copy_buff) 抢堆 */
+    io_buf = heap_caps_malloc(FILE_IO_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (io_buf) {
+        io_buf_spiram = true;
+    } else {
+        io_buf = malloc(FILE_IO_BUF_SIZE);
+    }
 
     if (s_preload_buf && s_preload_size > 0) {
         ESP_LOGI(TAG, "📦 使用 start 阶段预加载 PSRAM（%u KB），播放期不读 SD",
@@ -529,7 +552,12 @@ static void mjpeg_read_task(void *arg)
         fseek(ctx.fp, 0, SEEK_SET);
         ESP_LOGI(TAG, "📄 文件大小: %.1f MB", file_size / (1024.0 * 1024.0));
 
-        read_buf = malloc(READ_BUF_SIZE);
+        read_buf = heap_caps_malloc(READ_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (read_buf) {
+            read_buf_spiram = true;
+        } else {
+            read_buf = malloc(READ_BUF_SIZE);
+        }
         if (!read_buf) {
             ESP_LOGE(TAG, "❌ 分配读取缓冲区失败");
             s_running = false;
@@ -618,8 +646,20 @@ exit:
         fclose(opened_fp);
         opened_fp = NULL;
     }
-    free(read_buf);
-    free(io_buf);
+    if (read_buf) {
+        if (read_buf_spiram) {
+            heap_caps_free(read_buf);
+        } else {
+            free(read_buf);
+        }
+    }
+    if (io_buf) {
+        if (io_buf_spiram) {
+            heap_caps_free(io_buf);
+        } else {
+            free(io_buf);
+        }
+    }
     ESP_LOGI(TAG, "📜 读取任务结束 (跳过帧: %lu)", (unsigned long)skip_count);
     s_read_task = NULL;
     vTaskDelete(NULL);
@@ -771,7 +811,7 @@ static void mjpeg_decode_task(void *arg)
 
         if (s_embed_lvgl && s_cfg.lv_video_canvas) {
             lv_obj_t *cv = (lv_obj_t *)s_cfg.lv_video_canvas;
-            if (lvgl_port_lock(5000)) {
+            if (lvgl_port_lock(MJPEG_LVGL_LOCK_TIMEOUT_MS)) {
                 lv_canvas_set_buffer(cv, s_cfg.fb[fb_idx], s_cfg.screen_width, s_cfg.screen_height,
                                      LV_COLOR_FORMAT_RGB565);
                 /* LVGL 9.4 无 lv_display_invalidate_area；画布整控件失效即可 */
@@ -783,8 +823,11 @@ static void mjpeg_decode_task(void *arg)
             const int y1 = (int)s_cfg.panel_roi_y;
             const int w = (int)s_cfg.screen_width;
             const int h = (int)s_cfg.screen_height;
-            /* DSI 提交队列与 LVGL 共享：需要短互斥避免 panel draw reentry */
-            if (lvgl_port_lock(200)) {
+            /* DSI 与 LVGL 共用 panel：须持锁，且锁内首帧前短暂退让，避免紧接 LVGL flush 的未完成传输 */
+            if (lvgl_port_lock(MJPEG_LVGL_LOCK_TIMEOUT_MS)) {
+                if (MJPEG_POST_LOCK_DRAIN_MS > 0) {
+                    vTaskDelay(pdMS_TO_TICKS(MJPEG_POST_LOCK_DRAIN_MS));
+                }
                 if (MJPEG_ROI_DRAW_LETTERBOX_ONCE && !s_roi_letterbox_drawn) {
                     mjpeg_roi_letterbox_draw(s_cfg.panel, MJPEG_PANEL_WIDTH, MJPEG_PANEL_HEIGHT, x1, y1, w, h);
                     s_roi_letterbox_drawn = true;
@@ -794,6 +837,13 @@ static void mjpeg_decode_task(void *arg)
                     ESP_LOGW(TAG, "⚠️ ROI draw失败: %s", esp_err_to_name(blit));
                 }
                 lvgl_port_unlock();
+            } else {
+                static uint32_t s_lock_fail_log;
+                uint32_t now = (uint32_t)(esp_timer_get_time() / 1000000);
+                if (now != s_lock_fail_log) {
+                    s_lock_fail_log = now;
+                    ESP_LOGW(TAG, "⚠️ lvgl_port_lock 超时(%dms)，跳过本帧 ROI", MJPEG_LVGL_LOCK_TIMEOUT_MS);
+                }
             }
         } else if (s_cfg.panel) {
             esp_lcd_panel_draw_bitmap(s_cfg.panel, 0, 0,
@@ -988,9 +1038,9 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
 
     /* 创建双任务 */
     BaseType_t ret;
-    /* 中等优先级，避免抢占 WiFi/语音/LVGL；读可略高于解码以喂满队列 */
+    /* 读=CPU1（避 WDT），解码=CPU0；优先级读>解码以喂满队列 */
     ret = xTaskCreatePinnedToCore(mjpeg_read_task, "mjpeg_read", 8192, NULL, MJPEG_READ_TASK_PRIORITY, &s_read_task,
-                                  MJPEG_TASK_CORE_ID);
+                                  MJPEG_READ_TASK_CORE_ID);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "❌ 创建读取任务失败");
         mjpeg_release_preload_buf();
@@ -999,7 +1049,7 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     }
 
     ret = xTaskCreatePinnedToCore(mjpeg_decode_task, "mjpeg_dec", 8192, NULL, MJPEG_DECODE_TASK_PRIORITY,
-                                  &s_decode_task, MJPEG_TASK_CORE_ID);
+                                  &s_decode_task, MJPEG_DECODE_TASK_CORE_ID);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "❌ 创建解码任务失败");
         mjpeg_release_preload_buf();
