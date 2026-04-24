@@ -143,6 +143,15 @@ public:
             return;
         }
 
+        /* 说话/LLM 会频繁 SetEmotion；若 MJPEG 已在播而本次又未能启动新 clip，切勿走主题 GIF 分支里的
+         * StopMjpegIfRunning()，否则会把正播的视频整段停掉。 */
+        if (mjpeg_player_is_running()) {
+            DisplayLockGuard lock(this);
+            lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+
         auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
         auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
         if (image == nullptr) {
@@ -193,7 +202,7 @@ public:
 private:
     static constexpr uint16_t kMjpegVideoWidth = 240;
     static constexpr uint16_t kMjpegVideoHeight = 290;
-    static constexpr uint8_t kMjpegTargetFps = 20;
+    static constexpr uint8_t kMjpegTargetFps = 30;
     std::string current_mjpeg_path_;
 
     static bool FileExists(const std::string& path) {

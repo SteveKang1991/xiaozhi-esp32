@@ -49,19 +49,21 @@ static const char *TAG = "MJPEG";
 #ifndef MJPEG_PANEL_HEIGHT
 #define MJPEG_PANEL_HEIGHT 320
 #endif
-/** LVGL 正在 flush（尤其 sw_rotate + 对话刷新）时，持锁前已提交的 DSI 传输可能仍在进行 */
+/* LVGL 与面板共用同一 SPI 时，draw_bitmap 与 LVGL flush 仍须互斥，否则可能花屏/卡死；ROI 用短超时即可。 */
 #define MJPEG_DRAW_RETRY_MAX        20
+#define MJPEG_ROI_LVGL_LOCK_MS      5
 #define MJPEG_LVGL_LOCK_TIMEOUT_MS  40
 #define MJPEG_POST_LOCK_DRAIN_MS    0
 #define MJPEG_DRAW_RETRY_US_MIN     500
 #define MJPEG_DRAW_RETRY_US_MAX     5000
 #define MJPEG_ROI_BAND_LINES        32
-#define MJPEG_LVGL_LOCK_TIMEOUT_RELAX_MS 40
-#define MJPEG_LVGL_LOCK_TIMEOUT_BUSY_MS  8
-#define MJPEG_LVGL_BUSY_HOLD_MS         3000
 /** 严格逐帧校验会重复解析 JPEG（extract+validate），会显著增加 read 侧 CPU 占用 */
 #ifndef MJPEG_STRICT_FRAME_VALIDATE
 #define MJPEG_STRICT_FRAME_VALIDATE 0
+#endif
+/** 帧率统计：每 N 帧打一条 Log（不宜过密） */
+#ifndef MJPEG_FPS_LOG_EVERY_N_FRAMES
+#define MJPEG_FPS_LOG_EVERY_N_FRAMES 500
 #endif
 
 static esp_err_t mjpeg_get_frame_buffers(esp_lcd_panel_handle_t panel, void **fb0, void **fb1)
@@ -820,8 +822,6 @@ static void mjpeg_decode_task(void *arg)
     int fb_idx = 0;
     uint32_t frame_count = 0;
     uint32_t decode_errors = 0;
-    uint32_t lock_timeouts = 0;
-    int64_t lock_busy_until_us = 0;
     int consecutive_errors = 0;
     bool first_frame_logged_once = false;
     int64_t start_time = esp_timer_get_time();
@@ -990,11 +990,7 @@ sw_decode_done:
             if (s_mjpeg_swap_rgb565_bytes) {
                 mjpeg_rgb565_swap_bytes_inplace(s_cfg.fb[fb_idx], (size_t)w * (size_t)h);
             }
-            /* DSI 与 LVGL 共用 panel：须持锁，且锁内首帧前短暂退让，避免紧接 LVGL flush 的未完成传输 */
-            const int64_t now_us = esp_timer_get_time();
-            const uint32_t lock_timeout_ms =
-                (now_us < lock_busy_until_us) ? MJPEG_LVGL_LOCK_TIMEOUT_BUSY_MS : MJPEG_LVGL_LOCK_TIMEOUT_RELAX_MS;
-            if (lvgl_port_lock((int)lock_timeout_ms)) {
+            if (lvgl_port_lock(MJPEG_ROI_LVGL_LOCK_MS)) {
                 if (MJPEG_POST_LOCK_DRAIN_MS > 0) {
                     vTaskDelay(pdMS_TO_TICKS(MJPEG_POST_LOCK_DRAIN_MS));
                 }
@@ -1007,16 +1003,6 @@ sw_decode_done:
                     ESP_LOGW(TAG, "⚠️ ROI draw失败: %s", esp_err_to_name(blit));
                 }
                 lvgl_port_unlock();
-            } else {
-                lock_timeouts++;
-                /* 一旦发生锁竞争，接下来 3s 进入短等待模式，优先保障语音实时性 */
-                lock_busy_until_us = now_us + (int64_t)MJPEG_LVGL_BUSY_HOLD_MS * 1000LL;
-                static uint32_t s_lock_fail_log;
-                uint32_t now = (uint32_t)(now_us / 1000000);
-                if (now != s_lock_fail_log) {
-                    s_lock_fail_log = now;
-                    ESP_LOGW(TAG, "⚠️ lvgl_port_lock 超时(%lums)，跳过本帧 ROI", (unsigned long)lock_timeout_ms);
-                }
             }
         } else if (s_cfg.panel) {
             esp_lcd_panel_draw_bitmap(s_cfg.panel, 0, 0,
@@ -1036,15 +1022,15 @@ sw_decode_done:
         }
 #endif
 
-        if (frame_count % 200 == 0) {
+        if (frame_count % MJPEG_FPS_LOG_EVERY_N_FRAMES == 0) {
             int64_t elapsed = esp_timer_get_time() - start_time;
+            if (elapsed < 1) {
+                elapsed = 1;
+            }
             ESP_LOGI(TAG, "📊 %lu帧, %.1f fps, 错误%lu",
                      (unsigned long)frame_count,
-                     frame_count * 1e6f / elapsed,
+                     (float)frame_count * 1e6f / (float)elapsed,
                      (unsigned long)decode_errors);
-            if (lock_timeouts > 0) {
-                ESP_LOGW(TAG, "📉 ROI跳帧累计: lvgl锁超时=%lu", (unsigned long)lock_timeouts);
-            }
         }
 
         /* 帧率控制 */
