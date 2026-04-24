@@ -60,11 +60,11 @@ bool Application::SetDeviceState(DeviceState state) {
 
 void Application::Initialize() {
     auto& board = Board::GetInstance();
-    SetDeviceState(kDeviceStateStarting);
-
-    // Setup the display
+    // Setup display UI first, so subsequent state/status notifications are visible.
     auto display = board.GetDisplay();
     display->SetupUI();
+
+    SetDeviceState(kDeviceStateStarting);
     // Print board name/version info
     display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
 

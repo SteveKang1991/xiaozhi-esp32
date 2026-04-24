@@ -60,6 +60,8 @@ list(APPEND SOURCES
     "boards/common/sleep_timer.cc"
     "boards/common/sy6970.cc"
     "boards/common/system_reset.cc"
+    "boards/common/mjpeg_player.c"
+    "boards/common/sd_scanner.c"
 )
 list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/common)
 
@@ -801,6 +803,10 @@ elseif(CONFIG_BOARD_TYPE_FANFUTURE_S6_778928_WiFI)
     set(DEFAULT_EMOJI_COLLECTION noto-emoji_128)
 endif()
 
+if(BOARD_TYPE)
+    list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_TYPE})
+endif()
+
 if(MANUFACTURER)
     file(GLOB BOARD_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/${MANUFACTURER}/${BOARD_TYPE}/*.cc
@@ -985,6 +991,8 @@ idf_component_register(SRCS ${SOURCES}
                         esp_driver_gpio
                         esp_driver_uart
                         esp_driver_spi
+                        esp_new_jpeg
+                        sdmmc
                         esp_driver_i2c
                         esp_driver_i2s
                         esp_driver_jpeg

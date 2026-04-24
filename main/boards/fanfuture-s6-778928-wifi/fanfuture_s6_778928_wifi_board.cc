@@ -25,6 +25,8 @@
 #include "esp_lcd_st7796.h"
 #include <driver/spi_common.h>
 
+#include "sd_scanner.h"
+
 #include <driver/rtc_io.h>
 #include <esp_sleep.h>
 #include <esp_ota_ops.h> 
@@ -200,6 +202,14 @@ private:
         //static LightAMController lamp(LIGHT_AM_GPIO);
     }
 
+    void InitializeSdForMjpeg() {
+        ESP_LOGI(TAG, "Init SD for MJPEG...");
+        const esp_err_t ret = sd_scanner_init_and_scan();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "SD init failed, emotions fall back to GIF/static: %s", esp_err_to_name(ret));
+        }
+    }
+
     void InitializeCamera() {
         // Open camera power
         pca9557_->SetOutputState(2, 0);
@@ -245,9 +255,10 @@ public:
         InitializeI2c();
         InitializeSpi();
         InitializeLcdDisplay();
+        InitializeSdForMjpeg();
         InitializeButtons();
         InitializeIot();
-        InitializeCamera();
+        //InitializeCamera();
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }  
@@ -303,9 +314,9 @@ public:
         WifiBoard::SetPowerSaveLevel(level);
     }
 
-    virtual Camera* GetCamera() override {
+    /**virtual Camera* GetCamera() override {
         return camera_;
-    }
+    }**/
 };
 
 DECLARE_BOARD(FanFutureS6778928WiFiBoard);

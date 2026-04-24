@@ -2,6 +2,7 @@
 #define _BOARD_CONFIG_H_
 
 #include <driver/gpio.h>
+#include <driver/spi_master.h>
 
 #define AUDIO_INPUT_SAMPLE_RATE  24000
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000
@@ -67,5 +68,17 @@
 #define CAMERA_PIN_PCLK GPIO_NUM_47
 
 #define XCLK_FREQ_HZ 20000000
+
+/**
+ * TF 卡 SDSPI（与屏 SPI3 分离用 SPI2）。请按实际 PCB 修改引脚；无卡可设 BOARD_SD_USE_SPI 为 0。
+ * 注意：ESP32-S3 无 GPIO 22~25；GPIO 19/20 常为 USB，不宜作 SD 线。
+ * MJPEG 示例：/sdcard/Emotion/idle-240x240.mjpeg
+ */
+#define BOARD_SD_USE_SPI        1
+#define BOARD_SD_SPI_HOST       SPI2_HOST
+#define BOARD_SD_SPI_CLK        GPIO_NUM_48
+#define BOARD_SD_SPI_MOSI       GPIO_NUM_47
+#define BOARD_SD_SPI_MISO       GPIO_NUM_13
+#define BOARD_SD_SPI_CS         GPIO_NUM_21
 
 #endif // _BOARD_CONFIG_H_

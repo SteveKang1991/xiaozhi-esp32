@@ -15,9 +15,16 @@
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
 #include <cstring>
+#include <cstdio>
 #include <src/misc/cache/lv_cache.h>
+#include <sys/stat.h>
 
 #include "board.h"
+
+extern "C" {
+#include "mjpeg_player.h"
+#include "sd_scanner.h"
+}
 
 #define TAG "FanLcd778928Display"
 
@@ -113,6 +120,10 @@ public:
         SetupUI();
     }
 
+    ~FanLcd778928Display() {
+        StopMjpegIfRunning();
+    }
+
     virtual void SetEmotion(const char* emotion) override {
         // Stop any running GIF animation
         if (gif_controller_) {
@@ -125,12 +136,20 @@ public:
             return;
         }
 
+        if (StartMjpegEmotion(emotion)) {
+            DisplayLockGuard lock(this);
+            lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+
         auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
         auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
         if (image == nullptr) {
             image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage("neutral") : nullptr;
         }
         if (image == nullptr) {
+            StopMjpegIfRunning();
             const char* utf8 = font_awesome_get_utf8(emotion);
             if (utf8 != nullptr && emoji_label_ != nullptr) {
                 DisplayLockGuard lock(this);
@@ -141,6 +160,7 @@ public:
             return;
         }
 
+        StopMjpegIfRunning();
         DisplayLockGuard lock(this);
         if (image->IsGif()) {
             // Create new GIF controller
@@ -171,7 +191,110 @@ public:
     }
 
 private:
+    static constexpr uint16_t kMjpegVideoWidth = 240;
+    static constexpr uint16_t kMjpegVideoHeight = 240;
+    static constexpr uint8_t kMjpegTargetFps = 20;
+    std::string current_mjpeg_path_;
+
+    static bool FileExists(const std::string& path) {
+        struct stat st = {};
+        return stat(path.c_str(), &st) == 0;
+    }
+
+    static std::string BuildMjpegPath(const char* name) {
+        char suffix[48];
+        snprintf(suffix, sizeof(suffix), "-%ux%u.mjpeg", (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
+        return std::string("/sdcard/Emotion/") + name + suffix;
+    }
+
+    static const char* MapEmotionToClip(const char* emotion) {
+        if (emotion == nullptr || std::strlen(emotion) == 0) {
+            return "idle";
+        }
+        if (strcmp(emotion, "neutral") == 0) {
+            return "idle";
+        }
+        return emotion;
+    }
+
+    bool StartMjpegEmotion(const char* emotion) {
+        if (!sd_scanner_is_mounted()) {
+            ESP_LOGW(TAG, "MJPEG跳过：SD卡未挂载");
+            return false;
+        }
+
+        const char* clip_name = MapEmotionToClip(emotion);
+        std::string clip_path = BuildMjpegPath(clip_name);
+        if (!FileExists(clip_path)) {
+            ESP_LOGW(TAG, "未找到情绪视频文件 '%s'：%s", clip_name, clip_path.c_str());
+            clip_path = BuildMjpegPath("idle");
+            if (!FileExists(clip_path)) {
+                ESP_LOGW(TAG, "未找到回退视频文件：%s", clip_path.c_str());
+                ESP_LOGW(TAG, "请放置文件：/sdcard/Emotion/<emotion>-%ux%u.mjpeg（当前目标分辨率 %ux%u）",
+                         (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight,
+                         (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
+                return false;
+            }
+            ESP_LOGI(TAG, "使用回退视频文件：%s", clip_path.c_str());
+        }
+
+        if (mjpeg_player_is_running()) {
+            if (clip_path == current_mjpeg_path_) {
+                return true;
+            }
+            mjpeg_player_stop();
+        }
+
+        int rx = (width_ - static_cast<int>(kMjpegVideoWidth)) / 2;
+        int ry = (height_ - static_cast<int>(kMjpegVideoHeight)) / 2;
+        if (rx < 0) {
+            rx = 0;
+        }
+        if (ry < 0) {
+            ry = 0;
+        }
+
+        current_mjpeg_path_ = clip_path;
+        mjpeg_player_cfg_t cfg = {};
+        cfg.file_path = current_mjpeg_path_.c_str();
+        cfg.panel = panel_;
+        cfg.fb[0] = nullptr;
+        cfg.fb[1] = nullptr;
+        cfg.screen_width = kMjpegVideoWidth;
+        cfg.screen_height = kMjpegVideoHeight;
+        cfg.target_fps = kMjpegTargetFps;
+        cfg.loop = true;
+        cfg.fb_stride = 0;
+        cfg.fb_size = 0;
+        cfg.lv_video_canvas = nullptr;
+        cfg.panel_blit_roi = true;
+        cfg.panel_roi_x = static_cast<uint16_t>(rx);
+        cfg.panel_roi_y = static_cast<uint16_t>(ry);
+
+        const esp_err_t ret = mjpeg_player_start(&cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "MJPEG启动失败（%s）：%s", current_mjpeg_path_.c_str(), esp_err_to_name(ret));
+            current_mjpeg_path_.clear();
+            return false;
+        }
+
+        ESP_LOGI(TAG, "MJPEG表情播放：%s", current_mjpeg_path_.c_str());
+        return true;
+    }
+
+    void StopMjpegIfRunning() {
+        if (mjpeg_player_is_running()) {
+            mjpeg_player_stop();
+        }
+        current_mjpeg_path_.clear();
+    }
+
     void SetupUI() {
+        if (setup_ui_called_) {
+            ESP_LOGW(TAG, "SetupUI() 被重复调用，跳过");
+            return;
+        }
+        Display::SetupUI();
         DisplayLockGuard lock(this);
         LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
         auto text_font = lvgl_theme->text_font()->font();
