@@ -74,7 +74,7 @@ public:
 
         ESP_LOGI(TAG, "Initialize LVGL port");
         lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-        port_cfg.task_priority = 1;
+        port_cfg.task_priority = 2;
     #if CONFIG_SOC_CPU_CORES_NUM > 1
         port_cfg.task_affinity = 1;
     #endif
@@ -192,7 +192,7 @@ public:
 
 private:
     static constexpr uint16_t kMjpegVideoWidth = 240;
-    static constexpr uint16_t kMjpegVideoHeight = 240;
+    static constexpr uint16_t kMjpegVideoHeight = 290;
     static constexpr uint8_t kMjpegTargetFps = 20;
     std::string current_mjpeg_path_;
 
@@ -246,7 +246,8 @@ private:
         }
 
         int rx = (width_ - static_cast<int>(kMjpegVideoWidth)) / 2;
-        int ry = (height_ - static_cast<int>(kMjpegVideoHeight)) / 2;
+        /* 顶端对齐：视频从屏幕 y=0 开始显示 */
+        int ry = 0;
         if (rx < 0) {
             rx = 0;
         }
@@ -457,6 +458,7 @@ private:
         lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
         //lv_obj_align(chat_message_label_, LV_ALIGN_CENTER, 0, 0); // Vertically and horizontally centered in bottom_bar_
         lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_MID, 0, -35);
+        lv_obj_add_flag(chat_message_label_, LV_OBJ_FLAG_HIDDEN);
 
         low_battery_popup_ = lv_obj_create(screen);
         lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);

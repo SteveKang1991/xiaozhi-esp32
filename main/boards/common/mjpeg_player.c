@@ -51,10 +51,14 @@ static const char *TAG = "MJPEG";
 #endif
 /** LVGL 正在 flush（尤其 sw_rotate + 对话刷新）时，持锁前已提交的 DSI 传输可能仍在进行 */
 #define MJPEG_DRAW_RETRY_MAX        20
-#define MJPEG_LVGL_LOCK_TIMEOUT_MS  20
+#define MJPEG_LVGL_LOCK_TIMEOUT_MS  40
 #define MJPEG_POST_LOCK_DRAIN_MS    0
 #define MJPEG_DRAW_RETRY_US_MIN     500
 #define MJPEG_DRAW_RETRY_US_MAX     5000
+#define MJPEG_ROI_BAND_LINES        32
+#define MJPEG_LVGL_LOCK_TIMEOUT_RELAX_MS 40
+#define MJPEG_LVGL_LOCK_TIMEOUT_BUSY_MS  8
+#define MJPEG_LVGL_BUSY_HOLD_MS         3000
 /** 严格逐帧校验会重复解析 JPEG（extract+validate），会显著增加 read 侧 CPU 占用 */
 #ifndef MJPEG_STRICT_FRAME_VALIDATE
 #define MJPEG_STRICT_FRAME_VALIDATE 0
@@ -94,6 +98,8 @@ static bool s_panel_roi_blit;
 static bool s_roi_letterbox_drawn;
 /* SPI LCD 直写路径需要与面板颜色字节序对齐；LVGL 路径已由 swap_bytes 处理 */
 static bool s_mjpeg_swap_rgb565_bytes;
+/* 若 esp_new_jpeg 支持 RGB565_BE，则优先直接输出目标字节序，避免每帧 CPU swap */
+static bool s_mjpeg_sw_decode_rgb565_be;
 static bool s_output_fb_shared;
 
 /** 首若干帧打印 decode/blit 耗时，便于确认瓶颈（非 0 启用） */
@@ -160,7 +166,9 @@ static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int
         }
         esp_rom_delay_us(us);
         taskYIELD();
-        vTaskDelay(1);
+        if ((i & 0x3) == 0x3) {
+            vTaskDelay(1);
+        }
     }
     return ret;
 }
@@ -172,7 +180,7 @@ static esp_err_t mjpeg_panel_draw_bitmap_banded(esp_lcd_panel_handle_t panel, in
         return ESP_ERR_INVALID_ARG;
     }
     const uint8_t *src = (const uint8_t *)data;
-    const int band_h = 16;
+    const int band_h = MJPEG_ROI_BAND_LINES;
     for (int y = 0; y < h; y += band_h) {
         int ch = h - y;
         if (ch > band_h) {
@@ -191,10 +199,18 @@ static esp_err_t mjpeg_panel_draw_bitmap_banded(esp_lcd_panel_handle_t panel, in
 
 static inline void mjpeg_rgb565_swap_bytes_inplace(void *buf, size_t pixel_count)
 {
-    uint16_t *p = (uint16_t *)buf;
-    for (size_t i = 0; i < pixel_count; ++i) {
-        uint16_t v = p[i];
-        p[i] = (uint16_t)((v << 8) | (v >> 8));
+    uint16_t *p16 = (uint16_t *)buf;
+    size_t i = 0;
+    size_t n32 = pixel_count >> 1; /* 2 pixels per 32-bit word */
+    uint32_t *p32 = (uint32_t *)buf;
+    for (size_t j = 0; j < n32; ++j) {
+        uint32_t v = p32[j];
+        p32[j] = ((v & 0x00FF00FFu) << 8) | ((v & 0xFF00FF00u) >> 8);
+        i += 2;
+    }
+    if (i < pixel_count) {
+        uint16_t v = p16[i];
+        p16[i] = (uint16_t)((v << 8) | (v >> 8));
     }
 }
 
@@ -775,7 +791,11 @@ static void mjpeg_decode_task(void *arg)
     };
 #else
     jpeg_dec_config_t sw_dec_cfg = DEFAULT_JPEG_DEC_CONFIG();
+#if defined(JPEG_PIXEL_FORMAT_RGB565_BE)
+    sw_dec_cfg.output_type = s_mjpeg_sw_decode_rgb565_be ? JPEG_PIXEL_FORMAT_RGB565_BE : JPEG_PIXEL_FORMAT_RGB565_LE;
+#else
     sw_dec_cfg.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+#endif
     sw_dec_cfg.rotate = JPEG_ROTATE_0D;
     jpeg_dec_handle_t sw_dec = NULL;
     if (jpeg_dec_open(&sw_dec_cfg, &sw_dec) != JPEG_ERR_OK || sw_dec == NULL) {
@@ -800,6 +820,8 @@ static void mjpeg_decode_task(void *arg)
     int fb_idx = 0;
     uint32_t frame_count = 0;
     uint32_t decode_errors = 0;
+    uint32_t lock_timeouts = 0;
+    int64_t lock_busy_until_us = 0;
     int consecutive_errors = 0;
     bool first_frame_logged_once = false;
     int64_t start_time = esp_timer_get_time();
@@ -969,7 +991,10 @@ sw_decode_done:
                 mjpeg_rgb565_swap_bytes_inplace(s_cfg.fb[fb_idx], (size_t)w * (size_t)h);
             }
             /* DSI 与 LVGL 共用 panel：须持锁，且锁内首帧前短暂退让，避免紧接 LVGL flush 的未完成传输 */
-            if (lvgl_port_lock(MJPEG_LVGL_LOCK_TIMEOUT_MS)) {
+            const int64_t now_us = esp_timer_get_time();
+            const uint32_t lock_timeout_ms =
+                (now_us < lock_busy_until_us) ? MJPEG_LVGL_LOCK_TIMEOUT_BUSY_MS : MJPEG_LVGL_LOCK_TIMEOUT_RELAX_MS;
+            if (lvgl_port_lock((int)lock_timeout_ms)) {
                 if (MJPEG_POST_LOCK_DRAIN_MS > 0) {
                     vTaskDelay(pdMS_TO_TICKS(MJPEG_POST_LOCK_DRAIN_MS));
                 }
@@ -983,11 +1008,14 @@ sw_decode_done:
                 }
                 lvgl_port_unlock();
             } else {
+                lock_timeouts++;
+                /* 一旦发生锁竞争，接下来 3s 进入短等待模式，优先保障语音实时性 */
+                lock_busy_until_us = now_us + (int64_t)MJPEG_LVGL_BUSY_HOLD_MS * 1000LL;
                 static uint32_t s_lock_fail_log;
-                uint32_t now = (uint32_t)(esp_timer_get_time() / 1000000);
+                uint32_t now = (uint32_t)(now_us / 1000000);
                 if (now != s_lock_fail_log) {
                     s_lock_fail_log = now;
-                    ESP_LOGW(TAG, "⚠️ lvgl_port_lock 超时(%dms)，跳过本帧 ROI", MJPEG_LVGL_LOCK_TIMEOUT_MS);
+                    ESP_LOGW(TAG, "⚠️ lvgl_port_lock 超时(%lums)，跳过本帧 ROI", (unsigned long)lock_timeout_ms);
                 }
             }
         } else if (s_cfg.panel) {
@@ -1014,6 +1042,9 @@ sw_decode_done:
                      (unsigned long)frame_count,
                      frame_count * 1e6f / elapsed,
                      (unsigned long)decode_errors);
+            if (lock_timeouts > 0) {
+                ESP_LOGW(TAG, "📉 ROI跳帧累计: lvgl锁超时=%lu", (unsigned long)lock_timeouts);
+            }
         }
 
         /* 帧率控制 */
@@ -1062,14 +1093,21 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     s_panel_roi_blit = s_cfg.panel_blit_roi;
     s_roi_letterbox_drawn = false;
     s_mjpeg_swap_rgb565_bytes = false;
+    s_mjpeg_sw_decode_rgb565_be = false;
     if (s_panel_roi_blit && !s_embed_lvgl) {
 #if !CONFIG_IDF_TARGET_ESP32P4
-        /* S3 软解 + SPI panel 直写常见为 RGB565 字节序不一致：默认开启矫正 */
+        /* S3 软解 + SPI panel 直写：优先尝试让解码器直接输出 BE，减少每帧 CPU swap */
+#if defined(JPEG_PIXEL_FORMAT_RGB565_BE)
+        s_mjpeg_sw_decode_rgb565_be = true;
+        s_mjpeg_swap_rgb565_bytes = false;
+#else
         s_mjpeg_swap_rgb565_bytes = true;
 #endif
+#endif
     }
-    ESP_LOGI(TAG, "MJPEG颜色链路: panel_roi=%d lvgl=%d RGB565字节矫正=%d",
-             s_panel_roi_blit ? 1 : 0, s_embed_lvgl ? 1 : 0, s_mjpeg_swap_rgb565_bytes ? 1 : 0);
+    ESP_LOGI(TAG, "MJPEG颜色链路: panel_roi=%d lvgl=%d RGB565_BE解码=%d RGB565字节矫正=%d",
+             s_panel_roi_blit ? 1 : 0, s_embed_lvgl ? 1 : 0,
+             s_mjpeg_sw_decode_rgb565_be ? 1 : 0, s_mjpeg_swap_rgb565_bytes ? 1 : 0);
 
     if (s_embed_lvgl || s_panel_roi_blit) {
         const size_t sz = (size_t)s_cfg.screen_width * (size_t)s_cfg.screen_height * sizeof(uint16_t);

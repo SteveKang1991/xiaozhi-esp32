@@ -137,8 +137,8 @@ private:
         io_config.cs_gpio_num = GPIO_NUM_NC;
         io_config.dc_gpio_num = DISPLAY_DC_PIN;
         io_config.spi_mode = DISPLAY_SPI_MODE;
-        io_config.pclk_hz = 40 * 1000 * 1000;
-        io_config.trans_queue_depth = 10;
+        io_config.pclk_hz = 70 * 1000 * 1000;
+        io_config.trans_queue_depth = 24;
         io_config.lcd_cmd_bits = 8;
         io_config.lcd_param_bits = 8;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io_));
