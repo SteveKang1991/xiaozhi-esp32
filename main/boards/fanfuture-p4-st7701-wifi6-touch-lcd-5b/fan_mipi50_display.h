@@ -83,9 +83,8 @@ public:
             return;
         }
 
-        /* 与 esp32-p4-wifi6-touch-lcd-4c-7c bsp_display：物理 1024×600，LVGL 逻辑竖屏 600×1024 */
-        lv_display_set_rotation(display_, LV_DISPLAY_ROTATION_90);
-        ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "LVGL rotation 90°, logical %dx%d",
+        // 物理屏为 480x854 竖屏，无需旋转
+        ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "LVGL native resolution: %dx%d",
                  (int)lv_display_get_horizontal_resolution(display_),
                  (int)lv_display_get_vertical_resolution(display_));
 
@@ -167,8 +166,8 @@ public:
     }
 
 private:
-    static constexpr uint16_t kMjpegVideoWidth = 960;
-    static constexpr uint16_t kMjpegVideoHeight = 592;
+    static constexpr uint16_t kMjpegVideoWidth = 240;
+    static constexpr uint16_t kMjpegVideoHeight = 290;
     static constexpr uint8_t kMjpegTargetFps = 24;
     std::string current_mjpeg_path_;
 
@@ -178,7 +177,7 @@ private:
     }
 
     static std::string BuildMjpegPath(const char* name) {
-        return std::string("/sdcard/Emotion/") + name + "-960x592.mjpeg";
+        return std::string("/sdcard/Emotion/") + name + "-240x290.mjpeg";
     }
 
     static const char* MapEmotionToClip(const char* emotion) {

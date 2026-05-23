@@ -9,7 +9,7 @@
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_ldo_regulator.h"
 
-#include "esp_lcd_jd9165.h"
+#include "esp_lcd_st7701.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -52,6 +52,18 @@ private:
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
         ESP_LOGI(TAG, "🎵 音频编解码器I2C1初始化完成 (SDA: GPIO%d, SCL: GPIO%d)",
                  AUDIO_CODEC_I2C_SDA_PIN, AUDIO_CODEC_I2C_SCL_PIN);
+
+        // Scan for I2C devices (with short timeout per address)
+        uint8_t address;
+        ESP_LOGI(TAG, "Scanning I2C bus...");
+        for (address = 1; address < 127; address++) {
+            i2c_master_bus_handle_t cmd = i2c_bus_;
+            esp_err_t ret;
+            ret = i2c_master_probe(cmd, address, -1);
+            if (ret == ESP_OK) {
+                ESP_LOGI(TAG, "Found I2C device at address 0x%02x", address);
+            }
+        }
     }
 
     void InitializeTouchI2c() {
@@ -111,9 +123,21 @@ private:
             ESP_LOGI(TAG, "✅ AXP2101芯片ID验证成功: 0x%02X", chip_id);
 
             ESP_LOGI(TAG, "⚙️  配置电源输出...");
+            //ESP_ERROR_CHECK(pmic_->SetDcdc1Voltage(3300));
+            //ESP_ERROR_CHECK(pmic_->EnableDcdc1(true));
+            //ESP_LOGI(TAG, "   ⚡ DCDC1: 3.3V");
+
+            /**ESP_ERROR_CHECK(pmic_->SetDcdc2Voltage(1200));
+            ESP_ERROR_CHECK(pmic_->EnableDcdc2(true));
+            ESP_LOGI(TAG, "   ⚡ DCDC2: 1.2V");
+
+            ESP_ERROR_CHECK(pmic_->SetDcdc3Voltage(3400));
+            ESP_ERROR_CHECK(pmic_->EnableDcdc3(true));
+            ESP_LOGI(TAG, "   ⚡ DCDC3: 3.4V");
+
             ESP_ERROR_CHECK(pmic_->SetDcdc4Voltage(1800));
             ESP_ERROR_CHECK(pmic_->EnableDcdc4(true));
-            ESP_LOGI(TAG, "   📟 DCDC4: 1.8V (系统电压)");
+            ESP_LOGI(TAG, "   ⚡ DCDC4: 1.8V");**/
 
             ESP_ERROR_CHECK(pmic_->SetAldo2Voltage(1800));
             ESP_ERROR_CHECK(pmic_->EnableAldo2(true));
@@ -122,8 +146,6 @@ private:
             ESP_ERROR_CHECK(pmic_->SetAldo4Voltage(3300));
             ESP_ERROR_CHECK(pmic_->EnableAldo4(true));
             ESP_LOGI(TAG, "   💡 ALDO4: 3.3V");
-
-            ESP_LOGI(TAG, "   📡 DCDC3: 已禁用 (仅WiFi模式，无需4G供电)");
 
             ESP_ERROR_CHECK(pmic_->EnableBatteryVoltageAdc(true));
             ESP_ERROR_CHECK(pmic_->EnableVbusVoltageAdc(true));
@@ -186,7 +208,7 @@ private:
     }
 
     void InitializeLCD() {
-        ESP_LOGI(TAG, "🖥️  初始化JD9165 LCD显示屏...");
+        ESP_LOGI(TAG, "🖥️  初始化ST7701 LCD显示屏...");
         bsp_enable_dsi_phy_power();
         esp_lcd_panel_io_handle_t io = NULL;
         esp_lcd_panel_handle_t disp_panel = NULL;
@@ -196,37 +218,49 @@ private:
             .bus_id = 0,
             .num_data_lanes = 2,
             .phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT,
-            .lane_bit_rate_mbps = 614,
+            .lane_bit_rate_mbps = 500,
         };
         esp_lcd_new_dsi_bus(&bus_config, &mipi_dsi_bus);
         ESP_LOGI(TAG, "   MIPI DSI总线: 2通道, %d Mbps", bus_config.lane_bit_rate_mbps);
 
         ESP_LOGI(TAG, "Install MIPI DSI LCD control panel");
-        esp_lcd_dbi_io_config_t dbi_config = JD9165_PANEL_IO_DBI_CONFIG();
+        esp_lcd_dbi_io_config_t dbi_config = {
+            .virtual_channel = 0,
+            .lcd_cmd_bits = 8,
+            .lcd_param_bits = 8,
+        };
         esp_lcd_new_panel_io_dbi(mipi_dsi_bus, &dbi_config, &io);
 
-        esp_lcd_dpi_panel_config_t dpi_config = {};
-        dpi_config.dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT;
-        dpi_config.dpi_clock_freq_mhz = 51;
-        dpi_config.virtual_channel = 0;
-        dpi_config.pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565;
-        /* 双帧缓冲：一边扫描输出时，另一块可供 CPU/DMA2D 写入，显著降低
-         * "previous draw operation is not finished" 与 MJPEG+LVGL 抢同一提交槽的概率 */
-        dpi_config.num_fbs = 2;
-        dpi_config.video_timing.h_size = 1024;
-        dpi_config.video_timing.v_size = 600;
-        dpi_config.video_timing.hsync_pulse_width = 24;
-        dpi_config.video_timing.hsync_back_porch = 136;
-        dpi_config.video_timing.hsync_front_porch = 160;
-        dpi_config.video_timing.vsync_pulse_width = 2;
-        dpi_config.video_timing.vsync_back_porch = 21;
-        dpi_config.video_timing.vsync_front_porch = 12;
-        dpi_config.flags.use_dma2d = true;
+        esp_lcd_dpi_panel_config_t dpi_config = {
+            .virtual_channel = 0,
+            .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
+            .dpi_clock_freq_mhz = 25,
+            .pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565,
+            .in_color_format = LCD_COLOR_FMT_RGB565,
+            .out_color_format = LCD_COLOR_FMT_RGB565,
+            .num_fbs = 2,
+            .video_timing = {
+                .h_size = 480,
+                .v_size = 854,
+                .hsync_pulse_width = 20,
+                .hsync_back_porch = 20,
+                .hsync_front_porch = 20,
+                .vsync_pulse_width = 6,
+                .vsync_back_porch = 10,
+                .vsync_front_porch = 10,
+            },
+            .flags = {
+                .use_dma2d = true,
+            },
+        };
 
-        jd9165_vendor_config_t vendor_config = {
+        st7701_vendor_config_t vendor_config = {
             .mipi_config = {
                 .dsi_bus = mipi_dsi_bus,
                 .dpi_config = &dpi_config,
+            },
+            .flags = {
+                .use_mipi_interface = 1,
             },
         };
 
@@ -236,15 +270,16 @@ private:
             .bits_per_pixel = 16,
             .vendor_config = &vendor_config,
         };
-        esp_lcd_new_panel_jd9165(io, &lcd_dev_config, &disp_panel);
+        esp_lcd_new_panel_st7701(io, &lcd_dev_config, &disp_panel);
         esp_lcd_panel_reset(disp_panel);
         esp_lcd_panel_init(disp_panel);
+        esp_lcd_panel_disp_on_off(disp_panel, true);
         ESP_LOGI(TAG, "   分辨率: %dx%d", DISPLAY_WIDTH, DISPLAY_HEIGHT);
         ESP_LOGI(TAG, "   DPI时钟: %d MHz", dpi_config.dpi_clock_freq_mhz);
 
         display_ = new FanMIPI50Display(io, disp_panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
                                       DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
-        ESP_LOGI(TAG, "✅ JD9165 LCD初始化完成");
+        ESP_LOGI(TAG, "✅ ST7701 LCD初始化完成");
     }
 
     void InitializeButtons() {
@@ -332,10 +367,10 @@ public:
         InitializeTouchI2c();
         InitializeAXP2101();
         //InitializeLCD();
-        InitializeSdForMjpeg();
-        InitializeCamera();
+        //InitializeSdForMjpeg();
+        //InitializeCamera();
         InitializeButtons();
-        GetBacklight()->RestoreBrightness();
+        //GetBacklight()->RestoreBrightness();
     }
 
     ~FanFutureP4ST7701WiFi6TouchLcd5BBoard() {
@@ -362,13 +397,13 @@ public:
         return &audio_codec;
     }
 
-    virtual Display *GetDisplay() override {
+    /**virtual Display *GetDisplay() override {
         return display_;
-    }
+    }**/
 
-    virtual Camera* GetCamera() override {
+    /**virtual Camera* GetCamera() override {
         return camera_;
-    }
+    }**/
 
     virtual Backlight* GetBacklight() override {
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
