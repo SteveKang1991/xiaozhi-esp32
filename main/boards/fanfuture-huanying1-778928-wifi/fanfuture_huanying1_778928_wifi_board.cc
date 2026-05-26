@@ -4,7 +4,6 @@
 #include "application.h"
 #include "button.h"
 #include "config.h"
-#include "i2c_device.h"
 #include "esp32_camera.h"
 
 #include "power_save_timer.h"
@@ -14,7 +13,6 @@
 #include "power_manager.h"
 #include "lightam_controller.h"
 #include "fan_lcd778928_display.h"
-#include "custom_audio_codec.h"
 
 #include <wifi_station.h>
 #include <esp_log.h>
@@ -43,7 +41,6 @@ private:
     PowerManager* power_manager_;
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
-    Pca9557* pca9557_;
     Esp32Camera* camera_;
     bool aec_device = false;
 
@@ -100,23 +97,6 @@ private:
             },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
-
-        //vTaskDelay(1000 / portTICK_PERIOD_MS);
-
-        // Scan for I2C devices
-        /**uint8_t address;
-        ESP_LOGI(TAG, "Scanning I2C bus...");
-        for (address = 1; address < 127; address++) {
-            i2c_master_bus_handle_t cmd = i2c_bus_;
-            esp_err_t ret;
-            ret = i2c_master_probe(cmd, address, -1);
-            if (ret == ESP_OK) {
-                ESP_LOGI(TAG, "Found I2C device at address 0x%02x", address);
-            }
-        }**/
-
-        // Initialize PCA9557
-        pca9557_ = new Pca9557(i2c_bus_, 0x19);
     }
 
     void InitializeSpi() {
@@ -212,7 +192,7 @@ private:
 
     void InitializeCamera() {
         // Open camera power
-        pca9557_->SetOutputState(2, 0);
+        //pca9557_->SetOutputState(2, 0);
 
         camera_config_t config = {};
         config.ledc_channel = LEDC_CHANNEL_2;
@@ -277,9 +257,19 @@ public:
     }**/
 
     virtual AudioCodec* GetAudioCodec() override {
-        static CustomAudioCodec audio_codec(
-            i2c_bus_, 
-            pca9557_);
+        static BoxAudioCodec audio_codec(
+            i2c_bus_,
+            AUDIO_INPUT_SAMPLE_RATE,
+            AUDIO_OUTPUT_SAMPLE_RATE,
+            AUDIO_I2S_GPIO_MCLK,
+            AUDIO_I2S_GPIO_BCLK,
+            AUDIO_I2S_GPIO_WS,
+            AUDIO_I2S_GPIO_DOUT,
+            AUDIO_I2S_GPIO_DIN,
+            AUDIO_CODEC_PA_PIN,
+            AUDIO_CODEC_ES8311_ADDR,
+            AUDIO_CODEC_ES7210_ADDR,
+            AUDIO_INPUT_REFERENCE);
         return &audio_codec;
     }
 

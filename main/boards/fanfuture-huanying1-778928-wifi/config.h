@@ -15,7 +15,7 @@
 #define AUDIO_I2S_GPIO_DIN  GPIO_NUM_13
 #define AUDIO_I2S_GPIO_DOUT GPIO_NUM_47
 
-#define AUDIO_CODEC_USE_PCA9557
+#define AUDIO_CODEC_PA_PIN        GPIO_NUM_41
 #define AUDIO_CODEC_I2C_SDA_PIN  GPIO_NUM_1
 #define AUDIO_CODEC_I2C_SCL_PIN  GPIO_NUM_2
 #define AUDIO_CODEC_ES8311_ADDR  ES8311_CODEC_DEFAULT_ADDR
@@ -27,11 +27,11 @@
 //#define VOLUME_UP_BUTTON_GPIO     GPIO_NUM_12  // 音量增加按钮引脚
 //#define VOLUME_DOWN_BUTTON_GPIO   GPIO_NUM_11  // 音量减少按钮引脚
 
-#define DISPLAY_BACKLIGHT_PIN GPIO_NUM_45     // 显示屏背光控制引脚
-#define DISPLAY_MOSI_PIN      GPIO_NUM_40     // 显示屏 MOSI（主出从入）引脚，用于数据传输
-#define DISPLAY_CLK_PIN       GPIO_NUM_41     // 显示屏时钟引脚，用于同步数据传输
-#define DISPLAY_DC_PIN        GPIO_NUM_39     // 显示屏数据/命令选择引脚
-#define DISPLAY_RST_PIN       GPIO_NUM_38     // 显示屏复位引脚
+#define DISPLAY_BACKLIGHT_PIN GPIO_NUM_8     // 显示屏背光控制引脚
+#define DISPLAY_MOSI_PIN      GPIO_NUM_16     // 显示屏 MOSI（主出从入）引脚，用于数据传输
+#define DISPLAY_CLK_PIN       GPIO_NUM_15     // 显示屏时钟引脚，用于同步数据传输
+#define DISPLAY_DC_PIN        GPIO_NUM_17     // 显示屏数据/命令选择引脚
+#define DISPLAY_RST_PIN       GPIO_NUM_18     // 显示屏复位引脚
 
 #ifdef CONFIG_LCD_ST7789_240X320
 #define LCD_TYPE_ST7789_SERIAL
