@@ -136,21 +136,21 @@ public:
             return;
         }
 
-        if (StartMjpegEmotion(emotion)) {
+        /**if (StartMjpegEmotion(emotion)) {
             DisplayLockGuard lock(this);
             lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
             return;
-        }
+        }**/
 
         /* 说话/LLM 会频繁 SetEmotion；若 MJPEG 已在播而本次又未能启动新 clip，切勿走主题 GIF 分支里的
          * StopMjpegIfRunning()，否则会把正播的视频整段停掉。 */
-        if (mjpeg_player_is_running()) {
+        /**if (mjpeg_player_is_running()) {
             DisplayLockGuard lock(this);
             lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
             return;
-        }
+        }**/
 
         auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
         auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
@@ -158,7 +158,7 @@ public:
             image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage("neutral") : nullptr;
         }
         if (image == nullptr) {
-            StopMjpegIfRunning();
+            //StopMjpegIfRunning();
             const char* utf8 = font_awesome_get_utf8(emotion);
             if (utf8 != nullptr && emoji_label_ != nullptr) {
                 DisplayLockGuard lock(this);
@@ -169,7 +169,7 @@ public:
             return;
         }
 
-        StopMjpegIfRunning();
+        //StopMjpegIfRunning();
         DisplayLockGuard lock(this);
         if (image->IsGif()) {
             // Create new GIF controller

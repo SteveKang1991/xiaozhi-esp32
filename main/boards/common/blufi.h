@@ -144,4 +144,11 @@ private:
     std::vector<wifi_ap_record_t> m_ap_records;
     bool m_scan_in_progress = false;
     bool m_scan_should_save_ssid = true;
+    bool m_wifi_list_requested = false;
+
+    // IP event handler for status report
+    static void _ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
+                                  void *event_data);
+    void _on_got_ip();
+    esp_event_handler_instance_t m_ip_handler_instance{};
 };

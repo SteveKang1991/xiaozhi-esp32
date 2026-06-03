@@ -29,7 +29,7 @@ protected:
     /**
      * Enter WiFi configuration mode
      */
-    void StartWifiConfigMode();
+    virtual void StartWifiConfigMode();
 
     /**
      * WiFi connection timeout callback
