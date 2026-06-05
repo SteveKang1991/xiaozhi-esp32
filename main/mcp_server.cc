@@ -186,7 +186,7 @@ void McpServer::AddUserOnlyTools() {
                 return json;
             });
 
-#if CONFIG_LV_USE_SNAPSHOT
+#if CONFIG_LV_USE_SNAPSHOT && CONFIG_XIAOZHI_ENABLE_SCREEN_SNAPSHOT_JPEG
         AddUserOnlyTool("self.screen.snapshot", "Snapshot the screen and upload it to a specific URL",
             PropertyList({
                 Property("url", kPropertyTypeString),

@@ -24,7 +24,6 @@ set(SOURCES "audio/audio_codec.cc"
             "display/lvgl_display/lvgl_image.cc"
             "display/lvgl_display/gif/lvgl_gif.cc"
             "display/lvgl_display/gif/gifdec.c"
-            "display/lvgl_display/jpg/image_to_jpeg.cpp"
             "display/lvgl_display/jpg/jpeg_to_image.c"
             "protocols/protocol.cc"
             "protocols/mqtt_protocol.cc"
@@ -966,6 +965,10 @@ if(CONFIG_IDF_TARGET_ESP32)
 endif()
 
 # Include EspVideo if target is ESP32S3 or ESP32P4
+if(CONFIG_XIAOZHI_ENABLE_SCREEN_SNAPSHOT_JPEG)
+    list(APPEND SOURCES "display/lvgl_display/jpg/image_to_jpeg.cpp")
+endif()
+
 if(CONFIG_IDF_TARGET_ESP32S3 OR CONFIG_IDF_TARGET_ESP32P4)
     list(APPEND SOURCES "boards/common/esp_video.cc"
                         "boards/common/rndis_board.cc"

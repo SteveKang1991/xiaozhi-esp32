@@ -88,6 +88,9 @@ private:
     void _start_dedicated_wifi_scan();
     static void _wifi_scan_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
                                          void *event_data);
+    void _register_scan_handler();
+    void _unregister_scan_handler();
+    void _reset_scan_state();
 
     // These C-style functions are registered with ESP-IDF and call the corresponding instance
     // methods.
@@ -142,9 +145,11 @@ private:
 
     // WiFi scan related
     std::vector<wifi_ap_record_t> m_ap_records;
+    bool m_has_recent_scan_results = false;
     bool m_scan_in_progress = false;
     bool m_scan_should_save_ssid = true;
     bool m_wifi_list_requested = false;
+    esp_event_handler_instance_t m_scan_handler_instance{};
 
     // IP event handler for status report
     static void _ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,

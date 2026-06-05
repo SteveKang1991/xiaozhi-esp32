@@ -15,6 +15,7 @@
 #include "lightam_controller.h"
 #include "fan_lcd778928_display.h"
 #include "custom_audio_codec.h"
+#include "settings.h"
 
 #include <wifi_station.h>
 #include <esp_log.h>
@@ -30,6 +31,10 @@
 #include <driver/rtc_io.h>
 #include <esp_sleep.h>
 #include <esp_ota_ops.h> 
+
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+#include "blufi.h"
+#endif
  
 #define TAG "FanFutureS6778928WiFiBoard"
 
@@ -45,7 +50,7 @@ private:
     esp_lcd_panel_handle_t panel_ = nullptr;
     Pca9557* pca9557_;
     Esp32Camera* camera_;
-    bool aec_device = false;
+    bool aec_device = true;
 
     void InitializePowerManager() {
         power_manager_ = new PowerManager(GPIO_NUM_11);
@@ -313,6 +318,25 @@ public:
         }
         WifiBoard::SetPowerSaveLevel(level);
     }
+
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    virtual void StartWifiConfigMode() override {
+        ESP_LOGI(TAG, "Starting BluFi WiFi configuration mode");
+
+        // Call parent implementation
+        WifiBoard::StartWifiConfigMode();
+
+        // Show notification on display
+        auto* disp = GetDisplay();
+        if (disp) {
+            disp->ShowNotification("BluFi Mode\nSearch: Xiaozhi-Blufi");
+        }
+
+        // Play sound notification
+        Application::GetInstance().Alert(Lang::Strings::WIFI_CONFIG_MODE,
+            "Search: Xiaozhi-Blufi\nUse EspBlufi App", "gear", Lang::Sounds::OGG_WIFICONFIG);
+    }
+#endif
 
     /**virtual Camera* GetCamera() override {
         return camera_;

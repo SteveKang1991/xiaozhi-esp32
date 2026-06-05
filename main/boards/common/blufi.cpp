@@ -11,6 +11,7 @@
 #include "esp_wifi.h"
 #include "freertos/task.h"
 #include "wifi_manager.h"
+#include "esp_heap_caps.h"
 
 #define BLUFI_DEVICE_NAME "Xiaozhi-Blufi"
 
@@ -63,6 +64,12 @@ void esp_blufi_btc_deinit(void);
 
 static const char* BLUFI_TAG = "BLUFI_CLASS";
 
+static void LogBlufiInternalRam(const char* stage) {
+    const size_t free_sram = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t min_free_sram = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(BLUFI_TAG, "RAM[%s] free=%u min=%u", stage, (unsigned)free_sram, (unsigned)min_free_sram);
+}
+
 static wifi_mode_t GetWifiModeWithFallback(const WifiManager& wifi) {
     if (wifi.IsConfigMode()) {
         return WIFI_MODE_AP;
@@ -109,6 +116,7 @@ esp_err_t Blufi::init() {
     m_deinited = false;
     m_wifi_list_requested = false;
     m_ap_records.clear();
+    m_has_recent_scan_results = false;
     m_scan_in_progress = false;
 
     // Note: WiFi scan is NOT started here. When the phone requests the WiFi list
@@ -135,6 +143,9 @@ esp_err_t Blufi::init() {
 
 esp_err_t Blufi::deinit() {
     esp_err_t ret = ESP_OK;
+
+    _unregister_scan_handler();
+    _reset_scan_state();
 
     if (inited_) {
         if (m_deinited) {
@@ -535,8 +546,32 @@ int Blufi::_get_softap_conn_num() {
     return 0;
 }
 
+void Blufi::_register_scan_handler() {
+    _unregister_scan_handler();
+    esp_err_t err = esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
+                                                        &_wifi_scan_event_handler, this,
+                                                        &m_scan_handler_instance);
+    if (err != ESP_OK) {
+        ESP_LOGW(BLUFI_TAG, "Failed to register scan handler: %s", esp_err_to_name(err));
+    }
+}
+
+void Blufi::_unregister_scan_handler() {
+    if (m_scan_handler_instance != nullptr) {
+        esp_event_handler_instance_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, m_scan_handler_instance);
+        m_scan_handler_instance = nullptr;
+    }
+}
+
+void Blufi::_reset_scan_state() {
+    m_scan_in_progress = false;
+    m_scan_should_save_ssid = true;
+    m_wifi_list_requested = false;
+}
+
 void Blufi::start_wifi_scan() {
     ESP_LOGI(BLUFI_TAG, "Starting dedicated WiFi scan");
+    LogBlufiInternalRam("scan-enter");
 
     if (m_scan_in_progress) {
         ESP_LOGW(BLUFI_TAG, "Scan already in progress, skipping");
@@ -545,10 +580,25 @@ void Blufi::start_wifi_scan() {
 
     m_scan_in_progress = true;
 
-    // Always ensure the WiFi driver is started before scanning.
-    // esp_wifi_get_mode can return ESP_OK with mode=STA even when the driver
-    // was stopped by WifiStation::Stop(), so we don't trust that check.
-    esp_err_t err = esp_wifi_start();
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    esp_err_t err = esp_wifi_get_mode(&mode);
+    if (err != ESP_OK) {
+        ESP_LOGW(BLUFI_TAG, "esp_wifi_get_mode failed: %s", esp_err_to_name(err));
+        mode = WIFI_MODE_STA;
+    }
+
+    if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) {
+        ESP_LOGI(BLUFI_TAG, "Switching WiFi mode from AP/APSTA to STA before scan");
+        err = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (err != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "esp_wifi_set_mode(WIFI_MODE_STA) failed: %s", esp_err_to_name(err));
+            m_scan_in_progress = false;
+            return;
+        }
+    }
+
+    // Ensure the WiFi driver is running after forcing STA-only mode.
+    err = esp_wifi_start();
     ESP_LOGI(BLUFI_TAG, "esp_wifi_start -> %s", esp_err_to_name(err));
     if (err == ESP_ERR_WIFI_STATE) {
         ESP_LOGI(BLUFI_TAG, "WiFi already started (ESP_ERR_WIFI_STATE)");
@@ -558,24 +608,13 @@ void Blufi::start_wifi_scan() {
         return;
     }
 
-    // Ensure we are in STA mode for scanning.
-    wifi_mode_t mode = WIFI_MODE_STA;
-    esp_wifi_get_mode(&mode);
-    if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) {
-        ESP_LOGI(BLUFI_TAG, "Switching from AP mode to STA for scan");
-        esp_wifi_set_mode(WIFI_MODE_STA);
-        esp_wifi_start();
-    }
-
     // Register scan done handler.
-    static esp_event_handler_instance_t s_handler;
-    esp_event_handler_instance_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, s_handler);
-    err = esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
-                                             &_wifi_scan_event_handler, this, &s_handler);
+    _register_scan_handler();
 
     // Start scan.
     err = esp_wifi_scan_start(NULL, false);
     ESP_LOGI(BLUFI_TAG, "esp_wifi_scan_start -> %s", esp_err_to_name(err));
+    LogBlufiInternalRam("scan-started");
     if (err == ESP_ERR_WIFI_STATE) {
         ESP_LOGI(BLUFI_TAG, "Scan already in progress");
     } else if (err != ESP_OK) {
@@ -593,22 +632,26 @@ void Blufi::_send_wifi_list() {
         return;
     }
 
+    LogBlufiInternalRam("wifi-list-build-enter");
     ESP_LOGI(BLUFI_TAG, "Sending WiFi list with %d APs", m_ap_records.size());
 
     std::vector<esp_blufi_ap_record_t> blufi_ap_list;
-    for (const auto& ap : m_ap_records) {
-        esp_blufi_ap_record_t blufi_ap;
+    blufi_ap_list.resize(m_ap_records.size());
+    for (size_t i = 0; i < m_ap_records.size(); ++i) {
+        const auto& ap = m_ap_records[i];
+        auto& blufi_ap = blufi_ap_list[i];
         memset(&blufi_ap, 0, sizeof(blufi_ap));
         memcpy(blufi_ap.ssid, ap.ssid, std::min((size_t)32, sizeof(ap.ssid)));
         blufi_ap.rssi = ap.rssi;
-        blufi_ap_list.push_back(blufi_ap);
     }
 
+    LogBlufiInternalRam("wifi-list-before-send");
     esp_blufi_send_wifi_list(blufi_ap_list.size(), blufi_ap_list.data());
+    LogBlufiInternalRam("wifi-list-after-send");
 
-    m_ap_records.clear();
     m_wifi_list_requested = false;
-    start_wifi_scan();
+    ESP_LOGI(BLUFI_TAG, "Retaining %d APs for connect hints", m_ap_records.size());
+    LogBlufiInternalRam("wifi-list-retained");
 }
 
 void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id,
@@ -617,6 +660,7 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_SCAN_DONE) {
         ESP_LOGI(BLUFI_TAG, "WiFi scan done");
+        LogBlufiInternalRam("scan-done");
 
         uint16_t ap_num = 0;
         esp_wifi_scan_get_ap_num(&ap_num);
@@ -624,10 +668,13 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
         if (ap_num == 0) {
             ESP_LOGW(BLUFI_TAG, "No APs found");
             self->m_ap_records.clear();
+            self->m_has_recent_scan_results = false;
         } else {
             if (static_cast<Blufi*>(arg)->m_scan_should_save_ssid == true) {
                 self->m_ap_records.resize(ap_num);
                 esp_wifi_scan_get_ap_records(&ap_num, self->m_ap_records.data());
+                self->m_has_recent_scan_results = true;
+                LogBlufiInternalRam("scan-records-loaded");
 
                 ESP_LOGI(BLUFI_TAG, "Found %d APs", ap_num);
                 for (const auto& ap : self->m_ap_records) {
@@ -644,6 +691,8 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
             self->m_wifi_list_requested = false;
             self->_send_wifi_list();
         }
+
+        self->_unregister_scan_handler();
     }
 }
 
@@ -717,6 +766,8 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             ESP_LOGI(BLUFI_TAG, "BLUFI ble disconnect");
             m_ble_is_connected = false;
             _security_deinit();
+            _unregister_scan_handler();
+            _reset_scan_state();
             // Unregister IP event handler
             if (m_ip_handler_instance != nullptr) {
                 esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, m_ip_handler_instance);
@@ -764,15 +815,47 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
         }
         case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP: {
             ESP_LOGI(BLUFI_TAG, "BLUFI request wifi connect to AP via esp-wifi-connect");
+            LogBlufiInternalRam("req-connect-enter");
             std::string ssid(reinterpret_cast<const char*>(m_sta_config.sta.ssid));
             std::string password(reinterpret_cast<const char*>(m_sta_config.sta.password));
 
+            if (m_has_recent_scan_results) {
+                auto best_it = std::find_if(m_ap_records.begin(), m_ap_records.end(), [&ssid](const wifi_ap_record_t& ap) {
+                    return strcmp(reinterpret_cast<const char*>(ap.ssid), ssid.c_str()) == 0;
+                });
+                if (best_it != m_ap_records.end()) {
+                    m_sta_config.sta.channel = best_it->primary;
+                    memcpy(m_sta_config.sta.bssid, best_it->bssid, sizeof(best_it->bssid));
+                    m_sta_config.sta.bssid_set = true;
+                    ESP_LOGI(BLUFI_TAG,
+                             "Using cached AP hint for SSID %s: RSSI=%d channel=%d",
+                             ssid.c_str(), best_it->rssi, best_it->primary);
+                } else {
+                    m_sta_config.sta.channel = 0;
+                    m_sta_config.sta.bssid_set = false;
+                    ESP_LOGW(BLUFI_TAG, "No cached AP hint found for SSID %s", ssid.c_str());
+                }
+            } else {
+                m_sta_config.sta.channel = 0;
+                m_sta_config.sta.bssid_set = false;
+                ESP_LOGW(BLUFI_TAG, "No recent scan results available for SSID %s", ssid.c_str());
+            }
+
             SsidManager::GetInstance().AddSsid(ssid, password);
+            _unregister_scan_handler();
+            _reset_scan_state();
             m_scan_should_save_ssid = false;
 
             m_sta_ssid_len = static_cast<int>(std::min(ssid.size(), sizeof(m_sta_ssid)));
             memcpy(m_sta_ssid, ssid.c_str(), m_sta_ssid_len);
-            memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
+            if (m_sta_config.sta.bssid_set) {
+                memcpy(m_sta_bssid, m_sta_config.sta.bssid, sizeof(m_sta_bssid));
+                m_sta_conn_info.sta_bssid_set = true;
+                memcpy(m_sta_conn_info.sta_bssid, m_sta_config.sta.bssid, sizeof(m_sta_bssid));
+            } else {
+                memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
+                m_sta_conn_info.sta_bssid_set = false;
+            }
             m_sta_connected = false;
             m_sta_got_ip = false;
             m_sta_is_connecting = true;
@@ -796,7 +879,19 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
 
             vTaskDelay(pdMS_TO_TICKS(500));
 
-            wifi_manager.StartStation();
+            if (m_sta_config.sta.bssid_set) {
+                WifiApRecord direct_connect_hint = {
+                    .ssid = ssid,
+                    .password = password,
+                    .channel = m_sta_config.sta.channel,
+                    .authmode = WIFI_AUTH_WPA2_PSK,
+                    .bssid = {0}
+                };
+                memcpy(direct_connect_hint.bssid, m_sta_config.sta.bssid, sizeof(direct_connect_hint.bssid));
+                wifi_manager.StartStation(direct_connect_hint);
+            } else {
+                wifi_manager.StartStation();
+            }
 
             xTaskCreate(
                 [](void* ctx) {
@@ -835,11 +930,10 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                         // The IP event handler (_on_got_ip) will send ESP_BLUFI_STA_CONN_SUCCESS
                         // when IP is obtained. This avoids BLE buffer flooding and ensures the
                         // report reaches the phone after WiFi scan results have been sent.
-                        ESP_LOGI(BLUFI_TAG, "WiFi connected, waiting for IP to send status report");
-
-                        if (self->m_ble_is_connected) {
-                            esp_blufi_disconnect();
-                        }
+                        // Do not actively disconnect BLUFI here.
+                        // IP event reporting and remote-side disconnect can race with
+                        // esp_blufi_disconnect(), which may assert inside the BLUFI stack.
+                        ESP_LOGI(BLUFI_TAG, "WiFi connected, waiting for IP/status handling");
                     } else {
                         self->m_sta_is_connecting = false;
                         self->m_sta_connected = false;

@@ -874,6 +874,17 @@ config RECEIVE_CUSTOM_MESSAGE
     help
         Enable custom message reception, allow the device to receive custom messages from the server (preferably through the MQTT protocol)
 
+config XIAOZHI_ENABLE_SCREEN_SNAPSHOT_JPEG
+    bool "Enable screen snapshot JPEG upload"
+    default y
+    depends on LV_USE_SNAPSHOT
+    help
+        Enable the self.screen.snapshot MCP tool and the JPEG encoder path used to
+        convert LVGL snapshots into JPEG data.
+
+        Disable this on memory-constrained boards when screen snapshot upload is not
+        required, to avoid linking in the JPEG encoder stack.
+
 menu "Camera Configuration"
     depends on !IDF_TARGET_ESP32
 

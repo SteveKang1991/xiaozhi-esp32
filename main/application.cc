@@ -308,6 +308,7 @@ void Application::HandleActivationDoneEvent() {
     std::string message = std::string(Lang::Strings::VERSION) + ota_->GetCurrentVersion();
     display->ShowNotification(message.c_str());
     display->SetChatMessage("system", "");
+    display->SetSystemReady();
 
     // Release OTA object after activation is complete
     ota_.reset();

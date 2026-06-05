@@ -148,10 +148,9 @@ static void mjpeg_cache_c2m_cpu_tight(const void *ptr, size_t nbytes)
 }
 
 #define MJPEG_BLACK_TILE_H MJPEG_LBAND_MAX_LINES
-static uint8_t s_mjpeg_black_tile[((size_t)MJPEG_PANEL_WIDTH) * (size_t)MJPEG_BLACK_TILE_H * sizeof(uint16_t)]
-    __attribute__((aligned(64)));
-static uint8_t s_mjpeg_slab[((size_t)MJPEG_PILLAR_MAX_W) * (size_t)MJPEG_BLACK_TILE_H * sizeof(uint16_t)]
-    __attribute__((aligned(64)));
+static uint8_t *s_mjpeg_black_tile = NULL;
+static uint8_t *s_mjpeg_slab = NULL;
+static bool s_mjpeg_tiles_in_spiram = false;
 
 static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int x0, int y0, int x1, int y1, const void *data)
 {
@@ -219,7 +218,7 @@ static inline void mjpeg_rgb565_swap_bytes_inplace(void *buf, size_t pixel_count
 /** 全宽水平黑条 (y0..y0+band_h)，分片 draw_bitmap，不经手写 memcpy 进帧缓冲 */
 static void mjpeg_h_band_black(esp_lcd_panel_handle_t panel, int y0, int band_h, int panel_w)
 {
-    if (band_h <= 0) {
+    if (!s_mjpeg_black_tile || band_h <= 0) {
         return;
     }
     for (int y = 0; y < band_h; ) {
@@ -237,7 +236,7 @@ static void mjpeg_h_band_black(esp_lcd_panel_handle_t panel, int y0, int band_h,
 /** 竖条 (x0,y0) 起 col_w×body_h 区域刷黑，用于 ROI 左右边 */
 static void mjpeg_pillar_bands(esp_lcd_panel_handle_t panel, int x0, int col_w, int y0, int body_h)
 {
-    if (col_w <= 0 || col_w > MJPEG_PILLAR_MAX_W || body_h <= 0) {
+    if (!s_mjpeg_slab || col_w <= 0 || col_w > MJPEG_PILLAR_MAX_W || body_h <= 0) {
         return;
     }
     for (int y = 0; y < body_h; ) {
@@ -268,6 +267,73 @@ static void mjpeg_roi_letterbox_draw(esp_lcd_panel_handle_t panel, int panel_w, 
 #define FRAME_BUF_SIZE   (320 * 1024)
 #define NUM_DMA_BUFS     3
 #define FILE_IO_BUF_SIZE (32 * 1024)
+
+static void mjpeg_log_memory_budget(void)
+{
+    const size_t black_tile_size = (size_t)MJPEG_PANEL_WIDTH * (size_t)MJPEG_BLACK_TILE_H * sizeof(uint16_t);
+    const size_t slab_size = (size_t)MJPEG_PILLAR_MAX_W * (size_t)MJPEG_BLACK_TILE_H * sizeof(uint16_t);
+    const size_t static_tiles = black_tile_size + slab_size;
+    const size_t dma_budget = (size_t)FRAME_BUF_SIZE * (size_t)NUM_DMA_BUFS;
+    const size_t task_stack_budget = (size_t)(8192 + 8192);
+    ESP_LOGI(TAG, "预算: static_tiles=%uB(%uKB) dma_input=%uB(%uKB) task_stack=%uB(%uKB)",
+             (unsigned)static_tiles, (unsigned)(static_tiles / 1024),
+             (unsigned)dma_budget, (unsigned)(dma_budget / 1024),
+             (unsigned)task_stack_budget, (unsigned)(task_stack_budget / 1024));
+}
+
+static esp_err_t mjpeg_alloc_roi_tiles(void)
+{
+    if (s_mjpeg_black_tile && s_mjpeg_slab) {
+        return ESP_OK;
+    }
+    const size_t black_tile_size = (size_t)MJPEG_PANEL_WIDTH * (size_t)MJPEG_BLACK_TILE_H * sizeof(uint16_t);
+    const size_t slab_size = (size_t)MJPEG_PILLAR_MAX_W * (size_t)MJPEG_BLACK_TILE_H * sizeof(uint16_t);
+    s_mjpeg_black_tile = heap_caps_aligned_alloc(64, black_tile_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    s_mjpeg_slab = heap_caps_aligned_alloc(64, slab_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    s_mjpeg_tiles_in_spiram = (s_mjpeg_black_tile != NULL) && (s_mjpeg_slab != NULL);
+    if (!s_mjpeg_black_tile || !s_mjpeg_slab) {
+        if (s_mjpeg_black_tile) {
+            heap_caps_free(s_mjpeg_black_tile);
+            s_mjpeg_black_tile = NULL;
+        }
+        if (s_mjpeg_slab) {
+            heap_caps_free(s_mjpeg_slab);
+            s_mjpeg_slab = NULL;
+        }
+        s_mjpeg_black_tile = heap_caps_aligned_alloc(64, black_tile_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+        s_mjpeg_slab = heap_caps_aligned_alloc(64, slab_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+        s_mjpeg_tiles_in_spiram = false;
+    }
+    if (!s_mjpeg_black_tile || !s_mjpeg_slab) {
+        if (s_mjpeg_black_tile) {
+            heap_caps_free(s_mjpeg_black_tile);
+            s_mjpeg_black_tile = NULL;
+        }
+        if (s_mjpeg_slab) {
+            heap_caps_free(s_mjpeg_slab);
+            s_mjpeg_slab = NULL;
+        }
+        return ESP_ERR_NO_MEM;
+    }
+    (void)memset(s_mjpeg_black_tile, 0, black_tile_size);
+    (void)memset(s_mjpeg_slab, 0, slab_size);
+    ESP_LOGI(TAG, "ROI tiles allocated in %s", s_mjpeg_tiles_in_spiram ? "PSRAM" : "internal SRAM");
+    return ESP_OK;
+}
+
+static void mjpeg_free_roi_tiles(void)
+{
+    if (s_mjpeg_black_tile) {
+        heap_caps_free(s_mjpeg_black_tile);
+        s_mjpeg_black_tile = NULL;
+    }
+    if (s_mjpeg_slab) {
+        heap_caps_free(s_mjpeg_slab);
+        s_mjpeg_slab = NULL;
+    }
+    s_mjpeg_tiles_in_spiram = false;
+}
+
 /** 0：禁用整文件预载；>0 时小于该字节的 mjpeg 预载入 PSRAM */
 #ifndef MJPEG_PRELOAD_MAX_BYTES
 #define MJPEG_PRELOAD_MAX_BYTES 0
@@ -1058,6 +1124,7 @@ exit:
 
 esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
 {
+    mjpeg_log_memory_budget();
     if (!cfg || !cfg->file_path) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -1133,8 +1200,20 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
             lv_canvas_set_buffer(cv, s_cfg.fb[0], s_cfg.screen_width, s_cfg.screen_height, LV_COLOR_FORMAT_RGB565);
             ESP_LOGI(TAG, "💾 LVGL 画布模式: 解码缓冲 %dx%d ×2", s_cfg.screen_width, s_cfg.screen_height);
         } else {
-            (void)memset(s_mjpeg_black_tile, 0, sizeof(s_mjpeg_black_tile));
-            (void)memset(s_mjpeg_slab, 0, sizeof(s_mjpeg_slab));
+            esp_err_t tile_ret = mjpeg_alloc_roi_tiles();
+            if (tile_ret != ESP_OK) {
+                ESP_LOGE(TAG, "❌ 分配 ROI tiles 失败: %s", esp_err_to_name(tile_ret));
+                if (s_cfg.fb[0]) {
+                    heap_caps_free(s_cfg.fb[0]);
+                    s_cfg.fb[0] = NULL;
+                }
+                if (!s_output_fb_shared && s_cfg.fb[1]) {
+                    heap_caps_free(s_cfg.fb[1]);
+                    s_cfg.fb[1] = NULL;
+                }
+                s_output_fb_shared = false;
+                return tile_ret;
+            }
             ESP_LOGI(TAG, "💾 面板 ROI: %dx%d @ (%u,%u) draw_bitmap（短互斥，单缓冲 %dx%d）",
                      s_cfg.screen_width, s_cfg.screen_height,
                      (unsigned)s_cfg.panel_roi_x, (unsigned)s_cfg.panel_roi_y,
@@ -1292,6 +1371,7 @@ void mjpeg_player_stop(void)
     s_free_queue = NULL;
 
     mjpeg_release_preload_buf();
+    mjpeg_free_roi_tiles();
 
     if (s_embed_lvgl || s_panel_roi_blit) {
         if (s_cfg.fb[0]) {

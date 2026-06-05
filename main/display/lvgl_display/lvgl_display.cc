@@ -11,7 +11,9 @@
 #include "audio_codec.h"
 #include "settings.h"
 #include "assets/lang_config.h"
+#if CONFIG_XIAOZHI_ENABLE_SCREEN_SNAPSHOT_JPEG
 #include "jpg/image_to_jpeg.h"
+#endif
 
 #define TAG "Display"
 
@@ -232,6 +234,7 @@ void LvglDisplay::SetPowerSaveMode(bool on) {
 }
 
 bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
+#if CONFIG_XIAOZHI_ENABLE_SCREEN_SNAPSHOT_JPEG
 #if CONFIG_LV_USE_SNAPSHOT
     DisplayLockGuard lock(this);
 
@@ -249,10 +252,8 @@ bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
         data[i] = __builtin_bswap16(data[i]);
     }
 
-    // Clear output string and use callback version to avoid pre-allocating large memory blocks
     jpeg_data.clear();
 
-    // Use callback-based JPEG encoder to further save memory
     bool ret = image_to_jpeg_cb((uint8_t*)draw_buffer->data, draw_buffer->data_size, draw_buffer->header.w, draw_buffer->header.h, V4L2_PIX_FMT_RGB565, quality,
         [](void *arg, size_t index, const void *data, size_t len) -> size_t {
         std::string* output = static_cast<std::string*>(arg);
@@ -269,6 +270,12 @@ bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
     return ret;
 #else
     ESP_LOGE(TAG, "LV_USE_SNAPSHOT is not enabled");
+    return false;
+#endif
+#else
+    (void)jpeg_data;
+    (void)quality;
+    ESP_LOGW(TAG, "Screen snapshot JPEG is disabled");
     return false;
 #endif
 }

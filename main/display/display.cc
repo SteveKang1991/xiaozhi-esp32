@@ -58,3 +58,7 @@ void Display::SetTheme(Theme* theme) {
 void Display::SetPowerSaveMode(bool on) {
     ESP_LOGW(TAG, "SetPowerSaveMode: %d", on);
 }
+
+void Display::SetSystemReady() {
+    ESP_LOGI(TAG, "System ready");
+}

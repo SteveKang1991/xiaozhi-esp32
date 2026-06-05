@@ -136,20 +136,30 @@ public:
             return;
         }
 
-        if (StartMjpegEmotion(emotion)) {
-            DisplayLockGuard lock(this);
-            lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-            return;
-        }
+        /* ── MJPEG 路径 ─────────────────────────────────────────────────
+         * StartMjpegEmotion 在以下情况返回 false（无任何堆分配）：
+         *   1. 系统未就绪（s_system_ready_ == false，WiFi 配网期间）
+         *   2. SD 卡未挂载
+         * 确认就绪后才会执行文件存在检查等堆操作。 */
+        if (s_system_ready_ && sd_scanner_is_mounted()) {
+            if (StartMjpegEmotion(emotion)) {
+                DisplayLockGuard lock(this);
+                lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+                return;
+            }
 
-        /* 说话/LLM 会频繁 SetEmotion；若 MJPEG 已在播而本次又未能启动新 clip，切勿走主题 GIF 分支里的
-         * StopMjpegIfRunning()，否则会把正播的视频整段停掉。 */
-        if (mjpeg_player_is_running()) {
-            DisplayLockGuard lock(this);
-            lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-            return;
+            /* 说话/LLM 会频繁 SetEmotion；若 MJPEG 已在播而本次又未能启动新 clip，
+            * 切勿走主题 GIF 分支里的 StopMjpegIfRunning()，
+            * 否则会把正播的视频整段停掉。 */
+            if (mjpeg_player_is_running()) {
+                DisplayLockGuard lock(this);
+                lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+                return;
+            }
+        } else {
+            StopMjpegIfRunning();
         }
 
         auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
@@ -199,7 +209,14 @@ public:
         }
     }
 
+    void SetSystemReady() override {
+        s_system_ready_ = true;
+        ESP_LOGI(TAG, "MJPEG ready: system is ready, SD card operations permitted");
+    }
+
 private:
+    inline static bool s_system_ready_ = false;
+
     static constexpr uint16_t kMjpegVideoWidth = 240;
     static constexpr uint16_t kMjpegVideoHeight = 290;
     static constexpr uint8_t kMjpegTargetFps = 30;
@@ -227,6 +244,10 @@ private:
     }
 
     bool StartMjpegEmotion(const char* emotion) {
+        if (!s_system_ready_) {
+            ESP_LOGW(TAG, "MJPEG跳过：系统未就绪");
+            return false;
+        }
         if (!sd_scanner_is_mounted()) {
             ESP_LOGW(TAG, "MJPEG跳过：SD卡未挂载");
             return false;
