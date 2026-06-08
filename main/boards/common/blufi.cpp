@@ -144,32 +144,38 @@ esp_err_t Blufi::init() {
 esp_err_t Blufi::deinit() {
     esp_err_t ret = ESP_OK;
 
-    _unregister_scan_handler();
-    _reset_scan_state();
+	_unregister_scan_handler();
+	_reset_scan_state();
 
-    if (inited_) {
-        if (m_deinited) {
-            return ESP_OK;
-        }
-        m_deinited = true;
+	if (inited_) {
+		if (m_deinited) {
+			return ESP_OK;
+		}
+		m_deinited = true;
 
-        // Unregister IP event handler
-        if (m_ip_handler_instance != nullptr) {
-            esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, m_ip_handler_instance);
-            m_ip_handler_instance = nullptr;
-        }
+		// Unregister IP event handler
+		if (m_ip_handler_instance != nullptr) {
+			esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, m_ip_handler_instance);
+			m_ip_handler_instance = nullptr;
+		}
 
-        ret = _host_deinit();
-        if (ret) {
-            ESP_LOGE(BLUFI_TAG, "Host deinit failed: %s", esp_err_to_name(ret));
-        }
+		ret = _host_deinit();
+		if (ret) {
+			ESP_LOGE(BLUFI_TAG, "Host deinit failed: %s", esp_err_to_name(ret));
+		}
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-        ret = _controller_deinit();
-        if (ret) {
-            ESP_LOGE(BLUFI_TAG, "Controller deinit failed: %s", esp_err_to_name(ret));
-        }
+		ret = _controller_deinit();
+		if (ret) {
+			ESP_LOGE(BLUFI_TAG, "Controller deinit failed: %s", esp_err_to_name(ret));
+		}
 #endif
     }
+
+    {
+        std::vector<wifi_ap_record_t>().swap(m_ap_records);
+    }
+    m_has_recent_scan_results = false;
+
     return ret;
 }
 

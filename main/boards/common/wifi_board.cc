@@ -17,6 +17,7 @@
 #include <wifi_station.h>
 #include <ssid_manager.h>
 #include "afsk_demod.h"
+#include "esp_bt.h"
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "blufi.h"
 #endif
@@ -111,6 +112,9 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
             // make sure blufi resources has been released
             Blufi::GetInstance().deinit();
+            /* BLE/NimBLE deinit 后仍有 ~42KB 内部 SRAM 未归还；
+             * 强制释放 BT 内存，使系统状态与冷启动直连一致。 */
+            esp_bt_mem_release(ESP_BT_MODE_BLE);
 #endif
             in_config_mode_ = false;
             ESP_LOGI(TAG, "Connected to WiFi: %s", data.c_str());
