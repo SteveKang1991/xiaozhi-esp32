@@ -15,7 +15,6 @@
 #include "lightam_controller.h"
 #include "fan_lcd778928_display.h"
 #include "custom_audio_codec.h"
-#include "settings.h"
 
 #include <wifi_station.h>
 #include <esp_log.h>
@@ -69,7 +68,7 @@ private:
         //rtc_gpio_set_level(GPIO_NUM_37, 1);
 
         power_save_timer_ = new PowerSaveTimer(-1, 300, 300);
-        power_save_timer_->OnEnterSleepMode([this]() {
+        /**power_save_timer_->OnEnterSleepMode([this]() {
             ESP_LOGI(TAG, "Enabling sleep mode");
             display_->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(1);
@@ -86,7 +85,7 @@ private:
             //rtc_gpio_hold_en(GPIO_NUM_37);
             //esp_lcd_panel_disp_on_off(panel_, false); //关闭显示
             //esp_deep_sleep_start();
-        });
+        });**/
         power_save_timer_->SetEnabled(true);
     }
 
