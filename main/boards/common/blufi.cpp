@@ -168,6 +168,18 @@ esp_err_t Blufi::deinit() {
 		if (ret) {
 			ESP_LOGE(BLUFI_TAG, "Controller deinit failed: %s", esp_err_to_name(ret));
 		}
+		/* _controller_deinit() calls esp_bt_controller_deinit() which only disables
+		 * the controller. The static EM/BSS memory (~42 KB) is NOT released.
+		 * esp_bt_controller_mem_release() puts that memory back into the heap. */
+		{
+			size_t before = esp_get_free_heap_size();
+			esp_err_t r = esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
+			if (r == ESP_OK) {
+				ESP_LOGI(BLUFI_TAG, "BT memory released: +%u bytes", (unsigned int)(esp_get_free_heap_size() - before));
+			} else {
+				ESP_LOGW(BLUFI_TAG, "esp_bt_controller_mem_release failed: %s", esp_err_to_name(r));
+			}
+		}
 #endif
     }
 
@@ -785,12 +797,11 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             } else {
                 esp_blufi_adv_stop();
                 if (!m_deinited) {
-                    xTaskCreate(
-                        [](void* ctx) {
-                            static_cast<Blufi*>(ctx)->deinit();
-                            vTaskDelete(nullptr);
-                        },
-                        "blufi_deinit", 4096, this, 5, nullptr);
+                    // Execute deinit synchronously to ensure all BT resources are released
+                    // before any subsequent operations (especially before WiFi gets IP and
+                    // audio playback starts). Async deinit causes race conditions where
+                    // BT controller is still active during critical audio/LCD operations.
+                    deinit();
                 }
             }
             break;
