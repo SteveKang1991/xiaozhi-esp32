@@ -142,7 +142,8 @@ private:
         io_config.dc_gpio_num = DISPLAY_DC_PIN;
         io_config.spi_mode = DISPLAY_SPI_MODE;
         io_config.pclk_hz = 70 * 1000 * 1000;
-        io_config.trans_queue_depth = 24;
+        // 减小队列深度避免与AEC竞争DMA内存
+        io_config.trans_queue_depth = 4;
         io_config.lcd_cmd_bits = 8;
         io_config.lcd_param_bits = 8;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io_));
@@ -267,12 +268,12 @@ public:
             GetBacklight()->RestoreBrightness();
         }  
 
-        #if CONFIG_USE_DEVICE_AEC
+        /**#if CONFIG_USE_DEVICE_AEC
         Settings settings("aecMode", false);
         aec_device = settings.GetBool("aec_device", aec_device);
         auto& app = Application::GetInstance();
         app.SetAecMode(aec_device ? kAecOnDeviceSide : kAecOff);
-        #endif
+        #endif**/
     }
 
     /**virtual Led* GetLed() override {
