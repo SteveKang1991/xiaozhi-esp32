@@ -36,11 +36,11 @@
 
 static const char *TAG = "🎬 MJPEG播放器";
 /** LVGL 正在 flush（尤其 sw_rotate + 对话刷新）时，持锁前已提交的 DSI 传输可能仍在进行 */
-#define MJPEG_DRAW_RETRY_MAX        6
+#define MJPEG_DRAW_RETRY_MAX        20
 #define MJPEG_LVGL_LOCK_TIMEOUT_MS  20
 #define MJPEG_POST_LOCK_DRAIN_MS    0
-#define MJPEG_DRAW_RETRY_US_MIN     200
-#define MJPEG_DRAW_RETRY_US_MAX     1200
+#define MJPEG_DRAW_RETRY_US_MIN     1000
+#define MJPEG_DRAW_RETRY_US_MAX     20000
 /** 严格逐帧校验会重复解析 JPEG（extract+validate），会显著增加 read 侧 CPU 占用 */
 #ifndef MJPEG_STRICT_FRAME_VALIDATE
 #define MJPEG_STRICT_FRAME_VALIDATE 0
@@ -918,9 +918,12 @@ static void mjpeg_decode_task(void *arg)
                 }
             }
         } else if (s_cfg.panel) {
-            esp_lcd_panel_draw_bitmap(s_cfg.panel, 0, 0,
+            esp_err_t blit = mjpeg_panel_draw_bitmap_retry(s_cfg.panel, 0, 0,
                                        s_cfg.mjpeg_video_width, s_cfg.mjpeg_video_height,
                                        s_cfg.fb[fb_idx]);
+            if (blit != ESP_OK) {
+                ESP_LOGW(TAG, "⚠️ draw失败: %s", esp_err_to_name(blit));
+            }
         }
         fb_idx = 1 - fb_idx;
         frame_count++;

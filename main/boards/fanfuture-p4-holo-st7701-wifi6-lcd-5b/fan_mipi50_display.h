@@ -381,7 +381,7 @@ private:
         lv_obj_align(status_label_, LV_ALIGN_CENTER, 0, 0);
 
         /* Top layer: Bottom bar - fixed at bottom, minimum height 48, height can be adaptive */
-        bottom_bar_ = lv_obj_create(screen);
+        /**bottom_bar_ = lv_obj_create(screen);
         lv_obj_set_width(bottom_bar_, LV_HOR_RES);
         lv_obj_set_height(bottom_bar_, LV_SIZE_CONTENT);
         lv_obj_set_style_min_height(bottom_bar_, 48, 0); // Set minimum height 48
@@ -394,17 +394,18 @@ private:
         lv_obj_set_style_pad_right(bottom_bar_, lvgl_theme->spacing(4), 0);
         lv_obj_set_style_border_width(bottom_bar_, 0, 0);
         lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, 0);
-        lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);**/
 
         /* chat_message_label_ placed in bottom_bar_ and vertically centered */
         chat_message_label_ = lv_label_create(screen);
         lv_label_set_text(chat_message_label_, "");
         lv_obj_set_width(chat_message_label_, LV_HOR_RES - lvgl_theme->spacing(8)); // Subtract left and right padding
-        lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL_CIRCULAR); // Auto wrap mode
+        //lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP); // Auto wrap mode
+        lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);  // 文字超出会滚动
         lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0); // Center text alignment
         lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
         //lv_obj_align(chat_message_label_, LV_ALIGN_CENTER, 0, 0); // Vertically and horizontally centered in bottom_bar_
-        lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_MID, 0, 3);
 
         low_battery_popup_ = lv_obj_create(screen);
         lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
