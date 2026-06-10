@@ -300,6 +300,8 @@ void Application::HandleActivationDoneEvent() {
     ESP_LOGI(TAG, "Activation done");
 
     SystemInfo::PrintHeapStats();
+    SetDeviceState(kDeviceStateIdle);
+
     has_server_time_ = ota_->HasServerTime();
 
     auto display = Board::GetInstance().GetDisplay();
@@ -312,10 +314,10 @@ void Application::HandleActivationDoneEvent() {
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
-    // Play success prompt first, then enter idle/wake-word mode.
-    audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
-    audio_service_.WaitForPlaybackQueueEmpty();
-    SetDeviceState(kDeviceStateIdle);
+    Schedule([this]() {
+        // Play the success sound to indicate the device is ready
+        audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
+    });
 }
 
 void Application::ActivationTask() {
@@ -874,21 +876,17 @@ void Application::HandleStateChangedEvent() {
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
 
-            // For auto mode, wait for playback queue to be empty before enabling voice processing
-            // This prevents audio truncation when STOP arrives late due to network jitter
-            if (listening_mode_ == kListeningModeAutoStop) {
-                audio_service_.WaitForPlaybackQueueEmpty();
-            }
-            // Always (re)enable voice processing on each listening entry.
-            // In realtime AEC mode the processor may already be "running"; skipping EnableVoiceProcessing
-            // used to omit ResetDecoder / resampler reset / warmup and caused intermittent no-uplink.
-            audio_service_.EnableVoiceProcessing(true);
-
-            // Always send start-listening when entering listening state.
-            // Otherwise in some transitions (e.g. processor already running),
-            // server side may not open a new turn and recording appears stuck.
-            if (protocol_ && protocol_->IsAudioChannelOpened()) {
+            // Make sure the audio processor is running
+            if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
+                // For auto mode, wait for playback queue to be empty before enabling voice processing
+                // This prevents audio truncation when STOP arrives late due to network jitter
+                if (listening_mode_ == kListeningModeAutoStop) {
+                    audio_service_.WaitForPlaybackQueueEmpty();
+                }
+                
+                // Send the start listening command
                 protocol_->SendStartListening(listening_mode_);
+                audio_service_.EnableVoiceProcessing(true);
             }
 
 #ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
