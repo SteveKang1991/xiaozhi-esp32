@@ -16,8 +16,10 @@ typedef struct {
     const char *file_path;
     esp_lcd_panel_handle_t panel;
     void *fb[2];
-    uint16_t screen_width;
-    uint16_t screen_height;
+    uint16_t mjpeg_video_width;
+    uint16_t mjpeg_video_height;
+    uint16_t panel_width;   // 面板物理分辨率宽度
+    uint16_t panel_height;   // 面板物理分辨率高度
     uint8_t target_fps;
     bool loop;
     uint16_t fb_stride;

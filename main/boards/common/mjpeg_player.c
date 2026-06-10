@@ -35,9 +35,6 @@
 #include "esp_lvgl_port.h"
 
 static const char *TAG = "🎬 MJPEG播放器";
-/* Panel geometry for fanfuture-p4-jd9165-wifi6-touch-lcd-7b */
-#define MJPEG_PANEL_WIDTH  1024
-#define MJPEG_PANEL_HEIGHT 600
 /** LVGL 正在 flush（尤其 sw_rotate + 对话刷新）时，持锁前已提交的 DSI 传输可能仍在进行 */
 #define MJPEG_DRAW_RETRY_MAX        6
 #define MJPEG_LVGL_LOCK_TIMEOUT_MS  20
@@ -88,8 +85,8 @@ static bool s_output_fb_shared;
 #define MJPEG_ROI_DRAW_LETTERBOX_ONCE 0
 /** 顶/底 letterbox 黑条，单次 draw_bitmap 最大行数（高大于视频上下黑边） */
 #define MJPEG_LBAND_MAX_LINES 16
-/** 左右黑边最大半宽 (1024-960)/2=32，留余量 */
-#define MJPEG_PILLAR_MAX_W 48
+#define MJPEG_BLACK_TILE_H MJPEG_LBAND_MAX_LINES
+/** 顶/底 letterbox 黑条，单次 draw_bitmap 最大行数（高大于视频上下黑边） */
 
 /** 源缓冲供 DMA/DSI 前：C2M，仅对实际长度（64B 对齐区间） */
 static void mjpeg_cache_c2m_cpu_tight(const void *ptr, size_t nbytes)
@@ -108,11 +105,73 @@ static void mjpeg_cache_c2m_cpu_tight(const void *ptr, size_t nbytes)
     esp_cache_msync((void *)al_start, al_len, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 }
 
-#define MJPEG_BLACK_TILE_H MJPEG_LBAND_MAX_LINES
-static uint8_t s_mjpeg_black_tile[((size_t)MJPEG_PANEL_WIDTH) * (size_t)MJPEG_BLACK_TILE_H * sizeof(uint16_t)]
-    __attribute__((aligned(64)));
-static uint8_t s_mjpeg_slab[((size_t)MJPEG_PILLAR_MAX_W) * (size_t)MJPEG_BLACK_TILE_H * sizeof(uint16_t)]
-    __attribute__((aligned(64)));
+static uint8_t* s_mjpeg_black_tile = NULL;
+static uint8_t* s_mjpeg_slab = NULL;
+static size_t s_mjpeg_slab_max_w = 0;
+static size_t s_mjpeg_black_tile_size = 0;
+static size_t s_mjpeg_slab_size = 0;
+static int s_panel_width = 0;
+static int s_panel_height = 0;
+
+static void mjpeg_init_black_tile_buffer(int panel_width, int panel_height)
+{
+    s_panel_width = panel_width;
+    s_panel_height = panel_height;
+
+    // 释放旧的缓冲区
+    if (s_mjpeg_black_tile) {
+        free(s_mjpeg_black_tile);
+        s_mjpeg_black_tile = NULL;
+    }
+    if (s_mjpeg_slab) {
+        free(s_mjpeg_slab);
+        s_mjpeg_slab = NULL;
+    }
+
+    // 计算最大黑边宽度：(屏宽-最小视频宽)/2，最小视频宽设为 240
+    int max_pillar_w = (panel_width > 240) ? ((panel_width - 240) / 2 + 16) : 16;
+
+    // 分配黑边 tile 缓冲：panel_width × MJPEG_BLACK_TILE_H × 2字节
+    s_mjpeg_black_tile_size = (size_t)panel_width * MJPEG_BLACK_TILE_H * sizeof(uint16_t);
+    s_mjpeg_black_tile = (uint8_t*)heap_caps_aligned_alloc(64, s_mjpeg_black_tile_size, MALLOC_CAP_DMA);
+    if (!s_mjpeg_black_tile) {
+        s_mjpeg_black_tile = (uint8_t*)malloc(s_mjpeg_black_tile_size);
+    }
+    if (s_mjpeg_black_tile) {
+        memset(s_mjpeg_black_tile, 0, s_mjpeg_black_tile_size);
+    }
+
+    // 分配竖边 slab 缓冲：max_pillar_w × 2 × MJPEG_BLACK_TILE_H × 2字节
+    s_mjpeg_slab_size = (size_t)max_pillar_w * 2 * MJPEG_BLACK_TILE_H * sizeof(uint16_t);
+    s_mjpeg_slab = (uint8_t*)heap_caps_aligned_alloc(64, s_mjpeg_slab_size, MALLOC_CAP_DMA);
+    if (!s_mjpeg_slab) {
+        s_mjpeg_slab = (uint8_t*)malloc(s_mjpeg_slab_size);
+    }
+    if (s_mjpeg_slab) {
+        s_mjpeg_slab_max_w = max_pillar_w;
+        memset(s_mjpeg_slab, 0, s_mjpeg_slab_size);
+    }
+
+    ESP_LOGI(TAG, "💾 黑边缓冲: panel=%dx%d, tile=%dx%d, slab=%dx%d",
+             panel_width, panel_height, panel_width, MJPEG_BLACK_TILE_H, max_pillar_w * 2, MJPEG_BLACK_TILE_H);
+}
+
+static void mjpeg_free_black_tile_buffer(void)
+{
+    if (s_mjpeg_black_tile) {
+        free(s_mjpeg_black_tile);
+        s_mjpeg_black_tile = NULL;
+        s_mjpeg_black_tile_size = 0;
+    }
+    if (s_mjpeg_slab) {
+        free(s_mjpeg_slab);
+        s_mjpeg_slab = NULL;
+        s_mjpeg_slab_max_w = 0;
+        s_mjpeg_slab_size = 0;
+    }
+    s_panel_width = 0;
+    s_panel_height = 0;
+}
 
 static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int x0, int y0, int x1, int y1, const void *data)
 {
@@ -156,7 +215,7 @@ static void mjpeg_h_band_black(esp_lcd_panel_handle_t panel, int y0, int band_h,
 /** 竖条 (x0,y0) 起 col_w×body_h 区域刷黑，用于 ROI 左右边 */
 static void mjpeg_pillar_bands(esp_lcd_panel_handle_t panel, int x0, int col_w, int y0, int body_h)
 {
-    if (col_w <= 0 || col_w > MJPEG_PILLAR_MAX_W || body_h <= 0) {
+    if (col_w <= 0 || col_w > (int)s_mjpeg_slab_max_w || body_h <= 0 || !s_mjpeg_slab) {
         return;
     }
     for (int y = 0; y < body_h; ) {
@@ -595,7 +654,7 @@ static void mjpeg_read_task(void *arg)
         while (s_running && extract_frame(&ctx, &frame_data, &frame_len)) {
 #if MJPEG_STRICT_FRAME_VALIDATE
             if (!validate_frame(frame_data, frame_len,
-                                 s_cfg.screen_width, s_cfg.screen_height)) {
+                                 s_cfg.mjpeg_video_width, s_cfg.mjpeg_video_height)) {
                 skip_count++;
                 if (skip_count <= 5 || skip_count % 100 == 0) {
                     ESP_LOGW(TAG, "🛡️ 帧校验失败 #%lu（帧=%d字节）",
@@ -712,9 +771,9 @@ static void mjpeg_decode_task(void *arg)
 
     /* 全屏 DPI：面板全尺寸；画布 / ROI：仅视频区域 */
     const uint32_t fb_size = (s_embed_lvgl || s_panel_roi_blit)
-        ? ((uint32_t)s_cfg.screen_width * (uint32_t)s_cfg.screen_height * sizeof(uint16_t))
-        : ((uint32_t)MJPEG_PANEL_WIDTH * (uint32_t)MJPEG_PANEL_HEIGHT * sizeof(uint16_t));
-    const uint32_t expect_decoded = (uint32_t)s_cfg.screen_width * (uint32_t)s_cfg.screen_height * sizeof(uint16_t);
+        ? ((uint32_t)s_cfg.mjpeg_video_width * (uint32_t)s_cfg.mjpeg_video_height * sizeof(uint16_t))
+        : ((uint32_t)s_panel_width * (uint32_t)s_panel_height * sizeof(uint16_t));
+    const uint32_t expect_decoded = (uint32_t)s_cfg.mjpeg_video_width * (uint32_t)s_cfg.mjpeg_video_height * sizeof(uint16_t);
     
     /* 全屏 letterbox 时解码输出小于整块 DPI，传入实际 JPEG 输出尺寸，减少硬解内部校验异常 */
     const uint32_t jpeg_out_buf_size = (expect_decoded <= fb_size) ? expect_decoded : fb_size;
@@ -762,7 +821,6 @@ static void mjpeg_decode_task(void *arg)
                                     msg.buf, (uint32_t)msg.len,
                                     (uint8_t *)s_cfg.fb[fb_idx], jpeg_out_buf_size,
                                     &decoded_size);
-        const int64_t t_after_decode = esp_timer_get_time();
 
         /* 立即归还 DMA 缓冲区，让读取任务继续工作 */
         frame_msg_t free_msg = { .buf = msg.buf, .len = 0 };
@@ -802,10 +860,10 @@ static void mjpeg_decode_task(void *arg)
         }
 
         const bool has_letterbox = !s_embed_lvgl && !s_panel_roi_blit
-            && (MJPEG_PANEL_HEIGHT > s_cfg.screen_height);
+            && (s_panel_height > s_cfg.mjpeg_video_height);
         if (has_letterbox) {
-            fill_letterbox_black_rgb565((uint16_t *)s_cfg.fb[fb_idx], MJPEG_PANEL_WIDTH,
-                                        s_cfg.screen_height, MJPEG_PANEL_HEIGHT);
+            fill_letterbox_black_rgb565((uint16_t *)s_cfg.fb[fb_idx], s_panel_width,
+                                        s_cfg.mjpeg_video_height, s_panel_height);
         }
 
         /* ROI draw_bitmap 直接从解码输出读数据：跳过整帧 M2C，减少每帧 cache 维护开销 */
@@ -826,7 +884,7 @@ static void mjpeg_decode_task(void *arg)
         if (s_embed_lvgl && s_cfg.lv_video_canvas) {
             lv_obj_t *cv = (lv_obj_t *)s_cfg.lv_video_canvas;
             if (lvgl_port_lock(MJPEG_LVGL_LOCK_TIMEOUT_MS)) {
-                lv_canvas_set_buffer(cv, s_cfg.fb[fb_idx], s_cfg.screen_width, s_cfg.screen_height,
+                lv_canvas_set_buffer(cv, s_cfg.fb[fb_idx], s_cfg.mjpeg_video_width, s_cfg.mjpeg_video_height,
                                      LV_COLOR_FORMAT_RGB565);
                 /* LVGL 9.4 无 lv_display_invalidate_area；画布整控件失效即可 */
                 lv_obj_invalidate(cv);
@@ -835,15 +893,15 @@ static void mjpeg_decode_task(void *arg)
         } else if (s_panel_roi_blit && s_cfg.panel) {
             const int x1 = (int)s_cfg.panel_roi_x;
             const int y1 = (int)s_cfg.panel_roi_y;
-            const int w = (int)s_cfg.screen_width;
-            const int h = (int)s_cfg.screen_height;
+            const int w = (int)s_cfg.mjpeg_video_width;
+            const int h = (int)s_cfg.mjpeg_video_height;
             /* DSI 与 LVGL 共用 panel：须持锁，且锁内首帧前短暂退让，避免紧接 LVGL flush 的未完成传输 */
             if (lvgl_port_lock(MJPEG_LVGL_LOCK_TIMEOUT_MS)) {
                 if (MJPEG_POST_LOCK_DRAIN_MS > 0) {
                     vTaskDelay(pdMS_TO_TICKS(MJPEG_POST_LOCK_DRAIN_MS));
                 }
                 if (MJPEG_ROI_DRAW_LETTERBOX_ONCE && !s_roi_letterbox_drawn) {
-                    mjpeg_roi_letterbox_draw(s_cfg.panel, MJPEG_PANEL_WIDTH, MJPEG_PANEL_HEIGHT, x1, y1, w, h);
+                    mjpeg_roi_letterbox_draw(s_cfg.panel, s_panel_width, s_panel_height, x1, y1, w, h);
                     s_roi_letterbox_drawn = true;
                 }
                 esp_err_t blit = mjpeg_panel_draw_bitmap_retry(s_cfg.panel, x1, y1, x1 + w, y1 + h, s_cfg.fb[fb_idx]);
@@ -861,7 +919,7 @@ static void mjpeg_decode_task(void *arg)
             }
         } else if (s_cfg.panel) {
             esp_lcd_panel_draw_bitmap(s_cfg.panel, 0, 0,
-                                       s_cfg.screen_width, s_cfg.screen_height,
+                                       s_cfg.mjpeg_video_width, s_cfg.mjpeg_video_height,
                                        s_cfg.fb[fb_idx]);
         }
         fb_idx = 1 - fb_idx;
@@ -869,6 +927,7 @@ static void mjpeg_decode_task(void *arg)
 
 #if MJPEG_PROFILE_FIRST_FRAMES > 0
         if (frame_count <= MJPEG_PROFILE_FIRST_FRAMES) {
+            const int64_t t_after_decode = esp_timer_get_time();
             const int64_t t_after_blit = esp_timer_get_time();
             ESP_LOGI(TAG, "⏱ prof #%lu: jpeg_decode=%lldus blit=%lldus",
                      (unsigned long)frame_count,
@@ -923,8 +982,13 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     s_panel_roi_blit = s_cfg.panel_blit_roi;
     s_roi_letterbox_drawn = false;
 
+    // 初始化黑边缓冲区（使用配置中的面板分辨率）
+    int panel_w = (s_cfg.panel_width > 0) ? s_cfg.panel_width : s_cfg.mjpeg_video_width;
+    int panel_h = (s_cfg.panel_height > 0) ? s_cfg.panel_height : s_cfg.mjpeg_video_height;
+    mjpeg_init_black_tile_buffer(panel_w, panel_h);
+
     if (s_embed_lvgl || s_panel_roi_blit) {
-        const size_t sz = (size_t)s_cfg.screen_width * (size_t)s_cfg.screen_height * sizeof(uint16_t);
+        const size_t sz = (size_t)s_cfg.mjpeg_video_width * (size_t)s_cfg.mjpeg_video_height * sizeof(uint16_t);
         const size_t sz_al = (sz + 63u) & ~63u;
         const int fb_count = s_panel_roi_blit ? 1 : 2;
         for (int i = 0; i < fb_count; i++) {
@@ -958,15 +1022,19 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
         }
         if (s_embed_lvgl) {
             lv_obj_t *cv = (lv_obj_t *)s_cfg.lv_video_canvas;
-            lv_canvas_set_buffer(cv, s_cfg.fb[0], s_cfg.screen_width, s_cfg.screen_height, LV_COLOR_FORMAT_RGB565);
-            ESP_LOGI(TAG, "💾 LVGL 画布模式: 解码缓冲 %dx%d ×2", s_cfg.screen_width, s_cfg.screen_height);
+            lv_canvas_set_buffer(cv, s_cfg.fb[0], s_cfg.mjpeg_video_width, s_cfg.mjpeg_video_height, LV_COLOR_FORMAT_RGB565);
+            ESP_LOGI(TAG, "💾 LVGL 画布模式: 解码缓冲 %dx%d ×2", s_cfg.mjpeg_video_width, s_cfg.mjpeg_video_height);
         } else {
-            (void)memset(s_mjpeg_black_tile, 0, sizeof(s_mjpeg_black_tile));
-            (void)memset(s_mjpeg_slab, 0, sizeof(s_mjpeg_slab));
+            if (s_mjpeg_black_tile && s_mjpeg_black_tile_size > 0) {
+                memset(s_mjpeg_black_tile, 0, s_mjpeg_black_tile_size);
+            }
+            if (s_mjpeg_slab && s_mjpeg_slab_size > 0) {
+                memset(s_mjpeg_slab, 0, s_mjpeg_slab_size);
+            }
             ESP_LOGI(TAG, "💾 面板 ROI: %dx%d @ (%u,%u) draw_bitmap（短互斥，单缓冲 %dx%d）",
-                     s_cfg.screen_width, s_cfg.screen_height,
+                     s_cfg.mjpeg_video_width, s_cfg.mjpeg_video_height,
                      (unsigned)s_cfg.panel_roi_x, (unsigned)s_cfg.panel_roi_y,
-                     s_cfg.screen_width, s_cfg.screen_height);
+                     s_cfg.mjpeg_video_width, s_cfg.mjpeg_video_height);
         }
     } else if (!s_cfg.fb[0] || !s_cfg.fb[1]) {
         esp_err_t gf = mjpeg_get_frame_buffers(s_cfg.panel, &s_cfg.fb[0], &s_cfg.fb[1]);
@@ -1044,10 +1112,10 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     }
 
     if (!s_embed_lvgl && !s_panel_roi_blit) {
-        uint32_t panel_fb = (uint32_t)MJPEG_PANEL_WIDTH * (uint32_t)MJPEG_PANEL_HEIGHT * sizeof(uint16_t);
+        uint32_t panel_fb = (uint32_t)s_panel_width * (uint32_t)s_panel_height * sizeof(uint16_t);
         ESP_LOGI(TAG, "💾 异步流水线: 读取=%dKB, DMA=%dKB×%d, 输出=DPI FB×2(%luKB×2, %dx%d)",
                  READ_BUF_SIZE / 1024, FRAME_BUF_SIZE / 1024, NUM_DMA_BUFS,
-                 (unsigned long)(panel_fb / 1024), MJPEG_PANEL_WIDTH, MJPEG_PANEL_HEIGHT);
+                 (unsigned long)(panel_fb / 1024), s_panel_width, s_panel_height);
     }
 
     /* 创建双任务 */
@@ -1107,6 +1175,7 @@ void mjpeg_player_stop(void)
     s_free_queue = NULL;
 
     mjpeg_release_preload_buf();
+    mjpeg_free_black_tile_buffer();
 
     if (s_embed_lvgl || s_panel_roi_blit) {
         if (s_cfg.fb[0]) {

@@ -166,8 +166,8 @@ public:
     }
 
 private:
-    static constexpr uint16_t kMjpegVideoWidth = 240;
-    static constexpr uint16_t kMjpegVideoHeight = 290;
+    static constexpr uint16_t kMjpegVideoWidth = 480;
+    static constexpr uint16_t kMjpegVideoHeight = 800;
     static constexpr uint8_t kMjpegTargetFps = 24;
     std::string current_mjpeg_path_;
 
@@ -177,7 +177,7 @@ private:
     }
 
     static std::string BuildMjpegPath(const char* name) {
-        return std::string("/sdcard/Emotion/") + name + "-240x290.mjpeg";
+        return std::string("/sdcard/Emotion/") + name + "-480x800.mjpeg";
     }
 
     static const char* MapEmotionToClip(const char* emotion) {
@@ -226,8 +226,10 @@ private:
         cfg.panel = panel_;
         cfg.fb[0] = nullptr;
         cfg.fb[1] = nullptr;
-        cfg.screen_width = kMjpegVideoWidth;
-        cfg.screen_height = kMjpegVideoHeight;
+        cfg.mjpeg_video_width = kMjpegVideoWidth;
+        cfg.mjpeg_video_height = kMjpegVideoHeight;
+        cfg.panel_width = static_cast<uint16_t>(width_);
+        cfg.panel_height = static_cast<uint16_t>(height_);
         cfg.target_fps = kMjpegTargetFps;
         cfg.loop = true;
         cfg.fb_stride = 0;

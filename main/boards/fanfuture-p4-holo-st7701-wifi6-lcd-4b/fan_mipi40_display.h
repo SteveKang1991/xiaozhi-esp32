@@ -226,8 +226,10 @@ private:
         cfg.panel = panel_;
         cfg.fb[0] = nullptr;
         cfg.fb[1] = nullptr;
-        cfg.screen_width = kMjpegVideoWidth;
-        cfg.screen_height = kMjpegVideoHeight;
+        cfg.mjpeg_video_width = kMjpegVideoWidth;
+        cfg.mjpeg_video_height = kMjpegVideoHeight;
+        cfg.panel_width = static_cast<uint16_t>(width_);
+        cfg.panel_height = static_cast<uint16_t>(height_);
         cfg.target_fps = kMjpegTargetFps;
         cfg.loop = true;
         cfg.fb_stride = 0;
