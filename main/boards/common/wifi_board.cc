@@ -157,6 +157,7 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
 }
 
 void WifiBoard::StartWifiConfigMode() {
+    ESP_LOGI(TAG, "WifiBoard::StartWifiConfigMode: entry");
     in_config_mode_ = true;
     // Transition to wifi configuring state
     Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
@@ -175,9 +176,11 @@ void WifiBoard::StartWifiConfigMode() {
         Application::GetInstance().Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(), "gear", Lang::Sounds::OGG_WIFICONFIG);
     });
 #elif CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    ESP_LOGI(TAG, "WifiBoard::StartWifiConfigMode: blufi path");
     auto &blufi = Blufi::GetInstance();
-    // initialize esp-blufi protocol
+    ESP_LOGI(TAG, "WifiBoard::StartWifiConfigMode: calling blufi.init()");
     blufi.init();
+    ESP_LOGI(TAG, "WifiBoard::StartWifiConfigMode: blufi.init() returned");
 #endif
 #if CONFIG_USE_ACOUSTIC_WIFI_PROVISIONING
     // Start acoustic provisioning task

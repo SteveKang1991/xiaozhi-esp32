@@ -13,6 +13,17 @@
 #include "mbedtls/dhm.h"
 #include "wifi_manager.h"
 
+// ESP-Hosted BT controller support for ESP32-P4
+// For ESP32-P4 with ESP-Hosted, the BT controller is on the co-processor (ESP32-C6).
+// The hosted_hci_bluedroid_* functions are provided by the esp-hosted component
+// when CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID is enabled.
+
+#ifdef CONFIG_ESP_HOSTED_ENABLED
+#include "esp_hosted.h"
+#include "esp_hosted_bluedroid.h"
+#include "esp_bluedroid_hci.h"
+#endif
+
 class Blufi {
 public:
     /**
@@ -66,6 +77,11 @@ private:
 
     static esp_err_t _host_and_cb_init();
 
+#ifdef CONFIG_ESP_HOSTED_ENABLED
+    // ESP-Hosted BT controller support
+    static esp_err_t _hosted_bt_controller_init();
+#endif
+
     void _security_init();
 
     void _security_deinit();
@@ -86,8 +102,15 @@ private:
     // WiFi scan methods
     void _send_wifi_list();
     void _start_dedicated_wifi_scan();
+    void _register_scan_handler();
+    void _unregister_scan_handler();
+    void _reset_scan_state();
     static void _wifi_scan_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
                                          void *event_data);
+
+    static void _ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
+                                  void *event_data);
+    void _on_got_ip();
 
     // These C-style functions are registered with ESP-IDF and call the corresponding instance
     // methods.
@@ -144,4 +167,8 @@ private:
     std::vector<wifi_ap_record_t> m_ap_records;
     bool m_scan_in_progress = false;
     bool m_scan_should_save_ssid = true;
+    bool m_wifi_list_requested = false;
+    bool m_has_recent_scan_results = false;
+    esp_event_handler_instance_t m_scan_handler_instance = nullptr;
+    esp_event_handler_instance_t m_ip_handler_instance = nullptr;
 };

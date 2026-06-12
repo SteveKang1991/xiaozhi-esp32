@@ -4,34 +4,28 @@
 #include <cstring>
 #include <string>
 #include <vector>
-#include "esp_bt.h"
+#include "esp_bt_device.h"
+#include "esp_bt_main.h"
 #include "esp_event.h"
+#include "esp_gap_ble_api.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/task.h"
 #include "wifi_manager.h"
 
+// ESP-Hosted BT controller support for ESP32-P4
+// For ESP32-P4 with ESP-Hosted, the BT controller is on the co-processor (ESP32-C6).
+// The hosted_hci_bluedroid_* functions are provided by the esp-hosted component
+// when CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID is enabled.
+
+#ifdef CONFIG_ESP_HOSTED_ENABLED
+#include "esp_hosted.h"
+#include "esp_hosted_bluedroid.h"
+#include "esp_bluedroid_hci.h"
+#endif
+
 #define BLUFI_DEVICE_NAME "Xiaozhi-Blufi"
-
-#ifdef CONFIG_BT_BLUEDROID_ENABLED
-#include "esp_bt_device.h"
-#include "esp_bt_main.h"
-#include "esp_gap_ble_api.h"
-#endif
-
-#ifdef CONFIG_BT_NIMBLE_ENABLED
-#include "console/console.h"
-#include "host/ble_hs.h"
-#include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
-#include "services/gap/ble_svc_gap.h"
-extern void esp_blufi_gatt_svr_register_cb(struct ble_gatt_register_ctxt* ctxt, void* arg);
-extern int esp_blufi_gatt_svr_init(void);
-extern void esp_blufi_gatt_svr_deinit(void);
-extern void esp_blufi_btc_init(void);
-extern void esp_blufi_btc_deinit(void);
-#endif
 
 extern "C" {
 void esp_blufi_adv_start(void);
@@ -42,17 +36,7 @@ void esp_blufi_disconnect(void);
 
 void btc_blufi_report_error(esp_blufi_error_state_t state);
 
-#ifdef CONFIG_BT_BLUEDROID_ENABLED
 void esp_blufi_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param);
-#endif
-
-#ifdef CONFIG_BT_NIMBLE_ENABLED
-void esp_blufi_gatt_svr_register_cb(struct ble_gatt_register_ctxt* ctxt, void* arg);
-int esp_blufi_gatt_svr_init(void);
-void esp_blufi_gatt_svr_deinit(void);
-void esp_blufi_btc_init(void);
-void esp_blufi_btc_deinit(void);
-#endif
 }
 
 #include <wifi_station.h>
@@ -103,76 +87,139 @@ Blufi::~Blufi() {
 }
 
 esp_err_t Blufi::init() {
+    ESP_LOGI(BLUFI_TAG, "Blufi::init: entry");
     esp_err_t ret = ESP_FAIL;
     inited_ = true;
     m_provisioned = false;
     m_deinited = false;
+    m_wifi_list_requested = false;
+    m_ap_records.clear();
+    m_has_recent_scan_results = false;
+    m_scan_in_progress = false;
 
-    // Start WiFi scan early to have results ready when user connects
-    auto& wifi_manager = WifiManager::GetInstance();
-    if (!wifi_manager.IsInitialized() || !wifi_manager.IsConfigMode()) {
-        // start scan immediately
-        start_wifi_scan();
-    } else {
-        ESP_LOGE(BLUFI_TAG,
-                 "Blufi and WiFi hotspot network configuration cannot "
-                 "be used simultaneously.");
-        return ret;
-    }
-
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+    ESP_LOGI(BLUFI_TAG, "Blufi::init: calling _controller_init");
     ret = _controller_init();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "BLUFI controller init failed: %s", esp_err_to_name(ret));
         return ret;
     }
-#endif
 
+    ESP_LOGI(BLUFI_TAG, "Blufi::init: calling _host_and_cb_init");
     ret = _host_and_cb_init();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "BLUFI host and cb init failed: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    ESP_LOGI(BLUFI_TAG, "BLUFI VERSION %04x", esp_blufi_get_version());
+    ESP_LOGI(BLUFI_TAG, "Blufi::init: done, BLUFI VERSION %04x", esp_blufi_get_version());
     return ESP_OK;
 }
 
 esp_err_t Blufi::deinit() {
     esp_err_t ret = ESP_OK;
 
+    _unregister_scan_handler();
+    _reset_scan_state();
+
     if (inited_) {
         if (m_deinited) {
             return ESP_OK;
         }
         m_deinited = true;
+
+        if (m_ip_handler_instance != nullptr) {
+            esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, m_ip_handler_instance);
+            m_ip_handler_instance = nullptr;
+        }
+
         ret = _host_deinit();
         if (ret) {
             ESP_LOGE(BLUFI_TAG, "Host deinit failed: %s", esp_err_to_name(ret));
         }
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
         ret = _controller_deinit();
         if (ret) {
             ESP_LOGE(BLUFI_TAG, "Controller deinit failed: %s", esp_err_to_name(ret));
         }
+#ifdef CONFIG_ESP_HOSTED_ENABLED
+        // ESP32-P4 uses ESP-Hosted with external BT controller, no memory to release
+#else
+        {
+            size_t before = esp_get_free_heap_size();
+            esp_err_t r = esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
+            if (r == ESP_OK) {
+                ESP_LOGI(BLUFI_TAG, "BT memory released: +%u bytes", (unsigned int)(esp_get_free_heap_size() - before));
+            } else {
+                ESP_LOGW(BLUFI_TAG, "esp_bt_controller_mem_release failed: %s", esp_err_to_name(r));
+            }
+        }
 #endif
     }
+
+    {
+        std::vector<wifi_ap_record_t>().swap(m_ap_records);
+    }
+    m_has_recent_scan_results = false;
+
     return ret;
 }
 
-#ifdef CONFIG_BT_BLUEDROID_ENABLED
 esp_err_t Blufi::_host_init() {
-    esp_err_t ret = esp_bluedroid_init();
+    ESP_LOGI(BLUFI_TAG, "_host_init: entry");
+    esp_err_t ret;
+
+#ifndef CONFIG_ESP_HOSTED_ENABLED
+    // For standard ESP targets with built-in BT controller
+    ESP_LOGI(BLUFI_TAG, "_host_init: calling esp_bt_controller_init");
+    ret = esp_bt_controller_init(esp_bt_controller_config_t{});
     if (ret) {
-        ESP_LOGE(BLUFI_TAG, "%s init bluedroid failed: %s", __func__, esp_err_to_name(ret));
+        ESP_LOGE(BLUFI_TAG, "_host_init: esp_bt_controller_init failed: %s", esp_err_to_name(ret));
         return ESP_FAIL;
     }
+    ESP_LOGI(BLUFI_TAG, "_host_init: controller_init OK, calling esp_bt_controller_enable");
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (ret) {
+        ESP_LOGE(BLUFI_TAG, "_host_init: esp_bt_controller_enable(BLE) failed: %s", esp_err_to_name(ret));
+        return ESP_FAIL;
+    }
+    ESP_LOGI(BLUFI_TAG, "_host_init: controller_enable OK");
+#else
+    // ESP-Hosted mode: BT controller is on co-processor (ESP32-C6)
+    // Initialize via ESP-Hosted API
+    ESP_LOGI(BLUFI_TAG, "_host_init: ESP-Hosted mode, opening HCI channel");
+    hosted_hci_bluedroid_open();
+
+    // Attach HCI driver operations to Bluedroid
+    ESP_LOGI(BLUFI_TAG, "_host_init: attaching HCI driver to Bluedroid");
+    esp_bluedroid_hci_driver_operations_t hci_ops = {};
+    hci_ops.send = hosted_hci_bluedroid_send;
+    hci_ops.check_send_available = hosted_hci_bluedroid_check_send_available;
+    hci_ops.register_host_callback = hosted_hci_bluedroid_register_host_callback;
+
+    ret = esp_bluedroid_attach_hci_driver(&hci_ops);
+    if (ret != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "_host_init: esp_bluedroid_attach_hci_driver failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(BLUFI_TAG, "_host_init: HCI driver attached successfully");
+#endif
+
+    ESP_LOGI(BLUFI_TAG, "_host_init: calling esp_bluedroid_init");
+    ret = esp_bluedroid_init();
+    if (ret) {
+        ESP_LOGE(BLUFI_TAG, "_host_init: esp_bluedroid_init failed: %s", esp_err_to_name(ret));
+        return ESP_FAIL;
+    }
+    ESP_LOGI(BLUFI_TAG, "_host_init: bluedroid_init OK, calling esp_bluedroid_enable");
     ret = esp_bluedroid_enable();
     if (ret) {
-        ESP_LOGE(BLUFI_TAG, "%s enable bluedroid failed: %s", __func__, esp_err_to_name(ret));
+        ESP_LOGE(BLUFI_TAG, "_host_init: esp_bluedroid_enable failed: %s", esp_err_to_name(ret));
         return ESP_FAIL;
     }
-    ESP_LOGI(BLUFI_TAG, "BD ADDR: " ESP_BD_ADDR_STR, ESP_BD_ADDR_HEX(esp_bt_dev_get_address()));
+#ifndef CONFIG_ESP_HOSTED_ENABLED
+    ESP_LOGI(BLUFI_TAG, "_host_init: bluedroid_enable OK, BD ADDR: " ESP_BD_ADDR_STR, ESP_BD_ADDR_HEX(esp_bt_dev_get_address()));
+#else
+    ESP_LOGI(BLUFI_TAG, "_host_init: bluedroid_enable OK (ESP-Hosted mode)");
+#endif
     return ESP_OK;
 }
 
@@ -191,18 +238,35 @@ esp_err_t Blufi::_host_deinit() {
         ESP_LOGE(BLUFI_TAG, "%s deinit bluedroid failed: %s", __func__, esp_err_to_name(ret));
         return ESP_FAIL;
     }
+
+#ifdef CONFIG_ESP_HOSTED_ENABLED
+    // ESP-Hosted mode: close HCI channel
+    ESP_LOGI(BLUFI_TAG, "_host_deinit: ESP-Hosted mode, closing HCI channel");
+    hosted_hci_bluedroid_close();
+#endif
+
     return ESP_OK;
 }
 
 esp_err_t Blufi::_gap_register_callback() {
+    ESP_LOGI(BLUFI_TAG, "_gap_register_callback: entry");
     esp_err_t rc = esp_ble_gap_register_callback(esp_blufi_gap_event_handler);
     if (rc) {
+        ESP_LOGE(BLUFI_TAG, "_gap_register_callback: esp_ble_gap_register_callback failed: %x", rc);
         return rc;
     }
-    return esp_blufi_profile_init();
+    ESP_LOGI(BLUFI_TAG, "_gap_register_callback: calling esp_blufi_profile_init");
+    rc = esp_blufi_profile_init();
+    if (rc) {
+        ESP_LOGE(BLUFI_TAG, "_gap_register_callback: esp_blufi_profile_init failed: %x", rc);
+        return rc;
+    }
+    ESP_LOGI(BLUFI_TAG, "_gap_register_callback: done");
+    return ESP_OK;
 }
 
 esp_err_t Blufi::_host_and_cb_init() {
+    ESP_LOGI(BLUFI_TAG, "_host_and_cb_init: entry");
     static esp_blufi_callbacks_t blufi_callbacks = {
         .event_cb = &_event_callback_trampoline,
         .negotiate_data_handler = &_negotiate_data_handler_trampoline,
@@ -211,105 +275,45 @@ esp_err_t Blufi::_host_and_cb_init() {
         .checksum_func = &_checksum_func_trampoline,
     };
 
+    ESP_LOGI(BLUFI_TAG, "_host_and_cb_init: calling _host_init");
     esp_err_t ret = _host_init();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "%s initialise host failed: %s", __func__, esp_err_to_name(ret));
         return ret;
     }
+
+    ESP_LOGI(BLUFI_TAG, "_host_and_cb_init: calling esp_blufi_register_callbacks");
     ret = esp_blufi_register_callbacks(&blufi_callbacks);
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "%s blufi register failed, error code = %x", __func__, ret);
         return ret;
     }
+
+    ESP_LOGI(BLUFI_TAG, "_host_and_cb_init: calling _gap_register_callback");
     ret = _gap_register_callback();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "%s gap register failed, error code = %x", __func__, ret);
         return ret;
     }
-    return ESP_OK;
-}
-#endif /* CONFIG_BT_BLUEDROID_ENABLED */
-
-#ifdef CONFIG_BT_NIMBLE_ENABLED
-// Stubs for NimBLE specific store functionality
-void ble_store_config_init();
-
-void Blufi::_nimble_on_reset(int reason) {
-    ESP_LOGE(BLUFI_TAG, "NimBLE Resetting state; reason=%d", reason);
-}
-
-void Blufi::_nimble_on_sync() { esp_blufi_profile_init(); }
-
-void Blufi::_nimble_host_task(void* param) {
-    ESP_LOGI(BLUFI_TAG, "BLE Host Task Started");
-    nimble_port_run();
-    nimble_port_freertos_deinit();
-}
-
-esp_err_t Blufi::_host_init() {
-    ble_hs_cfg.reset_cb = _nimble_on_reset;
-    ble_hs_cfg.sync_cb = _nimble_on_sync;
-    ble_hs_cfg.gatts_register_cb = esp_blufi_gatt_svr_register_cb;
-
-    ble_hs_cfg.sm_io_cap = 4;
-#ifdef CONFIG_EXAMPLE_BONDING
-    ble_hs_cfg.sm_bonding = 1;
-#endif
-
-    int rc = esp_blufi_gatt_svr_init();
-    assert(rc == 0);
-
-    ble_store_config_init();
-    esp_blufi_btc_init();
-
-    esp_err_t err = esp_nimble_enable(_nimble_host_task);
-    if (err) {
-        ESP_LOGE(BLUFI_TAG, "%s failed: %s", __func__, esp_err_to_name(err));
-        return ESP_FAIL;
-    }
+    ESP_LOGI(BLUFI_TAG, "_host_and_cb_init: done");
     return ESP_OK;
 }
 
-esp_err_t Blufi::_host_deinit(void) {
-    esp_err_t ret = nimble_port_stop();
-    if (ret == ESP_OK) {
-        esp_nimble_deinit();
-    }
-    esp_blufi_gatt_svr_deinit();
-    ret = esp_blufi_profile_deinit();
-    esp_blufi_btc_deinit();
-    return ret;
-}
-
-esp_err_t Blufi::_gap_register_callback(void) { return ESP_OK; }
-
-esp_err_t Blufi::_host_and_cb_init() {
-    static esp_blufi_callbacks_t blufi_callbacks = {
-        .event_cb = &_event_callback_trampoline,
-        .negotiate_data_handler = &_negotiate_data_handler_trampoline,
-        .encrypt_func = &_encrypt_func_trampoline,
-        .decrypt_func = &_decrypt_func_trampoline,
-        .checksum_func = &_checksum_func_trampoline,
-    };
-
-    esp_err_t ret = esp_blufi_register_callbacks(&blufi_callbacks);
-    if (ret) {
-        ESP_LOGE(BLUFI_TAG, "%s blufi register failed, error code = %x", __func__, ret);
-        return ret;
-    }
-
-    // Host init must be called after registering callbacks for NimBLE
-    ret = _host_init();
-    if (ret) {
-        ESP_LOGE(BLUFI_TAG, "%s initialise host failed: %s", __func__, esp_err_to_name(ret));
-        return ret;
-    }
-    return ESP_OK;
-}
-#endif /* CONFIG_BT_NIMBLE_ENABLED */
-
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
 esp_err_t Blufi::_controller_init() {
+#ifdef CONFIG_ESP_HOSTED_ENABLED
+    // ESP32-P4 with ESP-Hosted: BT controller is on external co-processor (ESP32-C6)
+    // The C6 co-processor runs factory firmware which already has BT pre-initialized.
+    // esp_hosted_bt_controller_init/enable RPC commands are NOT supported by factory firmware
+    // (Co-processor reports FW version 0.0.0), so we skip them and rely on the
+    // co-processor's pre-initialized BT controller. The VHCI HCI path is all we need.
+
+    ESP_LOGI(BLUFI_TAG, "_controller_init: ESP-Hosted mode, C6 factory firmware BT assumed active");
+
+    // NOTE: esp_hosted_init() and esp_hosted_connect_to_slave() are already called
+    // automatically at startup by esp-hosted's internal startup hooks.
+    // We only need to open the HCI channel and attach Bluedroid, which is done in _host_init().
+#else
+    // Standard ESP targets with built-in BT controller
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     esp_err_t ret = esp_bt_controller_init(&bt_cfg);
     if (ret) {
@@ -321,18 +325,17 @@ esp_err_t Blufi::_controller_init() {
         ESP_LOGE(BLUFI_TAG, "%s enable controller failed: %s", __func__, esp_err_to_name(ret));
         return ret;
     }
-
-#ifdef CONFIG_BT_NIMBLE_ENABLED
-    ret = esp_nimble_init();
-    if (ret) {
-        ESP_LOGE(BLUFI_TAG, "esp_nimble_init() failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
 #endif
     return ESP_OK;
 }
 
 esp_err_t Blufi::_controller_deinit() {
+#ifdef CONFIG_ESP_HOSTED_ENABLED
+    // ESP32-P4 with ESP-Hosted: BT controller is on co-processor (factory firmware).
+    // No deinit needed - C6 BT stays active independently.
+    ESP_LOGI(BLUFI_TAG, "_controller_deinit: ESP-Hosted mode, no co-processor BT deinit needed");
+    return ESP_OK;
+#else
     esp_err_t ret = esp_bt_controller_disable();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "%s disable controller failed: %s", __func__, esp_err_to_name(ret));
@@ -342,8 +345,8 @@ esp_err_t Blufi::_controller_deinit() {
         ESP_LOGE(BLUFI_TAG, "%s deinit controller failed: %s", __func__, esp_err_to_name(ret));
     }
     return ret;
-}
 #endif
+}
 
 static int myrand(void* rng_state, unsigned char* output, size_t len) {
     esp_fill_random(output, len);
@@ -533,10 +536,74 @@ int Blufi::_get_softap_conn_num() {
     return 0;
 }
 
+void Blufi::_register_scan_handler() {
+    _unregister_scan_handler();
+    esp_err_t err = esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
+                                                        &_wifi_scan_event_handler, this,
+                                                        &m_scan_handler_instance);
+    if (err != ESP_OK) {
+        ESP_LOGW(BLUFI_TAG, "Failed to register scan handler: %s", esp_err_to_name(err));
+    }
+}
+
+void Blufi::_unregister_scan_handler() {
+    if (m_scan_handler_instance != nullptr) {
+        esp_event_handler_instance_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, m_scan_handler_instance);
+        m_scan_handler_instance = nullptr;
+    }
+}
+
+void Blufi::_reset_scan_state() {
+    m_scan_in_progress = false;
+    m_scan_should_save_ssid = true;
+    m_wifi_list_requested = false;
+}
+
+void Blufi::_ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id,
+                              void* event_data) {
+    auto* self = static_cast<Blufi*>(arg);
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        self->_on_got_ip();
+    }
+}
+
+void Blufi::_on_got_ip() {
+    if (!m_ble_is_connected) {
+        ESP_LOGI(BLUFI_TAG, "Got IP but BLE disconnected, skipping status report");
+        return;
+    }
+
+    auto& wifi = WifiManager::GetInstance();
+    wifi_mode_t mode;
+    esp_wifi_get_mode(&mode);
+
+    auto current_ssid = wifi.GetSsid();
+    if (!current_ssid.empty()) {
+        m_sta_ssid_len = static_cast<int>(std::min(current_ssid.size(), sizeof(m_sta_ssid)));
+        memcpy(m_sta_ssid, current_ssid.c_str(), m_sta_ssid_len);
+    }
+
+    wifi_ap_record_t ap_info{};
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        memcpy(m_sta_bssid, ap_info.bssid, sizeof(m_sta_bssid));
+    }
+
+    esp_blufi_extra_info_t info = {};
+    memcpy(info.sta_bssid, m_sta_bssid, sizeof(m_sta_bssid));
+    info.sta_bssid_set = true;
+    info.sta_ssid = m_sta_ssid;
+    info.sta_ssid_len = m_sta_ssid_len;
+
+    ESP_LOGI(BLUFI_TAG, "Sending WiFi connected status report via IP event handler");
+    esp_err_t err = esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS, 0, &info);
+    if (err != ESP_OK) {
+        ESP_LOGW(BLUFI_TAG, "esp_blufi_send_wifi_conn_report returned: %s", esp_err_to_name(err));
+    }
+}
+
 void Blufi::start_wifi_scan() {
     ESP_LOGI(BLUFI_TAG, "Starting dedicated WiFi scan");
 
-    // Check if a scan is already in progress
     if (m_scan_in_progress) {
         ESP_LOGW(BLUFI_TAG, "Scan already in progress, skipping");
         return;
@@ -544,54 +611,42 @@ void Blufi::start_wifi_scan() {
 
     m_scan_in_progress = true;
 
-    // Get current WiFi mode
     wifi_mode_t current_mode;
     esp_err_t err = esp_wifi_get_mode(&current_mode);
 
-    if (current_mode == WIFI_MODE_AP) {
-        // If in AP mode, temporarily switch to APSTA to allow scanning
-        ESP_LOGI(BLUFI_TAG, "WiFi in AP mode");
+    if (current_mode == WIFI_MODE_AP || current_mode == WIFI_MODE_APSTA) {
+        ESP_LOGI(BLUFI_TAG, "Switching WiFi mode from AP/APSTA to STA before scan");
         err = esp_wifi_set_mode(WIFI_MODE_STA);
         if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to set WiFi mode to STA: %s", esp_err_to_name(err));
+            ESP_LOGE(BLUFI_TAG, "esp_wifi_set_mode(WIFI_MODE_STA) failed: %s", esp_err_to_name(err));
             m_scan_in_progress = false;
             return;
         }
-        // Need to restart WiFi for mode change to take effect
-        err = esp_wifi_start();
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi after mode switch: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return;
-        }
-        // Register scan event handler
-        esp_event_handler_instance_t scan_event_instance;
-        esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                            &Blufi::_wifi_scan_event_handler, this,
-                                            &scan_event_instance);
+    }
 
-        // Start scan
-        err = esp_wifi_scan_start(NULL, false);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return;
-        }
-    } else if (current_mode == WIFI_MODE_STA) {
-        // Start scan
-        err = esp_wifi_scan_start(NULL, false);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return;
-        }
-    } else {
-        ESP_LOGE(BLUFI_TAG, "Unexpected WiFi mode: %d", current_mode);
+    err = esp_wifi_start();
+    ESP_LOGI(BLUFI_TAG, "esp_wifi_start -> %s", esp_err_to_name(err));
+    if (err == ESP_ERR_WIFI_STATE) {
+        ESP_LOGI(BLUFI_TAG, "WiFi already started (ESP_ERR_WIFI_STATE)");
+    } else if (err != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "esp_wifi_start failed: %s", esp_err_to_name(err));
         m_scan_in_progress = false;
         return;
     }
 
-    ESP_LOGI(BLUFI_TAG, "WiFi scan started");
+    _register_scan_handler();
+
+    err = esp_wifi_scan_start(NULL, false);
+    ESP_LOGI(BLUFI_TAG, "esp_wifi_scan_start -> %s", esp_err_to_name(err));
+    if (err == ESP_ERR_WIFI_STATE) {
+        ESP_LOGI(BLUFI_TAG, "Scan already in progress");
+    } else if (err != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "esp_wifi_scan_start FAILED: %s", esp_err_to_name(err));
+        m_scan_in_progress = false;
+        return;
+    }
+
+    ESP_LOGI(BLUFI_TAG, "WiFi scan started successfully");
 }
 
 void Blufi::_send_wifi_list() {
@@ -603,18 +658,19 @@ void Blufi::_send_wifi_list() {
     ESP_LOGI(BLUFI_TAG, "Sending WiFi list with %d APs", m_ap_records.size());
 
     std::vector<esp_blufi_ap_record_t> blufi_ap_list;
-    for (const auto& ap : m_ap_records) {
-        esp_blufi_ap_record_t blufi_ap;
+    blufi_ap_list.resize(m_ap_records.size());
+    for (size_t i = 0; i < m_ap_records.size(); ++i) {
+        const auto& ap = m_ap_records[i];
+        auto& blufi_ap = blufi_ap_list[i];
         memset(&blufi_ap, 0, sizeof(blufi_ap));
         memcpy(blufi_ap.ssid, ap.ssid, std::min((size_t)32, sizeof(ap.ssid)));
         blufi_ap.rssi = ap.rssi;
-        blufi_ap_list.push_back(blufi_ap);
     }
 
     esp_blufi_send_wifi_list(blufi_ap_list.size(), blufi_ap_list.data());
 
-    m_ap_records.clear();
-    start_wifi_scan();
+    m_wifi_list_requested = false;
+    ESP_LOGI(BLUFI_TAG, "Retaining %d APs for connect hints", m_ap_records.size());
 }
 
 void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id,
@@ -630,10 +686,12 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
         if (ap_num == 0) {
             ESP_LOGW(BLUFI_TAG, "No APs found");
             self->m_ap_records.clear();
+            self->m_has_recent_scan_results = false;
         } else {
             if (static_cast<Blufi*>(arg)->m_scan_should_save_ssid == true) {
                 self->m_ap_records.resize(ap_num);
                 esp_wifi_scan_get_ap_records(&ap_num, self->m_ap_records.data());
+                self->m_has_recent_scan_results = true;
 
                 ESP_LOGI(BLUFI_TAG, "Found %d APs", ap_num);
                 for (const auto& ap : self->m_ap_records) {
@@ -643,6 +701,13 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
             }
         }
         self->m_scan_in_progress = false;
+
+        if (self->m_wifi_list_requested) {
+            self->m_wifi_list_requested = false;
+            self->_send_wifi_list();
+        }
+
+        self->_unregister_scan_handler();
     }
 }
 
@@ -661,22 +726,29 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             m_ble_is_connected = true;
             esp_blufi_adv_stop();
             _security_init();
+            if (m_ip_handler_instance == nullptr) {
+                ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                                    &_ip_event_handler, this, &m_ip_handler_instance));
+                ESP_LOGI(BLUFI_TAG, "IP event handler registered");
+            }
             break;
         case ESP_BLUFI_EVENT_BLE_DISCONNECT:
             ESP_LOGI(BLUFI_TAG, "BLUFI ble disconnect");
             m_ble_is_connected = false;
             _security_deinit();
+            _unregister_scan_handler();
+            _reset_scan_state();
+            if (m_ip_handler_instance != nullptr) {
+                esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, m_ip_handler_instance);
+                m_ip_handler_instance = nullptr;
+                ESP_LOGI(BLUFI_TAG, "IP event handler unregistered");
+            }
             if (!m_provisioned) {
                 esp_blufi_adv_start();
             } else {
                 esp_blufi_adv_stop();
                 if (!m_deinited) {
-                    xTaskCreate(
-                        [](void* ctx) {
-                            static_cast<Blufi*>(ctx)->deinit();
-                            vTaskDelete(nullptr);
-                        },
-                        "blufi_deinit", 4096, this, 5, nullptr);
+                    deinit();
                 }
             }
             break;
@@ -710,12 +782,43 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             std::string ssid(reinterpret_cast<const char*>(m_sta_config.sta.ssid));
             std::string password(reinterpret_cast<const char*>(m_sta_config.sta.password));
 
+            if (m_has_recent_scan_results) {
+                auto best_it = std::find_if(m_ap_records.begin(), m_ap_records.end(), [&ssid](const wifi_ap_record_t& ap) {
+                    return strcmp(reinterpret_cast<const char*>(ap.ssid), ssid.c_str()) == 0;
+                });
+                if (best_it != m_ap_records.end()) {
+                    m_sta_config.sta.channel = best_it->primary;
+                    memcpy(m_sta_config.sta.bssid, best_it->bssid, sizeof(best_it->bssid));
+                    m_sta_config.sta.bssid_set = true;
+                    ESP_LOGI(BLUFI_TAG,
+                             "Using cached AP hint for SSID %s: RSSI=%d channel=%d",
+                             ssid.c_str(), best_it->rssi, best_it->primary);
+                } else {
+                    m_sta_config.sta.channel = 0;
+                    m_sta_config.sta.bssid_set = false;
+                    ESP_LOGW(BLUFI_TAG, "No cached AP hint found for SSID %s", ssid.c_str());
+                }
+            } else {
+                m_sta_config.sta.channel = 0;
+                m_sta_config.sta.bssid_set = false;
+                ESP_LOGW(BLUFI_TAG, "No recent scan results available for SSID %s", ssid.c_str());
+            }
+
             SsidManager::GetInstance().AddSsid(ssid, password);
+            _unregister_scan_handler();
+            _reset_scan_state();
             m_scan_should_save_ssid = false;
 
             m_sta_ssid_len = static_cast<int>(std::min(ssid.size(), sizeof(m_sta_ssid)));
             memcpy(m_sta_ssid, ssid.c_str(), m_sta_ssid_len);
-            memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
+            if (m_sta_config.sta.bssid_set) {
+                memcpy(m_sta_bssid, m_sta_config.sta.bssid, sizeof(m_sta_bssid));
+                m_sta_conn_info.sta_bssid_set = true;
+                memcpy(m_sta_conn_info.sta_bssid, m_sta_config.sta.bssid, sizeof(m_sta_bssid));
+            } else {
+                memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
+                m_sta_conn_info.sta_bssid_set = false;
+            }
             m_sta_connected = false;
             m_sta_got_ip = false;
             m_sta_is_connecting = true;
@@ -760,7 +863,6 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                     if (wifi.IsConnected()) {
                         self->m_sta_is_connecting = false;
                         self->m_sta_connected = true;
-                        self->m_sta_got_ip = true;
                         self->m_provisioned = true;
 
                         auto current_ssid = wifi.GetSsid();
@@ -775,18 +877,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                             memcpy(self->m_sta_bssid, ap_info.bssid, sizeof(self->m_sta_bssid));
                         }
 
-                        esp_blufi_extra_info_t info = {};
-                        memcpy(info.sta_bssid, self->m_sta_bssid, sizeof(self->m_sta_bssid));
-                        info.sta_bssid_set = true;
-                        info.sta_ssid = self->m_sta_ssid;
-                        info.sta_ssid_len = self->m_sta_ssid_len;
-                        esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS,
-                                                        softap_conn_num, &info);
-                        ESP_LOGI(BLUFI_TAG, "connected to WiFi");
-
-                        if (self->m_ble_is_connected) {
-                            esp_blufi_disconnect();
-                        }
+                        ESP_LOGI(BLUFI_TAG, "WiFi connected, waiting for IP/status handling");
                     } else {
                         self->m_sta_is_connecting = false;
                         self->m_sta_connected = false;
@@ -865,10 +956,13 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             break;
         case ESP_BLUFI_EVENT_GET_WIFI_LIST: {
             ESP_LOGI(BLUFI_TAG, "BLUFI get wifi list");
-            while (m_scan_in_progress) {
-                vTaskDelay(pdMS_TO_TICKS(500));
+            if (m_scan_in_progress) {
+                m_wifi_list_requested = true;
+            } else {
+                m_scan_should_save_ssid = true;
+                m_wifi_list_requested = true;
+                start_wifi_scan();
             }
-            _send_wifi_list();
             break;
         }
         default:

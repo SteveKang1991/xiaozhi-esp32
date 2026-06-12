@@ -415,6 +415,25 @@ public:
         return &backlight;
     }
 
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    virtual void StartWifiConfigMode() override {
+        ESP_LOGI(TAG, "Starting BluFi WiFi configuration mode");
+
+        // Call parent implementation
+        WifiBoard::StartWifiConfigMode();
+
+        // Show notification on display
+        auto* disp = GetDisplay();
+        if (disp) {
+            disp->ShowNotification("BluFi Mode\nSearch: Xiaozhi-Blufi");
+        }
+
+        // Play sound notification
+        Application::GetInstance().Alert(Lang::Strings::WIFI_CONFIG_MODE,
+            "BluFi Mode\nSearch: Xiaozhi-Blufi", "gear", Lang::Sounds::OGG_WIFICONFIG);
+    }
+#endif
+
 };
 
 DECLARE_BOARD(FanFutureP4HoloST7701WiFi6Lcd5BBoard);

@@ -829,6 +829,11 @@ endif()
 # Auto Select Additional Sources
 if (CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
     list(APPEND SOURCES "boards/common/blufi.cpp")
+    # esp-hosted provides hosted_hci_bluedroid_* functions used in blufi.cpp
+    # The functions are guarded by #ifdef CONFIG_ESP_HOSTED_ENABLED inside blufi.cpp
+    if(CONFIG_ESP_HOSTED_ENABLED)
+        set(BLUFI_PRIV_REQUIRES espressif__esp_hosted)
+    endif()
 endif ()
 # Select language directory according to Kconfig
 if(CONFIG_LANGUAGE_ZH_CN)
@@ -996,6 +1001,8 @@ idf_component_register(SRCS ${SOURCES}
                         bt
                         fatfs
                         ${MAIN_PRIV_REQUIRES_EXTRA}
+                        ${BLUFI_PRIV_REQUIRES}
+                        espressif__esp_hosted
                     )
 
 # Use target_compile_definitions to define BOARD_TYPE, BOARD_NAME
