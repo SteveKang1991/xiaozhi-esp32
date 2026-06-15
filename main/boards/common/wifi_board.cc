@@ -179,8 +179,12 @@ void WifiBoard::StartWifiConfigMode() {
     ESP_LOGI(TAG, "WifiBoard::StartWifiConfigMode: blufi path");
     auto &blufi = Blufi::GetInstance();
     ESP_LOGI(TAG, "WifiBoard::StartWifiConfigMode: calling blufi.init()");
-    blufi.init();
-    ESP_LOGI(TAG, "WifiBoard::StartWifiConfigMode: blufi.init() returned");
+    esp_err_t blufi_ret = blufi.init();
+    if (blufi_ret != ESP_OK) {
+        ESP_LOGE(TAG, "WifiBoard::StartWifiConfigMode: blufi.init() FAILED: %s", esp_err_to_name(blufi_ret));
+    } else {
+        ESP_LOGI(TAG, "WifiBoard::StartWifiConfigMode: blufi.init() returned OK");
+    }
 #endif
 #if CONFIG_USE_ACOUSTIC_WIFI_PROVISIONING
     // Start acoustic provisioning task

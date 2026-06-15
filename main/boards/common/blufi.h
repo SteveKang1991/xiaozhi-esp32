@@ -16,12 +16,14 @@
 // ESP-Hosted BT controller support for ESP32-P4
 // For ESP32-P4 with ESP-Hosted, the BT controller is on the co-processor (ESP32-C6).
 // The hosted_hci_bluedroid_* functions are provided by the esp-hosted component
-// when CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID is enabled.
+// when both CONFIG_ESP_HOSTED_ENABLED and CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID are set.
 
-#ifdef CONFIG_ESP_HOSTED_ENABLED
+#if defined(CONFIG_ESP_HOSTED_ENABLED) && defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+extern "C" {
 #include "esp_hosted.h"
 #include "esp_hosted_bluedroid.h"
 #include "esp_bluedroid_hci.h"
+}
 #endif
 
 class Blufi {
@@ -77,7 +79,7 @@ private:
 
     static esp_err_t _host_and_cb_init();
 
-#ifdef CONFIG_ESP_HOSTED_ENABLED
+#if defined(CONFIG_ESP_HOSTED_ENABLED) && defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
     // ESP-Hosted BT controller support
     static esp_err_t _hosted_bt_controller_init();
 #endif

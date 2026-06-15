@@ -788,7 +788,6 @@ elseif(CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ST7701_WiFI6_LCD_5B)
     set(BOARD_TYPE "fanfuture-p4-holo-st7701-wifi6-lcd-5b")
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
-    set(DEFAULT_EMOJI_COLLECTION noto-emoji_128)
 endif()
 
 if(MANUFACTURER)

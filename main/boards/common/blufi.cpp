@@ -17,12 +17,14 @@
 // ESP-Hosted BT controller support for ESP32-P4
 // For ESP32-P4 with ESP-Hosted, the BT controller is on the co-processor (ESP32-C6).
 // The hosted_hci_bluedroid_* functions are provided by the esp-hosted component
-// when CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID is enabled.
+// when both CONFIG_ESP_HOSTED_ENABLED and CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID are set.
 
-#ifdef CONFIG_ESP_HOSTED_ENABLED
+#if defined(CONFIG_ESP_HOSTED_ENABLED) && defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
+extern "C" {
 #include "esp_hosted.h"
 #include "esp_hosted_bluedroid.h"
 #include "esp_bluedroid_hci.h"
+}
 #endif
 
 #define BLUFI_DEVICE_NAME "Xiaozhi-Blufi"
@@ -140,7 +142,7 @@ esp_err_t Blufi::deinit() {
         if (ret) {
             ESP_LOGE(BLUFI_TAG, "Controller deinit failed: %s", esp_err_to_name(ret));
         }
-#ifdef CONFIG_ESP_HOSTED_ENABLED
+#if defined(CONFIG_ESP_HOSTED_ENABLED) && defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
         // ESP32-P4 uses ESP-Hosted with external BT controller, no memory to release
 #else
         {
@@ -167,7 +169,7 @@ esp_err_t Blufi::_host_init() {
     ESP_LOGI(BLUFI_TAG, "_host_init: entry");
     esp_err_t ret;
 
-#ifndef CONFIG_ESP_HOSTED_ENABLED
+#if !defined(CONFIG_ESP_HOSTED_ENABLED) || !defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
     // For standard ESP targets with built-in BT controller
     ESP_LOGI(BLUFI_TAG, "_host_init: calling esp_bt_controller_init");
     ret = esp_bt_controller_init(esp_bt_controller_config_t{});
@@ -215,7 +217,7 @@ esp_err_t Blufi::_host_init() {
         ESP_LOGE(BLUFI_TAG, "_host_init: esp_bluedroid_enable failed: %s", esp_err_to_name(ret));
         return ESP_FAIL;
     }
-#ifndef CONFIG_ESP_HOSTED_ENABLED
+#if !defined(CONFIG_ESP_HOSTED_ENABLED) || !defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
     ESP_LOGI(BLUFI_TAG, "_host_init: bluedroid_enable OK, BD ADDR: " ESP_BD_ADDR_STR, ESP_BD_ADDR_HEX(esp_bt_dev_get_address()));
 #else
     ESP_LOGI(BLUFI_TAG, "_host_init: bluedroid_enable OK (ESP-Hosted mode)");
@@ -239,7 +241,7 @@ esp_err_t Blufi::_host_deinit() {
         return ESP_FAIL;
     }
 
-#ifdef CONFIG_ESP_HOSTED_ENABLED
+#if defined(CONFIG_ESP_HOSTED_ENABLED) && defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
     // ESP-Hosted mode: close HCI channel
     ESP_LOGI(BLUFI_TAG, "_host_deinit: ESP-Hosted mode, closing HCI channel");
     hosted_hci_bluedroid_close();
@@ -300,7 +302,7 @@ esp_err_t Blufi::_host_and_cb_init() {
 }
 
 esp_err_t Blufi::_controller_init() {
-#ifdef CONFIG_ESP_HOSTED_ENABLED
+#if defined(CONFIG_ESP_HOSTED_ENABLED) && defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
     // ESP32-P4 with ESP-Hosted: BT controller is on external co-processor (ESP32-C6)
     // The C6 co-processor runs factory firmware which already has BT pre-initialized.
     // esp_hosted_bt_controller_init/enable RPC commands are NOT supported by factory firmware
@@ -330,7 +332,7 @@ esp_err_t Blufi::_controller_init() {
 }
 
 esp_err_t Blufi::_controller_deinit() {
-#ifdef CONFIG_ESP_HOSTED_ENABLED
+#if defined(CONFIG_ESP_HOSTED_ENABLED) && defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
     // ESP32-P4 with ESP-Hosted: BT controller is on co-processor (factory firmware).
     // No deinit needed - C6 BT stays active independently.
     ESP_LOGI(BLUFI_TAG, "_controller_deinit: ESP-Hosted mode, no co-processor BT deinit needed");
@@ -842,7 +844,19 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
 
             vTaskDelay(pdMS_TO_TICKS(500));
 
-            wifi_manager.StartStation();
+            if (m_sta_config.sta.bssid_set) {
+                WifiApRecord direct_connect_hint = {
+                    .ssid = ssid,
+                    .password = password,
+                    .channel = m_sta_config.sta.channel,
+                    .authmode = WIFI_AUTH_WPA2_PSK,
+                    .bssid = {0}
+                };
+                memcpy(direct_connect_hint.bssid, m_sta_config.sta.bssid, sizeof(direct_connect_hint.bssid));
+                wifi_manager.StartStation(direct_connect_hint);
+            } else {
+                wifi_manager.StartStation();
+            }
 
             xTaskCreate(
                 [](void* ctx) {
