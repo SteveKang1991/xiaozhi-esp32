@@ -131,11 +131,15 @@ private:
 
             ESP_ERROR_CHECK(pmic_->SetDcdc3Voltage(3400));
             ESP_ERROR_CHECK(pmic_->EnableDcdc3(true));
-            ESP_LOGI(TAG, "   ⚡ DCDC3: 3.4V");
+            ESP_LOGI(TAG, "   ⚡ DCDC3: 3.4V");**/
 
             ESP_ERROR_CHECK(pmic_->SetDcdc4Voltage(1800));
             ESP_ERROR_CHECK(pmic_->EnableDcdc4(true));
-            ESP_LOGI(TAG, "   ⚡ DCDC4: 1.8V");**/
+            ESP_LOGI(TAG, "   ⚡ DCDC4: 1.8V");
+
+            ESP_ERROR_CHECK(pmic_->SetAldo1Voltage(3300));
+            ESP_ERROR_CHECK(pmic_->EnableAldo1(true));
+            ESP_LOGI(TAG, "   💡 ALDO1: 3.3V");
 
             ESP_ERROR_CHECK(pmic_->SetAldo2Voltage(1800));
             ESP_ERROR_CHECK(pmic_->EnableAldo2(true));
