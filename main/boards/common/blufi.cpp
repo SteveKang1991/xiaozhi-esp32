@@ -104,6 +104,11 @@ Blufi::Blufi()
 }
 
 Blufi::~Blufi() {
+    if (m_restart_timer) {
+        esp_timer_stop(m_restart_timer);
+        esp_timer_delete(m_restart_timer);
+        m_restart_timer = nullptr;
+    }
     if (m_sec) {
         _security_deinit();
     }
@@ -115,9 +120,14 @@ esp_err_t Blufi::init() {
     m_provisioned = false;
     m_deinited = false;
     m_wifi_list_requested = false;
+    m_restart_scheduled = false;
     m_ap_records.clear();
     m_has_recent_scan_results = false;
     m_scan_in_progress = false;
+
+    // Restart timer is created lazily on first successful provisioning and kept alive
+    // across BluFi init/deinit cycles so that the post-provisioning restart survives
+    // wifi_board.cc calling Blufi::deinit() right after WiFi connects.
 
     // Note: WiFi scan is NOT started here. When the phone requests the WiFi list
     // (GET_WIFI_LIST event), _handle_event will call start_wifi_scan() which
@@ -146,6 +156,10 @@ esp_err_t Blufi::deinit() {
 
 	_unregister_scan_handler();
 	_reset_scan_state();
+
+	// NOTE: do NOT stop/delete m_restart_timer here. wifi_board.cc calls deinit()
+	// immediately when WiFi connects, but the post-provisioning restart scheduled
+	// by _on_got_ip() must still fire. The timer is torn down in the destructor.
 
 	if (inited_) {
 		if (m_deinited) {
@@ -756,6 +770,39 @@ void Blufi::_on_got_ip() {
     if (err != ESP_OK) {
         ESP_LOGW(BLUFI_TAG, "esp_blufi_send_wifi_conn_report returned: %s", esp_err_to_name(err));
     }
+
+    // Credentials have already been persisted to NVS via SsidManager::AddSsid() when the
+    // phone issued ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP. Now that WiFi is up and the phone has
+    // received the SUCCESS report, schedule a device restart in a few seconds. After reboot,
+    // wifi_board.cc::TryWifiConnect() will pick up the saved credentials and auto-connect.
+    if (!m_restart_scheduled) {
+        m_restart_scheduled = true;
+        if (m_restart_timer == nullptr) {
+            esp_timer_create_args_t args = {
+                .callback = &Blufi::_restart_timer_cb,
+                .arg = this,
+                .dispatch_method = ESP_TIMER_TASK,
+                .name = "blufi_restart",
+                .skip_unhandled_events = true,
+            };
+            esp_timer_create(&args, &m_restart_timer);
+        }
+        // Give the phone just enough time to receive the BLE success report before we reboot.
+        constexpr uint64_t kRestartDelayUs = 1 * 1000 * 1000;
+        esp_err_t tret = esp_timer_start_once(m_restart_timer, kRestartDelayUs);
+        if (tret != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "Failed to start restart timer: %s", esp_err_to_name(tret));
+        } else {
+            ESP_LOGI(BLUFI_TAG, "BluFi success: device will restart in 1s, creds already in NVS");
+        }
+    }
+}
+
+void Blufi::_restart_timer_cb(void *arg) {
+    ESP_LOGI(BLUFI_TAG, "Restart timer fired, rebooting device now");
+    // Best-effort: flush logs before reset.
+    vTaskDelay(pdMS_TO_TICKS(20));
+    esp_restart();
 }
 
 void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* param) {

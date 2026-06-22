@@ -156,4 +156,9 @@ private:
                                   void *event_data);
     void _on_got_ip();
     esp_event_handler_instance_t m_ip_handler_instance{};
+
+    // Restart after successful provisioning
+    bool m_restart_scheduled = false;
+    esp_timer_handle_t m_restart_timer = nullptr;
+    static void _restart_timer_cb(void *arg);
 };
