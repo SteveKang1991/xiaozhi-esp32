@@ -174,9 +174,21 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
     if (!websocket_->Connect(url.c_str())) {
-        ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
-        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
-        return false;
+        int first_err = websocket_->GetLastError();
+        ESP_LOGE(TAG, "Failed to connect to websocket server (attempt 1, code=%d), retrying in 1.5s", first_err);
+        // Most first-attempt failures on a fresh WiFi connection are DNS cache misses.
+        // Give lwIP a moment to settle and try once more before giving up.
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        if (websocket_ == nullptr || websocket_->IsConnected()) {
+            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+            return false;
+        }
+        if (!websocket_->Connect(url.c_str())) {
+            ESP_LOGE(TAG, "Failed to connect to websocket server (attempt 2, code=%d), giving up", websocket_->GetLastError());
+            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+            return false;
+        }
+        ESP_LOGI(TAG, "Websocket connected on retry");
     }
 
     // Send hello message to describe the client
