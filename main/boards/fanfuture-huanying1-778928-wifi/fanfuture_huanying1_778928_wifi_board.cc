@@ -101,6 +101,18 @@ private:
             },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
+
+        // Scan for I2C devices
+        uint8_t address;
+        ESP_LOGI(TAG, "Scanning I2C bus...");
+        for (address = 1; address < 127; address++) {
+            i2c_master_bus_handle_t cmd = i2c_bus_;
+            esp_err_t ret;
+            ret = i2c_master_probe(cmd, address, -1);
+            if (ret == ESP_OK) {
+                ESP_LOGI(TAG, "Found I2C device at address 0x%02x", address);
+            }
+        }
     }
 
     void InitializeSpi() {
