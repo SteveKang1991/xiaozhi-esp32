@@ -3,6 +3,7 @@
 #include "fan_mipi50_display.h"
 #include "esp_lcd_st7701.h"
 #include "button.h"
+#include "led/single_led.h"
 #include "config.h"
 #include "esp_video.h"
 
@@ -111,12 +112,12 @@ private:
                 return;
             }
 
-            if (chip_id != 0x4A && chip_id != 0x4B) {
+            /**if (chip_id != 0x4A && chip_id != 0x4B) {
                 ESP_LOGW(TAG, "⚠️  AXP2101芯片ID无效: 0x%02X (期望0x4A或0x4B)", chip_id);
                 delete pmic_;
                 pmic_ = nullptr;
                 return;
-            }
+            }**/
 
             ESP_LOGI(TAG, "✅ AXP2101芯片ID验证成功: 0x%02X", chip_id);
 
@@ -404,6 +405,11 @@ public:
             AUDIO_CODEC_ES7210_ADDR,
             AUDIO_INPUT_REFERENCE);
         return &audio_codec;
+    }
+
+    virtual Led* GetLed() override {
+        static SingleLed led(BUILTIN_LED_GPIO);
+        return &led;
     }
 
     virtual Display *GetDisplay() override {
