@@ -10,10 +10,6 @@
 #include <freertos/task.h>
 #include <esp_network.h>
 #include <esp_log.h>
-#include <esp_netif.h>
-#include <lwip/sockets.h>
-#include <lwip/netdb.h>
-#include <atomic>
 #include <utility>
 
 #include <font_awesome.h>
@@ -29,70 +25,6 @@ static const char *TAG = "WifiBoard";
 
 // Connection timeout in seconds
 static constexpr int CONNECT_TIMEOUT_SEC = 60;
-
-// DNS warm-up: when WiFi first connects, the DNS cache is empty and the first
-// `getaddrinfo()` for the WS host can take 2-3s (or fail on some routers).
-// Kick off a one-shot background lookup of the configured WS host so the very
-// first wake-word WS connect hits the cache. Idempotent across reconnects.
-static std::atomic<bool> s_dns_warmed{false};
-
-static void DnsWarmupTask(void* arg) {
-    const char* host = static_cast<const char*>(arg);
-    struct addrinfo hints {};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo* res = nullptr;
-    int err = getaddrinfo(host, nullptr, &hints, &res);
-    if (err == 0 && res != nullptr) {
-        ESP_LOGI(TAG, "DNS warm-up ok for %s -> %s", host,
-                 inet_ntoa(((sockaddr_in*)res->ai_addr)->sin_addr));
-        freeaddrinfo(res);
-        s_dns_warmed.store(true);
-    } else {
-        ESP_LOGW(TAG, "DNS warm-up failed for %s (err=%d), will retry on demand", host, err);
-    }
-    vTaskDelete(nullptr);
-}
-
-static void StartDnsWarmupOnce() {
-    if (s_dns_warmed.load()) {
-        return;
-    }
-    Settings settings("websocket", false);
-    std::string url = settings.GetString("url");
-    if (url.empty()) {
-        return;
-    }
-    // Pull the host out of the URL. ws://host:port/path or wss://host/path
-    std::string host = url;
-    auto scheme_pos = host.find("://");
-    if (scheme_pos != std::string::npos) {
-        host = host.substr(scheme_pos + 3);
-    }
-    auto slash_pos = host.find('/');
-    if (slash_pos != std::string::npos) {
-        host = host.substr(0, slash_pos);
-    }
-    auto colon_pos = host.find(':');
-    if (colon_pos != std::string::npos) {
-        host = host.substr(0, colon_pos);
-    }
-    if (host.empty()) {
-        return;
-    }
-    // Duplicate so the task owns its own copy (url is freed when the lambda goes out of scope).
-    char* host_copy = strdup(host.c_str());
-    if (host_copy == nullptr) {
-        return;
-    }
-    BaseType_t ok = xTaskCreate(DnsWarmupTask, "dns_warmup", 3072, host_copy, 1, nullptr);
-    if (ok != pdPASS) {
-        ESP_LOGW(TAG, "Failed to start DNS warm-up task");
-        free(host_copy);
-    } else {
-        ESP_LOGI(TAG, "DNS warm-up task started for %s", host.c_str());
-    }
-}
 
 WifiBoard::WifiBoard() {
     // Create connection timeout timer
@@ -182,8 +114,6 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
 #endif
             in_config_mode_ = false;
             ESP_LOGI(TAG, "Connected to WiFi: %s", data.c_str());
-            // Prime DNS for the WS server so the first wake-word doesn't lose to a cold lookup.
-            StartDnsWarmupOnce();
             break;
         case NetworkEvent::Scanning:
             ESP_LOGI(TAG, "WiFi scanning");
