@@ -4,6 +4,7 @@
 #include "esp_lcd_st7701.h"
 #include "button.h"
 #include "led/single_led.h"
+#include "led/circular_strip.h"
 #include "config.h"
 #include "esp_video.h"
 
@@ -295,7 +296,24 @@ private:
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
+            if (app.GetDeviceState() == kDeviceStateStarting) {
+                EnterWifiConfigMode();
+                return;
+            }
             app.ToggleChatState();
+        });
+
+        boot_button_.OnLongPress([this]() {
+            #if CONFIG_USE_DEVICE_AEC
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() == kDeviceStateIdle) {
+                app.SetAecMode(app.GetAecMode() == kAecOff ? kAecOnDeviceSide : kAecOff);
+
+                bool aec_device = app.GetAecMode() == kAecOnDeviceSide ? true : false;
+                Settings settings("aecMode", true);
+                settings.SetBool("aec_device", aec_device);
+            }
+            #endif
         });
     }
 
@@ -407,8 +425,13 @@ public:
         return &audio_codec;
     }
 
-    virtual Led* GetLed() override {
+    /**virtual Led* GetLed() override {
         static SingleLed led(BUILTIN_LED_GPIO);
+        return &led;
+    }**/
+
+    virtual Led* GetLed() override {
+        static CircularStrip led(BUILTIN_LED_GPIO, 7);
         return &led;
     }
 
