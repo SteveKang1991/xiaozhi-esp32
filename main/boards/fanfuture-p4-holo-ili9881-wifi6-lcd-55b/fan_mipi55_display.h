@@ -20,7 +20,7 @@
 
 #include "board.h"
 
-#define FAN_MIPI55_DISPLAY_TAG "FanMIPI55Display"
+#define TAG "FanMIPI55Display"
 
 extern "C" {
 #include "mjpeg_player.h"
@@ -39,14 +39,14 @@ public:
         std::string theme_name = settings.GetString("theme", "dark");
         current_theme_ = LvglThemeManager::GetInstance().GetTheme(theme_name);
 
-        ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "Initialize LVGL library");
+        ESP_LOGI(TAG, "Initialize LVGL library");
         lv_init();
 
-        ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "Initialize LVGL port");
+        ESP_LOGI(TAG, "Initialize LVGL port");
         lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
         lvgl_port_init(&port_cfg);
 
-        ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "Adding LCD display");
+        ESP_LOGI(TAG, "Adding LCD display");
         const lvgl_port_display_cfg_t disp_cfg = {
             .io_handle = panel_io,
             .panel_handle = panel,
@@ -79,12 +79,12 @@ public:
         };
         display_ = lvgl_port_add_disp_dsi(&disp_cfg, &dpi_cfg);
         if (display_ == nullptr) {
-            ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "Failed to add display");
+            ESP_LOGE(TAG, "Failed to add display");
             return;
         }
 
         // 物理屏为 480x854 竖屏，无需旋转
-        ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "LVGL native resolution: %dx%d",
+        ESP_LOGI(TAG, "LVGL native resolution: %dx%d",
                  (int)lv_display_get_horizontal_resolution(display_),
                  (int)lv_display_get_vertical_resolution(display_));
 
@@ -174,7 +174,7 @@ public:
                 lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
             } else {
-                ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "Failed to load GIF for emotion: %s", emotion);
+                ESP_LOGE(TAG, "Failed to load GIF for emotion: %s", emotion);
                 gif_controller_.reset();
             }
         } else {
@@ -186,7 +186,7 @@ public:
 
     void SetSystemReady() override {
         s_system_ready_ = true;
-        ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "MJPEG ready: system is ready, SD card operations permitted");
+        ESP_LOGI(TAG, "MJPEG ready: system is ready, SD card operations permitted");
     }
 
 private:
@@ -218,11 +218,11 @@ private:
 
     bool StartMjpegEmotion(const char* emotion) {
         if (!s_system_ready_) {
-            ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "MJPEG跳过：系统未就绪");
+            ESP_LOGW(TAG, "MJPEG跳过：系统未就绪");
             return false;
         }
         if (!sd_scanner_is_mounted()) {
-            ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "MJPEG跳过：SD卡未挂载");
+            ESP_LOGW(TAG, "MJPEG跳过：SD卡未挂载");
             return false;
         }
 
@@ -272,12 +272,12 @@ private:
 
         const esp_err_t ret = mjpeg_player_start(&cfg);
         if (ret != ESP_OK) {
-            ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "MJPEG启动失败(%s): %s", current_mjpeg_path_.c_str(), esp_err_to_name(ret));
+            ESP_LOGW(TAG, "MJPEG启动失败(%s): %s", current_mjpeg_path_.c_str(), esp_err_to_name(ret));
             current_mjpeg_path_.clear();
             return false;
         }
 
-        ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "🎬 MJPEG表情播放: %s", current_mjpeg_path_.c_str());
+        ESP_LOGI(TAG, "🎬 MJPEG表情播放: %s", current_mjpeg_path_.c_str());
         return true;
     }
 
@@ -290,7 +290,7 @@ private:
 
     void SetupUI() {
         if (setup_ui_called_) {
-            ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "SetupUI() called multiple times, skipping duplicate call");
+            ESP_LOGW(TAG, "SetupUI() called multiple times, skipping duplicate call");
             return;
         }
         Display::SetupUI();
