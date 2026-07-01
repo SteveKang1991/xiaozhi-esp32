@@ -388,9 +388,8 @@ public:
         boot_button_(BOOT_BUTTON_GPIO) {
         InitializeCodecI2c();
         InitializeTouchI2c();
-        // 初始化LCD在电源管理之前，确保屏幕先获得稳定电源
-        InitializeIli9881cDisplay();
         InitializeAXP2101();
+        InitializeIli9881cDisplay();
         InitializeSdForMjpeg();
         //InitializeCamera();
         InitializeButtons();

@@ -192,8 +192,8 @@ public:
 private:
     inline static bool s_system_ready_ = false;
 
-    static constexpr uint16_t kMjpegVideoWidth = 480;
-    static constexpr uint16_t kMjpegVideoHeight = 800;
+    static constexpr uint16_t kMjpegVideoWidth = 720;
+    static constexpr uint16_t kMjpegVideoHeight = 1200;
     static constexpr uint8_t kMjpegTargetFps = 24;
     std::string current_mjpeg_path_;
 
@@ -203,7 +203,7 @@ private:
     }
 
     static std::string BuildMjpegPath(const char* name) {
-        return std::string("/sdcard/Emotion/") + name + "-480x800.mjpeg";
+        return std::string("/sdcard/Emotion/") + name + "-720x1200.mjpeg";
     }
 
     static const char* MapEmotionToClip(const char* emotion) {

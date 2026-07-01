@@ -790,7 +790,7 @@ elseif(CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ST7701_WiFI6_LCD_5B)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
 elseif(CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ILI9881_WiFI6_LCD_55B)
     set(BOARD_TYPE "fanfuture-p4-holo-ili9881-wifi6-lcd-55b")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
+    set(BUILTIN_TEXT_FONT font_puhui_basic_30_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
 endif()
 
