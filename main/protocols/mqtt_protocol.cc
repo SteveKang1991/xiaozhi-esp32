@@ -7,6 +7,7 @@
 #include <cstring>
 #include <arpa/inet.h>
 #include "assets/lang_config.h"
+#include "system_info.h"
 
 #define TAG "MQTT"
 
@@ -69,7 +70,8 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     auto password = settings.GetString("password");
     int keepalive_interval = settings.GetInt("keepalive", 240);
     publish_topic_ = settings.GetString("publish_topic");
-
+    subscribe_topic_= settings.GetString("subscribe_topic");
+    //endpoint = "192.168.0.105";
     if (endpoint.empty()) {
         ESP_LOGW(TAG, "MQTT endpoint is not specified");
         if (report_error) {
@@ -99,6 +101,7 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
 
     mqtt_->OnMessage([this](const std::string& topic, const std::string& payload) {
         cJSON* root = cJSON_Parse(payload.c_str());
+        //ESP_LOGE(TAG, "Failed to parse json message %s", payload.c_str());
         if (root == nullptr) {
             ESP_LOGE(TAG, "Failed to parse json message %s", payload.c_str());
             return;
@@ -141,26 +144,46 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     } else {
         broker_address = endpoint;
     }
-    if (!mqtt_->Connect(broker_address, broker_port, client_id, username, password)) {
+    if (!mqtt_->Connect(broker_address, 1883, client_id, username, password)) {
         ESP_LOGE(TAG, "Failed to connect to endpoint, code=%d", mqtt_->GetLastError());
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         return false;
     }
-
+    mqtt_->Subscribe(subscribe_topic_.c_str(), 0);
+    SendText(R"({"session_id":"3144dff0","type":"goodbye"})");
+    //发布一个暂停的
     ESP_LOGI(TAG, "Connected to endpoint");
     return true;
 }
 
 bool MqttProtocol::SendText(const std::string& text) {
+
     if (publish_topic_.empty()) {
         return false;
     }
-    if (!mqtt_->Publish(publish_topic_, text)) {
-        ESP_LOGE(TAG, "Failed to publish message: %s", text.c_str());
-        SetError(Lang::Strings::SERVER_ERROR);
+
+    std::string device_id = SystemInfo::GetMacAddress();
+    std::string payload;
+    if (text.back() == '}') {
+        payload = text.substr(0, text.size() - 1) + 
+                 ",\"device_id\":\"" + device_id + "\"}";
+    } else{
+        payload = text;
+    }
+
+
+    if (!mqtt_->Publish(publish_topic_, payload)) {
+        ESP_LOGE(TAG, "Failed to publish message");
+        if (on_network_error_ != nullptr) {
+            on_network_error_(Lang::Strings::SERVER_ERROR);
+        }
         return false;
     }
+
+        ESP_LOGI(TAG, "申请消息通道 topic %s  payload %s",publish_topic_.c_str(),payload.c_str());
+
     return true;
+  
 }
 
 bool MqttProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
@@ -169,25 +192,15 @@ bool MqttProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
         return false;
     }
 
-    std::string nonce(aes_nonce_);
-    *(uint16_t*)&nonce[2] = htons(packet->payload.size());
-    *(uint32_t*)&nonce[8] = htonl(packet->timestamp);
-    *(uint32_t*)&nonce[12] = htonl(++local_sequence_);
+    // 将 vector<unsigned char> 转换为 string
+    std::string macAddress =  SystemInfo::GetMacAddress();
+     
+    std::string macPrefix = "MAC:" + macAddress + "|";
+    std::string raw_data = macPrefix + std::string(packet->payload.begin(), packet->payload.end());
 
-    std::string encrypted;
-    encrypted.resize(aes_nonce_.size() + packet->payload.size());
-    memcpy(encrypted.data(), nonce.data(), nonce.size());
-
-    size_t nc_off = 0;
-    uint8_t stream_block[16] = {0};
-    if (mbedtls_aes_crypt_ctr(&aes_ctx_, packet->payload.size(), &nc_off, (uint8_t*)nonce.c_str(), stream_block,
-        (uint8_t*)packet->payload.data(), (uint8_t*)&encrypted[nonce.size()]) != 0) {
-        ESP_LOGE(TAG, "Failed to encrypt audio data");
-        return false;
-    }
-
-    return udp_->Send(encrypted) > 0;
+    return udp_->Send(raw_data)>0;
 }
+
 
 void MqttProtocol::CloseAudioChannel(bool send_goodbye) {
     {
@@ -240,51 +253,41 @@ bool MqttProtocol::OpenAudioChannel() {
     std::lock_guard<std::mutex> lock(channel_mutex_);
     auto network = Board::GetInstance().GetNetwork();
     udp_ = network->CreateUdp(2);
+    
     udp_->OnMessage([this](const std::string& data) {
-        /*
-         * UDP Encrypted OPUS Packet Format:
-         * |type 1u|flags 1u|payload_len 2u|ssrc 4u|timestamp 4u|sequence 4u|
-         * |payload payload_len|
-         */
-        if (data.size() < sizeof(aes_nonce_)) {
-            ESP_LOGE(TAG, "Invalid audio packet size: %u", data.size());
+        // 数据包大小校验
+        if (data.size() < 16) {
             return;
         }
-        if (data[0] != 0x01) {
-            ESP_LOGE(TAG, "Invalid audio packet type: %x", data[0]);
-            return;
-        }
+        // 解析包头
+        uint32_t sample_rate = ntohl(*(uint32_t*)&data[0]);
+        uint32_t frame_duration = ntohl(*(uint32_t*)&data[4]);
         uint32_t timestamp = ntohl(*(uint32_t*)&data[8]);
         uint32_t sequence = ntohl(*(uint32_t*)&data[12]);
-        if (sequence < remote_sequence_) {
-            ESP_LOGW(TAG, "Received audio packet with old sequence: %lu, expected: %lu", sequence, remote_sequence_);
-            return;
-        }
-        if (sequence != remote_sequence_ + 1) {
-            ESP_LOGW(TAG, "Received audio packet with wrong sequence: %lu, expected: %lu", sequence, remote_sequence_ + 1);
-        }
-
-        size_t decrypted_size = data.size() - aes_nonce_.size();
-        size_t nc_off = 0;
-        uint8_t stream_block[16] = {0};
-        auto nonce = (uint8_t*)data.data();
-        auto encrypted = (uint8_t*)data.data() + aes_nonce_.size();
+        
+        // 创建数据包
         auto packet = std::make_unique<AudioStreamPacket>();
-        packet->sample_rate = server_sample_rate_;
-        packet->frame_duration = server_frame_duration_;
+        packet->sample_rate = sample_rate;
+        packet->frame_duration = frame_duration;
         packet->timestamp = timestamp;
-        packet->payload.resize(decrypted_size);
-        int ret = mbedtls_aes_crypt_ctr(&aes_ctx_, decrypted_size, &nc_off, nonce, stream_block, encrypted, (uint8_t*)packet->payload.data());
-        if (ret != 0) {
-            ESP_LOGE(TAG, "Failed to decrypt audio data, ret: %d", ret);
+        // 提取payload（跳过16字节包头）
+        packet->payload.assign(data.begin()+16, data.end());
+        
+        // 空payload检查
+        if (packet->payload.empty()) {
             return;
         }
+        
+        // 调用回调
         if (on_incoming_audio_ != nullptr) {
             on_incoming_audio_(std::move(packet));
         }
+        
+        // 更新状态
         remote_sequence_ = sequence;
         last_incoming_time_ = std::chrono::steady_clock::now();
     });
+
 
     udp_->Connect(udp_server_, udp_port_);
 
@@ -300,6 +303,7 @@ std::string MqttProtocol::GetHelloMessage() {
     cJSON_AddStringToObject(root, "type", "hello");
     cJSON_AddNumberToObject(root, "version", 3);
     cJSON_AddStringToObject(root, "transport", "udp");
+    cJSON_AddStringToObject(root, "device_id",SystemInfo::GetMacAddress().c_str());
     cJSON* features = cJSON_CreateObject();
 #if CONFIG_USE_SERVER_AEC
     cJSON_AddBoolToObject(features, "aec", true);
@@ -355,8 +359,8 @@ void MqttProtocol::ParseServerHello(const cJSON* root) {
     auto key = cJSON_GetObjectItem(udp, "key")->valuestring;
     auto nonce = cJSON_GetObjectItem(udp, "nonce")->valuestring;
 
-    // auto encryption = cJSON_GetObjectItem(udp, "encryption")->valuestring;
-    // ESP_LOGI(TAG, "UDP server: %s, port: %d, encryption: %s", udp_server_.c_str(), udp_port_, encryption);
+    auto encryption = cJSON_GetObjectItem(udp, "encryption")->valuestring;
+    ESP_LOGI(TAG, "UDP server: %s, port: %d, encryption: %s", udp_server_.c_str(), udp_port_, encryption);
     aes_nonce_ = DecodeHexString(nonce);
     mbedtls_aes_init(&aes_ctx_);
     mbedtls_aes_setkey_enc(&aes_ctx_, (const unsigned char*)DecodeHexString(key).c_str(), 128);
