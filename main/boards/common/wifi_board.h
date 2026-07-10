@@ -10,6 +10,7 @@ class WifiBoard : public Board {
 protected:
     esp_timer_handle_t connect_timer_ = nullptr;
     bool in_config_mode_ = false;
+    bool pending_config_request_ = false;
     NetworkEventCallback network_event_callback_ = nullptr;
 
     virtual std::string GetBoardJson() override;
@@ -59,6 +60,13 @@ public:
      * Enter WiFi configuration mode (thread-safe, can be called from any task)
      */
     void EnterWifiConfigMode();
+
+    /**
+     * Record a pending WiFi config request. Used when the button is pressed
+     * during early boot before WifiManager is ready. The config mode will
+     * be entered when TryWifiConnect() is called during normal initialization.
+     */
+    void SetPendingWifiConfig();
     
     /**
      * Check if in WiFi config mode

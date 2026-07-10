@@ -86,20 +86,33 @@ void WifiBoard::StartNetwork() {
     TryWifiConnect();
 }
 
+void WifiBoard::SetPendingWifiConfig() {
+    pending_config_request_ = true;
+    ESP_LOGI(TAG, "Wifi config request recorded, will be processed during WiFi initialization");
+}
+
 void WifiBoard::TryWifiConnect() {
+    // If already in config mode (e.g., EnterWifiConfigMode triggered StartWifiConfigMode
+    // which may post events that call back here), do nothing.
+    if (in_config_mode_) {
+        return;
+    }
+
     auto& ssid_manager = SsidManager::GetInstance();
     bool have_ssid = !ssid_manager.GetSsidList().empty();
 
-    if (have_ssid) {
+    if (pending_config_request_ || !have_ssid) {
+        // User pressed config button during early boot, or no SSID stored.
+        // Enter config mode directly instead of trying to connect.
+        pending_config_request_ = false;
+        ESP_LOGI(TAG, "Entering WiFi config mode (requested)");
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        StartWifiConfigMode();
+    } else {
         // Start connection attempt with timeout
         ESP_LOGI(TAG, "Starting WiFi connection attempt");
         esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
         WifiManager::GetInstance().StartStation();
-    } else {
-        // No SSID configured, enter config mode
-        // Wait for the board version to be shown
-        vTaskDelay(pdMS_TO_TICKS(1500));
-        StartWifiConfigMode();
     }
 }
 
@@ -237,7 +250,11 @@ void WifiBoard::EnterWifiConfigMode() {
         return;
     }
 
-    // Stop any ongoing connection attempt
+    // During startup (including wifi scanning phase), immediately stop wifi
+    // and enter config mode. Set the pending flag to prevent TryWifiConnect()
+    // from also trying to enter config mode concurrently.
+    pending_config_request_ = true;
+    ESP_LOGI(TAG, "EnterWifiConfigMode: device is starting/scanning, stopping wifi and entering config mode");
     esp_timer_stop(connect_timer_);
     WifiManager::GetInstance().StopStation();
 
