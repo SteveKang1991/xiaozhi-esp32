@@ -46,7 +46,7 @@ private:
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
     Esp32Camera* camera_;
-    bool aec_device = true;
+    bool aec_device = false;
 
     void InitializePowerManager() {
         power_manager_ = new PowerManager(GPIO_NUM_11);
@@ -184,10 +184,6 @@ private:
                 aec_device = app.GetAecMode() == kAecOnDeviceSide ? true : false;
                 Settings settings("aecMode", true);
                 settings.SetBool("aec_device", aec_device);
-
-                auto codec = GetAudioCodec();
-                auto volume = codec->output_volume();
-                codec->SetOutputVolume(volume);
             }
             #endif
         });
@@ -259,12 +255,12 @@ public:
             GetBacklight()->RestoreBrightness();
         }  
 
-        /**#if CONFIG_USE_DEVICE_AEC
+        #if CONFIG_USE_DEVICE_AEC
         Settings settings("aecMode", false);
         aec_device = settings.GetBool("aec_device", aec_device);
         auto& app = Application::GetInstance();
         app.SetAecMode(aec_device ? kAecOnDeviceSide : kAecOff);
-        #endif**/
+        #endif
     }
 
     /**virtual Led* GetLed() override {
