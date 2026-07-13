@@ -34,6 +34,7 @@ private:
     LcdDisplay *display_;
     Axp2101* pmic_ = nullptr;
     EspVideo* camera_ = nullptr;
+    bool aec_device = false;
 
     esp_err_t i2c_device_probe(uint8_t addr) {
         return i2c_master_probe(i2c_bus_touch_, addr, 100);
@@ -399,6 +400,13 @@ public:
         //InitializeCamera();
         InitializeButtons();
         GetBacklight()->RestoreBrightness();
+
+        #if CONFIG_USE_DEVICE_AEC
+        Settings settings("aecMode", false);
+        aec_device = settings.GetBool("aec_device", aec_device);
+        auto& app = Application::GetInstance();
+        app.SetAecMode(aec_device ? kAecOnDeviceSide : kAecOff);
+        #endif
     }
 
     ~FanFutureP4HoloST7701WiFi6Lcd5BBoard() {
@@ -431,7 +439,7 @@ public:
     }**/
 
     virtual Led* GetLed() override {
-        static CircularStrip led(BUILTIN_LED_GPIO, 7);
+        static CircularStrip led(BUILTIN_LED_GPIO, 16);
         return &led;
     }
 
@@ -446,6 +454,17 @@ public:
     virtual Backlight* GetBacklight() override {
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, false);
         return &backlight;
+    }
+
+    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
+        static bool last_discharging = false;
+        charging = pmic_->IsCharging();
+        discharging = !pmic_->IsCharging();
+        if (discharging != last_discharging) {
+            last_discharging = discharging;
+        }
+        level = pmic_->GetBatteryPercent();
+        return true;
     }
 
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
