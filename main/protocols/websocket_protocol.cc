@@ -75,6 +75,72 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
     return websocket_ != nullptr && websocket_->IsConnected() && !error_occurred_ && !IsTimeout();
 }
 
+std::vector<EmotionInfo> WebsocketProtocol::FetchDeviceEmotions() {
+    std::vector<EmotionInfo> emotions;
+
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    auto http = network->CreateHttp(0);
+
+    std::string mac = SystemInfo::GetMacAddress();
+    std::string url = "https://ai.fanfuture.cn/api/device/emotions?hardware_id=" + mac;
+
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(TAG, "Failed to open HTTP for emotion list");
+        return emotions;
+    }
+
+    if (http->GetStatusCode() != 200) {
+        ESP_LOGE(TAG, "HTTP status %d for emotion list", http->GetStatusCode());
+        http->Close();
+        return emotions;
+    }
+
+    std::string response;
+    char buffer[1024];
+    int read;
+    while ((read = http->Read(buffer, sizeof(buffer))) > 0) {
+        response.append(buffer, read);
+    }
+    http->Close();
+
+    cJSON* root = cJSON_Parse(response.c_str());
+    if (!root) {
+        ESP_LOGE(TAG, "Failed to parse emotion list JSON");
+        return emotions;
+    }
+
+    cJSON* data = cJSON_GetObjectItem(root, "data");
+    cJSON* arr = data ? cJSON_GetObjectItem(data, "emotions") : nullptr;
+    if (!cJSON_IsArray(arr)) {
+        cJSON_Delete(root);
+        return emotions;
+    }
+
+    int count = cJSON_GetArraySize(arr);
+    for (int i = 0; i < count; i++) {
+        cJSON* item = cJSON_GetArrayItem(arr, i);
+        EmotionInfo info;
+        cJSON* t = cJSON_GetObjectItem(item, "type");
+        cJSON* u = cJSON_GetObjectItem(item, "url");
+        cJSON* h = cJSON_GetObjectItem(item, "hash");
+        cJSON* s = cJSON_GetObjectItem(item, "size");
+        cJSON* w = cJSON_GetObjectItem(item, "width");
+        cJSON* ht = cJSON_GetObjectItem(item, "height");
+        
+        if (cJSON_IsString(t)) info.type = t->valuestring;
+        if (cJSON_IsString(u)) info.url = u->valuestring;
+        if (cJSON_IsString(h)) info.hash = h->valuestring;
+        if (cJSON_IsNumber(s)) info.size = (size_t)s->valuedouble;
+        if (cJSON_IsNumber(w)) info.width = (int)w->valueint;
+        if (cJSON_IsNumber(ht)) info.height = (int)ht->valueint;
+        emotions.push_back(std::move(info));
+    }
+
+    cJSON_Delete(root);
+    return emotions;
+}
+
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
     websocket_.reset();

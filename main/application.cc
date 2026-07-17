@@ -9,6 +9,7 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "utils/md5.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -16,6 +17,10 @@
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <cstdio>
+#include <unistd.h>
 
 #define TAG "Application"
 
@@ -331,6 +336,9 @@ void Application::ActivationTask() {
     // Check for new firmware version
     CheckNewVersion();
 
+    // Sync emotion files (idle/listen/speak MJPEG) from server to SD card
+    CheckEmotionFiles();
+
     // Initialize the protocol
     InitializeProtocol();
 
@@ -469,6 +477,269 @@ void Application::CheckNewVersion() {
             }
         }
     }
+}
+
+// =====================================================
+// 用户表情文件同步（开机阶段下载到 SD 卡）
+// =====================================================
+
+static const char* kEmotionTag = "EmotionSync";
+static constexpr const char* kEmotionDir = "/sdcard/Emotion";
+
+/**
+ * 根据表情类型和分辨率生成本地保存路径
+ * 格式: /sdcard/Emotion/{type}-{width}x{height}.mjpeg
+ */
+static std::string MakeEmotionLocalPath(const std::string& type, int width, int height) {
+    char suffix[64];
+    snprintf(suffix, sizeof(suffix), "-%dx%d.mjpeg", width, height);
+    return std::string(kEmotionDir) + "/" + type + suffix;
+}
+
+static bool EnsureEmotionDir() {
+    struct stat st = {};
+    if (stat(kEmotionDir, &st) == 0 && S_ISDIR(st.st_mode)) {
+        return true;
+    }
+    if (mkdir(kEmotionDir, 0755) != 0 && errno != EEXIST) {
+        return false;
+    }
+    return stat(kEmotionDir, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+void Application::CheckEmotionFiles() {
+    if (ota_ == nullptr) {
+        return;
+    }
+
+    if (!EnsureEmotionDir()) {
+        ESP_LOGW(kEmotionTag, "Emotion directory unavailable, skip sync");
+        return;
+    }
+
+    // 获取服务器表情列表
+    std::vector<EmotionInfo> emotions;
+    if (ota_->HasMqttConfig()) {
+        MqttProtocol probe;
+        emotions = probe.FetchDeviceEmotions();
+    } else if (ota_->HasWebsocketConfig()) {
+        WebsocketProtocol probe;
+        emotions = probe.FetchDeviceEmotions();
+    } else {
+        MqttProtocol probe;
+        emotions = probe.FetchDeviceEmotions();
+    }
+
+    ESP_LOGI(kEmotionTag, "Fetched %d emotion(s) from server", (int)emotions.size());
+
+    // 服务器返回空（用户已删除所有表情），清理 SD 卡上所有 .mjpeg 文件
+    if (emotions.empty()) {
+        CleanOrphanEmotionFiles({});
+        ESP_LOGI(kEmotionTag, "No emotions on server, cleared local files");
+        return;
+    }
+
+    // 对比服务器列表与SD卡，同步表情
+    std::vector<std::string> valid_paths;
+    int download_count = 0;
+    int total_count = 0;
+
+    for (auto& info : emotions) {
+        if (info.type.empty() || info.url.empty()) {
+            continue;
+        }
+        int width = info.width > 0 ? info.width : 240;
+        int height = info.height > 0 ? info.height : 290;
+        info.local_path = MakeEmotionLocalPath(info.type, width, height);
+
+        // 检查本地是否已存在且MD5匹配
+        struct stat st = {};
+        if (stat(info.local_path.c_str(), &st) == 0 && st.st_size > 0 && st.st_size == (off_t)info.size) {
+            std::string local_md5 = MD5::Calculate(info.local_path);
+            if (!local_md5.empty() && local_md5 == info.hash) {
+                ESP_LOGI(kEmotionTag, "Emotion %s is up-to-date, skip", info.type.c_str());
+                valid_paths.push_back(info.local_path);  // 已有文件也要标记为有效，防止清理时被删
+                continue;  // 已是最新，跳过
+            }
+        }
+
+        // 需要下载
+        total_count++;
+    }
+
+    // 如果没有需要下载的，直接返回
+    if (total_count == 0) {
+        ESP_LOGI(kEmotionTag, "All emotions are up-to-date, no download needed");
+        return;
+    }
+
+    // 确有需要下载的，显示下载提示
+    auto display = Board::GetInstance().GetDisplay();
+    display->SetStatus(Lang::Strings::DOWNLOADING_EMOTIONS);
+    display->SetEmotion("download");
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // 重新遍历，实际下载
+    download_count = 0;
+    for (auto& info : emotions) {
+        if (info.type.empty() || info.url.empty()) {
+            continue;
+        }
+        int width = info.width > 0 ? info.width : 240;
+        int height = info.height > 0 ? info.height : 290;
+        info.local_path = MakeEmotionLocalPath(info.type, width, height);
+
+        // 检查本地是否已存在且MD5匹配
+        struct stat st = {};
+        if (stat(info.local_path.c_str(), &st) == 0 && st.st_size > 0 && st.st_size == (off_t)info.size) {
+            std::string local_md5 = MD5::Calculate(info.local_path);
+            if (!local_md5.empty() && local_md5 == info.hash) {
+                valid_paths.push_back(info.local_path);  // 已有文件也要标记为有效
+                continue;  // 已是最新，跳过
+            }
+        }
+
+        // 需要下载
+        download_count++;
+        char progress_msg[64];
+        snprintf(progress_msg, sizeof(progress_msg), Lang::Strings::DOWNLOADING_EMOTION_PROGRESS, download_count, total_count);
+        display->SetChatMessage("system", progress_msg);
+
+        ProcessEmotionFile(info);
+        valid_paths.push_back(info.local_path);
+    }
+
+    // 清理孤儿文件
+    CleanOrphanEmotionFiles(valid_paths);
+
+    // 下载完成
+    display->SetStatus(Lang::Strings::EMOTION_SYNC_COMPLETE);
+    display->SetChatMessage("system", Lang::Strings::EMOTION_SYNC_COMPLETE);
+    vTaskDelay(pdMS_TO_TICKS(500));
+}
+
+void Application::ProcessEmotionFile(const EmotionInfo& info) {
+    const std::string& local = info.local_path;
+
+    // 检查本地是否已存在
+    struct stat st = {};
+    if (stat(local.c_str(), &st) == 0 && st.st_size > 0 && st.st_size == (off_t)info.size) {
+        std::string local_md5 = MD5::Calculate(local);
+        if (!local_md5.empty() && local_md5 == info.hash) {
+            ESP_LOGI(kEmotionTag, "Emotion %s is up-to-date", local.c_str());
+            return;
+        }
+    }
+
+    if (stat(local.c_str(), &st) == 0) {
+        unlink(local.c_str());
+    }
+
+    if (!DownloadEmotionFile(info.url, local, info.size)) {
+        ESP_LOGE(kEmotionTag, "Failed to download emotion: %s", info.url.c_str());
+        return;
+    }
+
+    std::string final_md5 = MD5::Calculate(local);
+    if (!final_md5.empty() && !info.hash.empty() && final_md5 != info.hash) {
+        ESP_LOGE(kEmotionTag, "MD5 mismatch for %s", local.c_str());
+        unlink(local.c_str());
+        return;
+    }
+
+    ESP_LOGI(kEmotionTag, "Emotion ready: %s", local.c_str());
+}
+
+bool Application::DownloadEmotionFile(const std::string& url, const std::string& local_path, size_t expected_size) {
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    auto http = network->CreateHttp(0);
+
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(kEmotionTag, "Failed to open HTTP: %s", url.c_str());
+        return false;
+    }
+
+    int status = http->GetStatusCode();
+    if (status != 200) {
+        ESP_LOGE(kEmotionTag, "HTTP status %d for %s", status, url.c_str());
+        http->Close();
+        return false;
+    }
+
+    // 先下载到 .tmp 再 rename，避免断电/中断导致损坏
+    std::string tmp_path = local_path + ".tmp";
+    FILE* fp = fopen(tmp_path.c_str(), "wb");
+    if (!fp) {
+        ESP_LOGE(kEmotionTag, "Failed to open file: %s", tmp_path.c_str());
+        http->Close();
+        return false;
+    }
+
+    char buffer[4096];
+    int read;
+    size_t total = 0;
+    while ((read = http->Read(buffer, sizeof(buffer))) > 0) {
+        if (fwrite(buffer, 1, read, fp) != (size_t)read) {
+            ESP_LOGE(kEmotionTag, "Write failed");
+            fclose(fp);
+            unlink(tmp_path.c_str());
+            http->Close();
+            return false;
+        }
+        total += read;
+    }
+    fclose(fp);
+    http->Close();
+
+    if (expected_size > 0 && total != expected_size) {
+        ESP_LOGE(kEmotionTag, "Size mismatch: got %u, expect %u", (unsigned)total, (unsigned)expected_size);
+        unlink(tmp_path.c_str());
+        return false;
+    }
+
+    if (rename(tmp_path.c_str(), local_path.c_str()) != 0) {
+        ESP_LOGE(kEmotionTag, "Rename failed: %s -> %s", tmp_path.c_str(), local_path.c_str());
+        unlink(tmp_path.c_str());
+        return false;
+    }
+
+    ESP_LOGI(kEmotionTag, "Downloaded %s: %u bytes", local_path.c_str(), (unsigned)total);
+    return true;
+}
+
+void Application::CleanOrphanEmotionFiles(const std::vector<std::string>& valid_paths) {
+    DIR* dir = opendir(kEmotionDir);
+    if (!dir) {
+        ESP_LOGW(kEmotionTag, "CleanOrphan: cannot open %s", kEmotionDir);
+        return;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name.empty() || name[0] == '.' || name == "System Volume Information") {
+            continue;
+        }
+        // 清理所有 .mjpeg 文件（任何分辨率）
+        if (name.find(".mjpeg") == std::string::npos) {
+            continue;
+        }
+
+        std::string full_path = std::string(kEmotionDir) + "/" + name;
+        bool is_valid = false;
+        for (const auto& p : valid_paths) {
+            if (p == full_path) {
+                is_valid = true;
+                break;
+            }
+        }
+        if (!is_valid) {
+            ESP_LOGI(kEmotionTag, "CleanOrphan: removing %s", full_path.c_str());
+            unlink(full_path.c_str());
+        }
+    }
+    closedir(dir);
 }
 
 void Application::InitializeProtocol() {

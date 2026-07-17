@@ -30,6 +30,20 @@ struct BinaryProtocol3 {
     uint8_t payload[];
 } __attribute__((packed));
 
+/**
+ * 设备表情文件信息
+ * 由 Protocol::FetchDeviceEmotions() 返回
+ */
+struct EmotionInfo {
+    std::string type;        // "idle" / "listen" / "speak"
+    std::string url;         // COS 下载地址
+    std::string hash;        // MD5
+    size_t size = 0;        // 文件大小
+    int width = 0;          // MJPEG 视频宽度
+    int height = 0;         // MJPEG 视频高度
+    std::string local_path;  // 设备本地保存路径（构造时填充）
+};
+
 enum AbortReason {
     kAbortReasonNone,
     kAbortReasonWakeWordDetected
@@ -73,6 +87,13 @@ public:
     virtual void SendStopListening();
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+
+    /**
+     * 从服务器拉取当前设备已关联的表情文件列表
+     * 通过 HTTP GET 调用 /api/device/emotions?hardware_id={mac}
+     * @return 表情列表（可能为空）
+     */
+    virtual std::vector<EmotionInfo> FetchDeviceEmotions() = 0;
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;

@@ -202,8 +202,30 @@ private:
         return stat(path.c_str(), &st) == 0;
     }
 
-    static std::string BuildMjpegPath(const char* name) {
-        return std::string("/sdcard/Emotion/") + name + "-480x800.mjpeg";
+    /**
+     * 查找指定表情的 MJPEG 文件
+     * 优先查找分辨率匹配的 {type}-{width}x{height}.mjpeg 文件
+     * 回退到默认的 idle-{width}x{height}.mjpeg
+     */
+    static std::string FindMjpegPath(const char* emotion) {
+        const char* clip_name = MapEmotionToClip(emotion);
+        char default_path[128];
+        snprintf(default_path, sizeof(default_path),
+                 "/sdcard/Emotion/%s-%ux%u.mjpeg", clip_name,
+                 (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
+        if (FileExists(default_path)) {
+            return default_path;
+        }
+        // 回退到 idle
+        if (strcmp(clip_name, "idle") != 0) {
+            snprintf(default_path, sizeof(default_path),
+                     "/sdcard/Emotion/idle-%ux%u.mjpeg",
+                     (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
+            if (FileExists(default_path)) {
+                return default_path;
+            }
+        }
+        return "";
     }
 
     static const char* MapEmotionToClip(const char* emotion) {
@@ -226,13 +248,9 @@ private:
             return false;
         }
 
-        const char* clip_name = MapEmotionToClip(emotion);
-        std::string clip_path = BuildMjpegPath(clip_name);
-        if (!FileExists(clip_path)) {
-            clip_path = BuildMjpegPath("idle");
-            if (!FileExists(clip_path)) {
-                return false;
-            }
+        std::string clip_path = FindMjpegPath(emotion);
+        if (clip_path.empty()) {
+            return false;
         }
 
         if (mjpeg_player_is_running()) {

@@ -166,6 +166,12 @@ private:
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
     ListeningMode GetDefaultListeningMode() const;
+
+    // 表情文件同步（开机阶段下载到 SD 卡）
+    void CheckEmotionFiles();
+    void ProcessEmotionFile(const EmotionInfo& info);
+    void CleanOrphanEmotionFiles(const std::vector<std::string>& valid_names);
+    bool DownloadEmotionFile(const std::string& url, const std::string& local_path, size_t expected_size);
     
     // State change handler called by state machine
     void OnStateChanged(DeviceState old_state, DeviceState new_state);
