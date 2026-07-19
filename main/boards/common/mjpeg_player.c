@@ -226,10 +226,12 @@ static void mjpeg_roi_letterbox_draw(esp_lcd_panel_handle_t panel, int panel_w, 
 
 /** 环形读缓冲（节内存；过小易拖慢流式读） */
 #define READ_BUF_SIZE    (256 * 1024)
-/* 单帧最大 32KB：当前 SD 上 listen/speak 等 mjpeg 帧大小 8-19KB，32KB 已充裕；
- * 避免 64KB×3=192KB 在 PSRAM 碎片化时（largest=184KB）申请失败 */
-#define FRAME_BUF_SIZE   (32 * 1024)
-#define NUM_DMA_BUFS     3
+/* 单帧缓冲：720×1280 / 656×1232 等高分屏的 mjpeg 帧压缩后约 33-35KB，
+ * 原 32KB 会被「帧过大」判定跳过。提升到 64KB 以容纳所有板子的高分帧。
+ * 为抵消 64KB 增长、避免 PSRAM 碎片化时申请失败（largest≈184KB），
+ * 把 NUM_DMA_BUFS 从 3 降到 2，总占用 128KB，留出余量。 */
+#define FRAME_BUF_SIZE   (64 * 1024)
+#define NUM_DMA_BUFS     2
 #define FILE_IO_BUF_SIZE (32 * 1024)
 /** 0：禁用整文件预载；>0 时小于该字节的 mjpeg 预载入 PSRAM */
 #ifndef MJPEG_PRELOAD_MAX_BYTES
