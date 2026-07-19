@@ -611,7 +611,7 @@ static void mjpeg_read_task(void *arg)
         fseek(ctx.fp, 0, SEEK_END);
         long file_size = ftell(ctx.fp);
         fseek(ctx.fp, 0, SEEK_SET);
-        ESP_LOGI(TAG, "📄 文件大小: %.1f MB", file_size / (1024.0 * 1024.0));
+        //ESP_LOGI(TAG, "📄 文件大小: %.1f MB", file_size / (1024.0 * 1024.0));
 
         read_buf = heap_caps_malloc(READ_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (read_buf) {
@@ -740,7 +740,7 @@ exit:
             free(io_buf);
         }
     }
-    ESP_LOGI(TAG, "📜 读取任务结束 (跳过帧: %lu)", (unsigned long)skip_count);
+    //ESP_LOGI(TAG, "📜 读取任务结束 (跳过帧: %lu)", (unsigned long)skip_count);
     s_read_task = NULL;
     vTaskDelete(NULL);
 }
@@ -751,7 +751,7 @@ exit:
 
 static void mjpeg_decode_task(void *arg)
 {
-    ESP_LOGI(TAG, "🔧 解码任务启动");
+    //ESP_LOGI(TAG, "🔧 解码任务启动");
 
     jpeg_decode_engine_cfg_t engine_cfg = {
         .intr_priority = 0,
@@ -764,7 +764,7 @@ static void mjpeg_decode_task(void *arg)
         s_running = false;
         goto exit;
     }
-    ESP_LOGI(TAG, "✅ 硬件 JPEG 解码引擎已就绪 (超时=%dms)", engine_cfg.timeout_ms);
+    //ESP_LOGI(TAG, "✅ 硬件 JPEG 解码引擎已就绪 (超时=%dms)", engine_cfg.timeout_ms);
 
     jpeg_decode_cfg_t decode_cfg = {
         .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
@@ -901,30 +901,18 @@ static void mjpeg_decode_task(void *arg)
             const int draw_y0 = (int)s_cfg.panel_roi_y;
             const int w = (int)s_cfg.mjpeg_video_width;
             const int h = (int)s_cfg.mjpeg_video_height;
-            /* DSI 与 LVGL 共用 panel：须持锁，且锁内首帧前短暂退让，避免紧接 LVGL flush 的未完成传输 */
-            if (lvgl_port_lock(MJPEG_LVGL_LOCK_TIMEOUT_MS)) {
-                if (MJPEG_POST_LOCK_DRAIN_MS > 0) {
-                    vTaskDelay(pdMS_TO_TICKS(MJPEG_POST_LOCK_DRAIN_MS));
-                }
-                if (MJPEG_ROI_DRAW_LETTERBOX_ONCE && !s_roi_letterbox_drawn) {
-                    mjpeg_roi_letterbox_draw(s_cfg.panel, s_panel_width, s_panel_height, draw_x0, draw_y0, w, h);
-                    s_roi_letterbox_drawn = true;
-                }
-                /* 阻塞重试直到 draw 完成：P4 JPEG 硬件共享 DMA2D 引擎，
-                 * panel 忙时跳帧会导致解码器状态不同步，引发 DMA2D assert。
-                 * draw_x1/draw_y1 严格使用 panel_height 作为底，bottom=0（紧贴屏底）。 */
-                esp_err_t blit = mjpeg_panel_draw_bitmap_retry(s_cfg.panel, draw_x0, draw_y0, draw_x0 + w, s_panel_height, s_cfg.fb[fb_idx]);
-                if (blit != ESP_OK) {
-                    ESP_LOGW(TAG, "⚠️ ROI draw失败: %s", esp_err_to_name(blit));
-                }
-                lvgl_port_unlock();
-            } else {
-                static uint32_t s_lock_fail_log;
-                uint32_t now = (uint32_t)(esp_timer_get_time() / 1000000);
-                if (now != s_lock_fail_log) {
-                    s_lock_fail_log = now;
-                    ESP_LOGW(TAG, "⚠️ lvgl_port_lock 超时(%dms)，跳过本帧 ROI", MJPEG_LVGL_LOCK_TIMEOUT_MS);
-                }
+            /* 用户确认：mjpeg ROI 区域与 LVGL label 字幕区不重叠，DSI panel 的 ROI 区域
+             * 与 LVGL flush 范围天然无竞争，无需持 LVGL 锁。直接 blit 全靠 mjpeg_panel_draw_bitmap_retry
+             * 自带的 panel 忙重试保证（DMA2D 引擎互斥）。 */
+            if (MJPEG_ROI_DRAW_LETTERBOX_ONCE && !s_roi_letterbox_drawn) {
+                mjpeg_roi_letterbox_draw(s_cfg.panel, s_panel_width, s_panel_height, draw_x0, draw_y0, w, h);
+                s_roi_letterbox_drawn = true;
+            }
+            /* y1 = draw_y0 + video_h（视频区紧贴屏底：ry=panel_height-video_h → y1=panel_height）。 */
+            const int draw_y1 = draw_y0 + (int)s_cfg.mjpeg_video_height;
+            esp_err_t blit = mjpeg_panel_draw_bitmap_retry(s_cfg.panel, draw_x0, draw_y0, draw_x0 + w, draw_y1, s_cfg.fb[fb_idx]);
+            if (blit != ESP_OK) {
+                ESP_LOGW(TAG, "⚠️ ROI draw失败: %s", esp_err_to_name(blit));
             }
         } else if (s_cfg.panel) {
             esp_err_t blit = mjpeg_panel_draw_bitmap_retry(s_cfg.panel, 0, 0,
@@ -1040,8 +1028,8 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
                     return ESP_ERR_NO_MEM;
                 }
             }
-            ESP_LOGI(TAG, "✅ ROI 分配独立 fb (size=%u, a=%p b=%p)",
-                     (unsigned)sz_al, s_cfg.fb[0], s_cfg.fb[1]);
+            //ESP_LOGI(TAG, "✅ ROI 分配独立 fb (size=%u, a=%p b=%p)",
+                     //(unsigned)sz_al, s_cfg.fb[0], s_cfg.fb[1]);
             s_output_fb_shared = false;
         } else if (!s_cfg.fb[0] || !s_cfg.fb[1]) {
             esp_err_t gf = mjpeg_get_frame_buffers(s_cfg.panel, &s_cfg.fb[0], &s_cfg.fb[1]);

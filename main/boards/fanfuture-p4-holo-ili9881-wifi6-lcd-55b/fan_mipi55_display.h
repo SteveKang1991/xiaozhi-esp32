@@ -30,6 +30,17 @@ extern "C" {
 // FAN MIPI 5.5寸显示器
 class FanMIPI55Display : public LcdDisplay {
 public:
+    /* 重写 SetChatMessage：纵向字幕要求文本按字符换行（每字符一行），
+     * 而基类 SetChatMessage 直接把 content 写入 chat_message_label_。
+     * LVGL label 在 LONG_WRAP 模式下：英文按词 wrap（一词装不下就换行，导致一行只显示 2-3 个字母），
+     * 中文按字符 wrap（因为中文没有空格 word boundary，所以反而一字一行正好）。
+     * 这里在写入 label 之前把 UTF-8 字符串按字符插入 '\n'，强制每字符一行，
+     * 无论中英文/标点都整齐竖排。 */
+    void SetChatMessage(const char* role, const char* content) override;
+    /* 重写 ClearChatMessages：基类会调 lv_label_set_text(chat_message_label_, "")，
+     * 但 chat_message_label_ 现在是 container obj，重写后清掉 inner label 文本即可。 */
+    void ClearChatMessages() override;
+
     FanMIPI55Display(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
                            int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool swap_xy)
     : LcdDisplay(panel_io, panel, width, height) {
@@ -221,10 +232,18 @@ public:
 private:
     inline static bool s_system_ready_ = false;
 
-    static constexpr uint16_t kMjpegVideoWidth = 720;
-    static constexpr uint16_t kMjpegVideoHeight = 1200;
+    /* MJPEG 视频分辨率：板子 fanfuture-p4-holo-ili9881-wifi6-lcd-55b 专用 656×1232。 */
+    static constexpr uint16_t kMjpegVideoWidth = 656;
+    static constexpr uint16_t kMjpegVideoHeight = 1232;
     static constexpr uint8_t kMjpegTargetFps = 24;
     std::string current_mjpeg_path_;
+
+    /* 纵向字幕子标签：作为 chat_message_label_ (container) 的子节点，
+     * 长 = 字宽 20, 高 = 内容 (LV_SIZE_CONTENT, 由 LONG_WRAP 自动 wrap)。
+     * 完全透明背景，避免黑底重叠视频画面。 */
+    lv_obj_t* chat_message_inner_label_ = nullptr;
+    /* 上次设置的 content：连续相同 content 时不重启滚动动画，避免闪烁/重启开销。 */
+    std::string last_chat_content_;
 
     static bool FileExists(const std::string& path) {
         struct stat st = {};
@@ -410,11 +429,31 @@ private:
         lv_obj_align(top_bar_, LV_ALIGN_TOP_MID, 0, 0);
         //lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
 
-        // Left icon
-        network_label_ = lv_label_create(top_bar_);
-        lv_label_set_text(network_label_, "");
-        lv_obj_set_style_text_font(network_label_, icon_font, 0);
-        lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
+        // Left side: status label container (replaces former "network_label_" position).
+        // Wraps notification_label_ + status_label_ so the original notification overlay logic still works.
+        lv_obj_t* left_status = lv_obj_create(top_bar_);
+        lv_obj_set_size(left_status, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(left_status, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(left_status, 0, 0);
+        lv_obj_set_style_pad_all(left_status, 0, 0);
+        lv_obj_set_flex_flow(left_status, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(left_status, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_radius(left_status, 0, 0);
+        lv_obj_set_scrollbar_mode(left_status, LV_SCROLLBAR_MODE_OFF);
+
+        notification_label_ = lv_label_create(left_status);
+        lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
+        lv_label_set_text(notification_label_, "");
+        lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+
+        status_label_ = lv_label_create(left_status);
+        lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_set_width(status_label_, 160);  // 左侧固定宽度（屏宽 720，够显示 ~12 汉字，超长循环滚动）
+        lv_obj_set_style_max_width(status_label_, 200, 0);
+        lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
+        lv_label_set_text(status_label_, Lang::Strings::INITIALIZING);
 
         // Right icons container
         lv_obj_t* right_icons = lv_obj_create(top_bar_);
@@ -430,41 +469,23 @@ private:
         lv_obj_set_style_text_font(mute_label_, icon_font, 0);
         lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
 
+        // Network icon goes to the right side, just before battery (next to it).
+        network_label_ = lv_label_create(right_icons);
+        lv_label_set_text(network_label_, "");
+        lv_obj_set_style_text_font(network_label_, icon_font, 0);
+        lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
+        lv_obj_set_style_margin_left(network_label_, lvgl_theme->spacing(2), 0);
+
         battery_label_ = lv_label_create(right_icons);
         lv_label_set_text(battery_label_, "");
         lv_obj_set_style_text_font(battery_label_, icon_font, 0);
         lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
         lv_obj_set_style_margin_left(battery_label_, lvgl_theme->spacing(2), 0);
 
-        /* Layer 2: Status bar - for center text labels */
-        status_bar_ = lv_obj_create(screen);
-        lv_obj_set_size(status_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(status_bar_, 0, 0);
-        lv_obj_set_style_bg_opa(status_bar_, LV_OPA_TRANSP, 0);  // Transparent background
-        lv_obj_set_style_border_width(status_bar_, 0, 0);
-        lv_obj_set_style_pad_all(status_bar_, 0, 0);
-        lv_obj_set_style_pad_top(status_bar_, lvgl_theme->spacing(2), 0);
-        lv_obj_set_style_pad_bottom(status_bar_, lvgl_theme->spacing(2), 0);
-        lv_obj_set_scrollbar_mode(status_bar_, LV_SCROLLBAR_MODE_OFF);
-        lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);  // Use absolute positioning
-        lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);  // Overlap with top_bar_
-        //lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
-
-        notification_label_ = lv_label_create(status_bar_);
-        lv_obj_set_width(notification_label_, LV_HOR_RES * 0.75);
-        lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
-        lv_label_set_text(notification_label_, "");
-        lv_obj_align(notification_label_, LV_ALIGN_CENTER, 0, 0);
-        //lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
-
-        status_label_ = lv_label_create(status_bar_);
-        lv_obj_set_width(status_label_, LV_HOR_RES * 0.75);
-        lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
-        lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
-        lv_label_set_text(status_label_, Lang::Strings::INITIALIZING);
-        lv_obj_align(status_label_, LV_ALIGN_CENTER, 0, 0);
+        /* 旧的 status_bar_ 全屏宽透明覆盖层已废弃：状态文本直接放到 top_bar_ 左侧
+         * (left_status 容器)。这里显式置 nullptr，确保任何外部"if (status_bar_)"检查走
+         * 未初始化/无效路径，避免误操作 (基类 LcdDisplay 析构里有 nullptr 守卫)。 */
+        status_bar_ = nullptr;
 
         /* Top layer: Bottom bar - fixed at bottom, minimum height 48, height can be adaptive */
         /**bottom_bar_ = lv_obj_create(screen);
@@ -482,17 +503,31 @@ private:
         lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, 0);
         lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);**/
 
-        /* chat_message_label_ placed in bottom_bar_ and vertically centered */
-        chat_message_label_ = lv_label_create(screen);
-        lv_label_set_text(chat_message_label_, "");
-        lv_obj_set_width(chat_message_label_, LV_HOR_RES - lvgl_theme->spacing(8)); // Subtract left and right padding
-        //lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP); // Auto wrap mode
-        lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);  // 文字超出会滚动
-        lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0); // Center text alignment
-        lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
-        //lv_obj_align(chat_message_label_, LV_ALIGN_CENTER, 0, 0); // Vertically and horizontally centered in bottom_bar_
-        /* 字幕栏移到状态栏下边，紧贴视频上方 */
-        lv_obj_align(chat_message_label_, LV_ALIGN_TOP_MID, 0, 30);
+        /* chat_message_label_ 屏左侧纵向字幕（竖条字幕）。
+         *
+         * 实现：lvgl_container (24×(height-300)) + 内部 label (宽 24, LV_SIZE_CONTENT, LONG_WRAP)，
+         * 内部 label 高度 = 文本高度（按字符强制换行后单字符一行）。
+         * container 设 LV_DIR_VER scroll + clip，超长文本通过 lv_anim 把 scroll_y 从 0 一次性
+         * 动画到 content_h - container_h,到底后停在末尾。文本短（≤ container_h）时不滚动。 */
+        chat_message_label_ = lv_obj_create(screen);
+        lv_obj_set_scrollbar_mode(chat_message_label_, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_scroll_dir(chat_message_label_, LV_DIR_VER);
+        lv_obj_set_size(chat_message_label_, 30, (lv_coord_t)(height_ - 300));
+        /* container 必须透明，不能设 bg_color — 否则整块黑底会重叠视频画面。 */
+        lv_obj_set_style_bg_opa(chat_message_label_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(chat_message_label_, 0, 0);
+        lv_obj_set_style_pad_all(chat_message_label_, 0, 0);
+        /* LV_ALIGN_LEFT_MID: 左边缘对齐到屏左 x=0，垂直居中。 */
+        lv_obj_align(chat_message_label_, LV_ALIGN_LEFT_MID, 0, 0);
+
+        chat_message_inner_label_ = lv_label_create(chat_message_label_);
+        lv_label_set_text(chat_message_inner_label_, "");
+        /* 宽 30 (字宽 = font_puhui_basic_30_4 字宽 20)，高度跟随内容。 */
+        lv_obj_set_width(chat_message_inner_label_, 30);
+        lv_obj_set_style_bg_opa(chat_message_inner_label_, LV_OPA_TRANSP, 0);
+        lv_label_set_long_mode(chat_message_inner_label_, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(chat_message_inner_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(chat_message_inner_label_, lvgl_theme->text_color(), 0);
 
         low_battery_popup_ = lv_obj_create(screen);
         lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
@@ -508,5 +543,129 @@ private:
         lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
     }
 };
+
+/* 纵向字幕：把 content 按 UTF-8 字符强制拆行（每字符一行），写到 chat_message_inner_label_。
+ * container chat_message_label_ (24×(height-300)) 设 LV_DIR_VER scroll + clip，超长文本
+ * 通过 lv_anim 把 scroll_y 从 0 一次性动画到 content_h - container_h，到底后停在末尾。 */
+inline void FanMIPI55Display::SetChatMessage(const char* role, const char* content) {
+    if (!setup_ui_called_) {
+        ESP_LOGW(TAG, "SetChatMessage('%s', '%s') called before SetupUI() - message will be lost!", role, content);
+    }
+    DisplayLockGuard lock(this);
+    if (chat_message_label_ == nullptr || chat_message_inner_label_ == nullptr) {
+        if (setup_ui_called_) {
+            ESP_LOGW(TAG, "SetChatMessage('%s', '%s') failed: chat container not ready", role, content);
+        }
+        return;
+    }
+    if (content == nullptr || content[0] == '\0') {
+        lv_label_set_text(chat_message_inner_label_, "");
+        last_chat_content_.clear();
+        /* 立即停止任何进行中的滚动动画（防止 SetChatMessage("") 后还在继续滚动） */
+        lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
+        if (bottom_bar_ != nullptr) {
+            lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+    /* 内容去重：连续相同 content 不重启动画，避免闪烁。 */
+    if (last_chat_content_ == content) {
+        if (bottom_bar_ != nullptr && !hide_subtitle_) {
+            lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+    last_chat_content_ = content;
+
+    /* 按 UTF-8 字符拆分：每个字符后插一个 '\n'。 */
+    std::string in(content);
+    std::string out;
+    out.reserve(in.size() * 2);
+    for (size_t i = 0; i < in.size(); ) {
+        unsigned char c = (unsigned char)in[i];
+        size_t step = 1;
+        if ((c & 0x80) == 0) {
+            step = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            step = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            step = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            step = 4;
+        }
+        if (i + step > in.size()) step = in.size() - i;
+        out.append(in, i, step);
+        out.push_back('\n');
+        i += step;
+    }
+    if (!out.empty() && out.back() == '\n') {
+        out.pop_back();
+    }
+    lv_label_set_text(chat_message_inner_label_, out.c_str());
+
+    /* 强制 layout 计算内容高度。 */
+    lv_obj_update_layout(chat_message_inner_label_);
+    lv_coord_t content_h = lv_obj_get_height(chat_message_inner_label_);
+    lv_coord_t container_h = lv_obj_get_height(chat_message_label_);
+
+    if (content_h <= container_h) {
+        /* 文本短，不滚动，定位到顶（content 顶部对齐 container 顶部）。 */
+        lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
+        if (bottom_bar_ != nullptr && !hide_subtitle_) {
+            lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+
+    /* 文本超长：单次"向上滚动到底后静止"。
+     * lv_anim 默认 repeat_count = 1（不循环），linear 路径从 scroll_y=0 一次性动画到 scroll_range_px，
+     * 到底后停在末尾，不重头滚、不反向。 */
+    int scroll_range_px = content_h - container_h;
+    int chars_per_screen = container_h / 20;
+    if (chars_per_screen < 1) chars_per_screen = 1;
+    int total_chars = content_h / 20;
+    int extra_chars = total_chars - chars_per_screen;
+    if (extra_chars < 1) extra_chars = 1;
+    uint32_t duration_ms = (uint32_t)(extra_chars * 400);  // 400ms/字符
+    if (duration_ms < 2000) duration_ms = 2000;
+    if (duration_ms > 60000) duration_ms = 60000;
+
+    /* 先归零：若之前在滚动，确保从 0 开始。 */
+    lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
+
+    /* exec_cb: 每帧直接把 v 写到 container 的 scroll_y（线性、单次、动画到底后停）。 */
+    static lv_anim_t s_scroll_anim;
+    lv_anim_delete(&s_scroll_anim, nullptr);
+    lv_anim_init(&s_scroll_anim);
+    lv_anim_set_var(&s_scroll_anim, chat_message_label_);
+    lv_anim_set_values(&s_scroll_anim, 0, scroll_range_px);
+    lv_anim_set_duration(&s_scroll_anim, duration_ms);
+    /* 不调用 set_repeat_count = INFINITE → 默认 1 次走完到底。 */
+    lv_anim_set_path_cb(&s_scroll_anim, lv_anim_path_linear);
+    lv_anim_set_exec_cb(&s_scroll_anim, [](void* var, int32_t v) {
+        lv_obj_scroll_to_y((lv_obj_t*)var, v, LV_ANIM_OFF);
+    });
+    lv_anim_start(&s_scroll_anim);
+
+    if (bottom_bar_ != nullptr && !hide_subtitle_) {
+        lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* 清空纵向字幕：基类 ClearChatMessages 默认调 lv_label_set_text(chat_message_label_, "")，
+ * 但 chat_message_label_ 实际上是 container obj，重写后改清 inner label。 */
+inline void FanMIPI55Display::ClearChatMessages() {
+    DisplayLockGuard lock(this);
+    if (chat_message_inner_label_ != nullptr) {
+        lv_label_set_text(chat_message_inner_label_, "");
+    }
+    if (chat_message_label_ != nullptr) {
+        lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
+    }
+    last_chat_content_.clear();
+    if (bottom_bar_ != nullptr) {
+        lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+}
 
 #endif // FAN_MIPI55_DISPLAY_H
