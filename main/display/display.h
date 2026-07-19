@@ -34,6 +34,14 @@ public:
     virtual void ShowNotification(const char* notification, int duration_ms = 3000);
     virtual void ShowNotification(const std::string &notification, int duration_ms = 3000);
     virtual void SetEmotion(const char* emotion);
+    /**
+     * 角色动画：进入待命状态后由 application 根据对话阶段调用。
+     * - 默认值 "idle"（待命），播放 SD 卡 /sdcard/Emotion/idle-*.mjpeg
+     * - "listen"（聆听中），播放 listen-*.mjpeg
+     * - "speak"（说话中），播放 speak-*.mjpeg
+     * 基础类默认实现退化为 SetEmotion(state)，由具体 display 重写为 MJPEG 播放器。
+     */
+    virtual void SetRoleAnimation(const char* state) { SetEmotion(state); }
     virtual void SetChatMessage(const char* role, const char* content);
     virtual void ClearChatMessages();
     virtual void SetTheme(Theme* theme);

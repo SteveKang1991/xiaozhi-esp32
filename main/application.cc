@@ -830,7 +830,13 @@ void Application::InitializeProtocol() {
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
-                Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
+                /* 进入待机后，对话阶段（Listening/Speaking）的角色动画由 application 统一控制，
+                 * 不再跟随 LLM 下发的 emotion。LLM 下发的 emotion 在此处跳过即可。 */
+                Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
+                    auto state = GetDeviceState();
+                    if (state == kDeviceStateListening || state == kDeviceStateSpeaking) {
+                        return;
+                    }
                     display->SetEmotion(emotion_str.c_str());
                 });
             }
@@ -926,7 +932,7 @@ void Application::DismissAlert() {
     if (GetDeviceState() == kDeviceStateIdle) {
         auto display = Board::GetInstance().GetDisplay();
         display->SetStatus(Lang::Strings::STANDBY);
-        display->SetEmotion("neutral");
+        display->SetRoleAnimation("idle");
         display->SetChatMessage("system", "");
     }
 }
@@ -1132,10 +1138,12 @@ void Application::HandleStateChangedEvent() {
     
     switch (new_state) {
         case kDeviceStateUnknown:
+            /* 系统启动阶段，不走角色动画——开机/下载/告警仍由 SetEmotion 走主题 GIF / 内置图标 */
+            break;
         case kDeviceStateIdle:
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
-            display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+            display->SetRoleAnimation("idle"); // Then play idle MJPEG
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
@@ -1146,7 +1154,7 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
-            display->SetEmotion("neutral");
+            display->SetRoleAnimation("listen");
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
@@ -1155,7 +1163,7 @@ void Application::HandleStateChangedEvent() {
                 if (listening_mode_ == kListeningModeAutoStop) {
                     audio_service_.WaitForPlaybackQueueEmpty();
                 }
-                
+
                 // Send the start listening command
                 protocol_->SendStartListening(listening_mode_);
                 audio_service_.EnableVoiceProcessing(true);
@@ -1168,7 +1176,7 @@ void Application::HandleStateChangedEvent() {
             // Disable wake word detection in listening mode
             audio_service_.EnableWakeWordDetection(false);
 #endif
-            
+
             // Play popup sound after ResetDecoder (in EnableVoiceProcessing) has been called
             if (play_popup_on_listening_) {
                 play_popup_on_listening_ = false;
@@ -1177,6 +1185,7 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+            display->SetRoleAnimation("speak");
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
