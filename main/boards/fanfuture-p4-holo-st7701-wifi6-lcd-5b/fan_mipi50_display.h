@@ -450,8 +450,8 @@ private:
 
         status_label_ = lv_label_create(left_status);
         lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
-        lv_obj_set_width(status_label_, 160);  // 左侧固定宽度（屏宽 480，够显示 ~12 汉字，超长循环滚动）
-        lv_obj_set_style_max_width(status_label_, 200, 0);
+        lv_obj_set_width(status_label_, 100);  // 左侧固定宽度（屏宽 480，够显示 ~12 汉字，超长循环滚动）
+        lv_obj_set_style_max_width(status_label_, 140, 0);
         lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_LEFT, 0);
         lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
         lv_label_set_text(status_label_, Lang::Strings::INITIALIZING);

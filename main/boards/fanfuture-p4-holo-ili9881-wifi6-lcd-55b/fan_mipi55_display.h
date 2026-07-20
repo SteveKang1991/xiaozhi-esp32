@@ -214,7 +214,6 @@ public:
         }
 
         const char* clip = MapRoleStateToClip(state);
-        ESP_LOGI(TAG, "SetRoleAnimation clip=%s", clip);
         StartMjpegEmotion(clip);
     }
 
