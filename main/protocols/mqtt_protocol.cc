@@ -392,8 +392,8 @@ bool MqttProtocol::IsAudioChannelOpened() const {
     return udp_ != nullptr && !error_occurred_ && !IsTimeout();
 }
 
-std::vector<EmotionInfo> MqttProtocol::FetchDeviceEmotions() {
-    std::vector<EmotionInfo> emotions;
+EmotionFetchResult MqttProtocol::FetchDeviceEmotions() {
+    EmotionFetchResult result;
 
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
@@ -404,13 +404,13 @@ std::vector<EmotionInfo> MqttProtocol::FetchDeviceEmotions() {
 
     if (!http->Open("GET", url)) {
         ESP_LOGE(TAG, "Failed to open HTTP for emotion list");
-        return emotions;
+        return result;  // success = false
     }
 
     if (http->GetStatusCode() != 200) {
         ESP_LOGE(TAG, "HTTP status %d for emotion list", http->GetStatusCode());
         http->Close();
-        return emotions;
+        return result;  // success = false
     }
 
     std::string response;
@@ -424,15 +424,18 @@ std::vector<EmotionInfo> MqttProtocol::FetchDeviceEmotions() {
     cJSON* root = cJSON_Parse(response.c_str());
     if (!root) {
         ESP_LOGE(TAG, "Failed to parse emotion list JSON");
-        return emotions;
+        return result;  // success = false
     }
 
     cJSON* data = cJSON_GetObjectItem(root, "data");
     cJSON* arr = data ? cJSON_GetObjectItem(data, "emotions") : nullptr;
     if (!cJSON_IsArray(arr)) {
         cJSON_Delete(root);
-        return emotions;
+        result.success = true;  // 请求成功，但列表为空
+        return result;
     }
+
+    result.success = true;  // 标记为成功
 
     int count = cJSON_GetArraySize(arr);
     for (int i = 0; i < count; i++) {
@@ -451,9 +454,9 @@ std::vector<EmotionInfo> MqttProtocol::FetchDeviceEmotions() {
         if (cJSON_IsNumber(s)) info.size = (size_t)s->valuedouble;
         if (cJSON_IsNumber(w)) info.width = (int)w->valueint;
         if (cJSON_IsNumber(ht)) info.height = (int)ht->valueint;
-        emotions.push_back(std::move(info));
+        result.emotions.push_back(std::move(info));
     }
 
     cJSON_Delete(root);
-    return emotions;
+    return result;
 }

@@ -44,6 +44,15 @@ struct EmotionInfo {
     std::string local_path;  // 设备本地保存路径（构造时填充）
 };
 
+/**
+ * 获取表情列表的结果
+ * 区分"请求成功但列表为空"和"请求失败"
+ */
+struct EmotionFetchResult {
+    bool success = false;   // HTTP 请求是否成功
+    std::vector<EmotionInfo> emotions;  // 表情列表（可能为空）
+};
+
 enum AbortReason {
     kAbortReasonNone,
     kAbortReasonWakeWordDetected
@@ -91,9 +100,9 @@ public:
     /**
      * 从服务器拉取当前设备已关联的表情文件列表
      * 通过 HTTP GET 调用 /api/device/emotions?hardware_id={mac}
-     * @return 表情列表（可能为空）
+     * @return EmotionFetchResult 包含 success 标记和表情列表
      */
-    virtual std::vector<EmotionInfo> FetchDeviceEmotions() = 0;
+    virtual EmotionFetchResult FetchDeviceEmotions() = 0;
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;

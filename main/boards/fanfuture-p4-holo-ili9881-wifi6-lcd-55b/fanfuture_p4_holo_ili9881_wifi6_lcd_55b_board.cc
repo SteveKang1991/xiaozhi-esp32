@@ -470,14 +470,8 @@ public:
         WifiBoard::StartWifiConfigMode();
 
         // Show notification on display
-        auto* disp = GetDisplay();
-        if (disp) {
-            disp->ShowNotification("BluFi Mode\nSearch: Xiaozhi-Blufi");
-        }
-
-        // Play sound notification
-        Application::GetInstance().Alert(Lang::Strings::WIFI_CONFIG_MODE,
-            "BluFi Mode\nSearch: Xiaozhi-Blufi", "gear", Lang::Sounds::OGG_WIFICONFIG);
+        std::string hint = std::string(Lang::Strings::BLUFI_CINFIG) + "Xiaozhi-Blufi";
+        Application::GetInstance().Alert(hint.c_str(), Lang::Strings::ENTERING_WIFI_CONFIG_MODE, "gear", Lang::Sounds::OGG_WIFICONFIG);
     }
 #endif
 

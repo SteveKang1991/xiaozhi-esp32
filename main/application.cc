@@ -518,26 +518,45 @@ void Application::CheckEmotionFiles() {
     }
 
     // 获取服务器表情列表
-    std::vector<EmotionInfo> emotions;
+    EmotionFetchResult fetch_result;
     if (ota_->HasMqttConfig()) {
         MqttProtocol probe;
-        emotions = probe.FetchDeviceEmotions();
+        fetch_result = probe.FetchDeviceEmotions();
     } else if (ota_->HasWebsocketConfig()) {
         WebsocketProtocol probe;
-        emotions = probe.FetchDeviceEmotions();
+        fetch_result = probe.FetchDeviceEmotions();
     } else {
         MqttProtocol probe;
-        emotions = probe.FetchDeviceEmotions();
+        fetch_result = probe.FetchDeviceEmotions();
     }
 
-    ESP_LOGI(kEmotionTag, "Fetched %d emotion(s) from server", (int)emotions.size());
-
-    // 服务器返回空（用户已删除所有表情），清理 SD 卡上所有 .mjpeg 文件
-    if (emotions.empty()) {
-        CleanOrphanEmotionFiles({});
-        ESP_LOGI(kEmotionTag, "No emotions on server, cleared local files");
+    // HTTP 请求失败，跳过同步，保留本地文件
+    if (!fetch_result.success) {
+        ESP_LOGW(kEmotionTag, "Failed to fetch emotion list from server, preserving local files");
         return;
     }
+
+    ESP_LOGI(kEmotionTag, "Fetched %d emotion(s) from server", (int)fetch_result.emotions.size());
+
+    // 服务器返回空列表（用户已删除所有角色动画），清三个角色文件
+    if (fetch_result.emotions.empty()) {
+        // 构造三个角色文件的本地路径，确保即使服务器没有，CleanOrphan 也能找到并删除旧的
+        auto display = Board::GetInstance().GetDisplay();
+        int w = display ? display->width() : 0;
+        int h = display ? display->height() : 0;
+        if (w <= 0) w = 240;
+        if (h <= 0) h = 290;
+        std::vector<std::string> role_only = {
+            MakeEmotionLocalPath("idle", w, h),
+            MakeEmotionLocalPath("listen", w, h),
+            MakeEmotionLocalPath("speak", w, h),
+        };
+        CleanOrphanEmotionFiles(role_only);
+        ESP_LOGI(kEmotionTag, "No role emotions on server, cleared role files only");
+        return;
+    }
+
+    std::vector<EmotionInfo>& emotions = fetch_result.emotions;
 
     // 对比服务器列表与SD卡，同步表情
     std::vector<std::string> valid_paths;
@@ -567,9 +586,10 @@ void Application::CheckEmotionFiles() {
         total_count++;
     }
 
-    // 如果没有需要下载的，直接返回
+    // 如果没有需要下载的，直接清理角色动画同步（服务器没有的角色要删掉）
     if (total_count == 0) {
-        ESP_LOGI(kEmotionTag, "All emotions are up-to-date, no download needed");
+        ESP_LOGI(kEmotionTag, "All emotions are up-to-date, checking role sync");
+        CleanOrphanEmotionFiles(valid_paths);
         return;
     }
 
@@ -721,8 +741,11 @@ void Application::CleanOrphanEmotionFiles(const std::vector<std::string>& valid_
         if (name.empty() || name[0] == '.' || name == "System Volume Information") {
             continue;
         }
-        // 清理所有 .mjpeg 文件（任何分辨率）
+        // 只清理角色动画（idle-、listen-、speak-），不碰其他表情文件
         if (name.find(".mjpeg") == std::string::npos) {
+            continue;
+        }
+        if (name.rfind("idle-", 0) != 0 && name.rfind("listen-", 0) != 0 && name.rfind("speak-", 0) != 0) {
             continue;
         }
 

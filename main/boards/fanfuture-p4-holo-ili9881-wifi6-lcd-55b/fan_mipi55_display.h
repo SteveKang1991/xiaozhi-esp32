@@ -186,6 +186,15 @@ public:
     /**
      * 角色动画：进入待命状态后由 application 根据对话阶段调用。
      * state ∈ {"idle", "listen", "speak"}，播放 SD 卡对应 clip。
+     *
+     * 播放优先级：
+     * 1. 用户角色动画：idle-{WIDTH}x{HEIGHT}.mjpeg / listen-* / speak-*
+     *    - 三个文件至少有一个存在时，启用用户角色动画
+     *    - listen 缺失 → 播放 idle；speak 缺失 → 播放 idle
+     * 2. 系统默认动画：default-idle-{WIDTH}x{HEIGHT}.mjpeg / default-listen-* / default-speak-*
+     *    - 仅在用户角色动画完全不存在时启用
+     *    - listen 缺失 → 播放 default-idle；speak 缺失 → 播放 default-idle
+     * 3. 均不存在：不播放 MJPEG
      */
     virtual void SetRoleAnimation(const char* state) override {
         ESP_LOGI(TAG, "SetRoleAnimation state=%s ready=%d sd_mounted=%d",
@@ -214,7 +223,12 @@ public:
         }
 
         const char* clip = MapRoleStateToClip(state);
-        StartMjpegEmotion(clip);
+        const std::string& clip_path = FindRoleAnimation(clip);
+        if (clip_path.empty()) {
+            ESP_LOGI(TAG, "SetRoleAnimation: no available MJPEG for state=%s, skip", clip);
+            return;
+        }
+        StartMjpegEmotion(clip_path.c_str());
     }
 
     void SetSystemReady() override {
@@ -250,29 +264,59 @@ private:
     }
 
     /**
-     * 查找指定 clip 名的 MJPEG 文件
-     * 优先查找 {clip}-{width}x{height}.mjpeg，不存在则回退到默认 idle-{width}x{height}.mjpeg
-     * 参数 clip_name 必须是已映射过、合法的 clip 名（如 "idle"/"listen"/"speak"）。
+     * 查找角色动画 MJPEG 路径，两级回退：
+     * 1. 用户角色动画 {prefix}{state}-{W}x{H}.mjpeg（prefix=""）
+     * 2. 系统默认动画 default-{prefix}{state}-{W}x{H}.mjpeg（prefix="default-"）
+     *
+     * listen → 缺失时回退 idle；speak → 缺失时回退 idle。
+     * 查找角色动画 MJPEG 文件。
+     * 查找顺序：先在用户层（无前缀）找所有状态（orig -> idle 回退），找不到才去 default 层。
+     * 均不存在返回空字符串。
      */
-    static std::string FindMjpegPath(const char* clip_name) {
-        char default_path[128];
-        snprintf(default_path, sizeof(default_path),
-                 "/sdcard/Emotion/%s-%ux%u.mjpeg", clip_name,
-                 (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
-        if (FileExists(default_path)) {
-            return default_path;
-        }
-        ESP_LOGW(TAG, "FindMjpegPath: %s 不存在，回退检查 idle", default_path);
-        // 回退到 idle
-        if (strcmp(clip_name, "idle") != 0) {
-            snprintf(default_path, sizeof(default_path),
-                     "/sdcard/Emotion/idle-%ux%u.mjpeg",
+    static std::string FindRoleAnimation(const char* state) {
+        // 先尝试在用户层（无前缀）查找
+        const char* clips[2] = { state, "idle" };
+        for (int i = 0; i < 2; i++) {
+            char path[128];
+            snprintf(path, sizeof(path), "/sdcard/Emotion/%s-%ux%u.mjpeg", clips[i],
                      (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
-            if (FileExists(default_path)) {
-                return default_path;
+            if (FileExists(path)) {
+                ESP_LOGI(TAG, "FindRoleAnimation: found %s", path);
+                return path;
             }
-            ESP_LOGE(TAG, "FindMjpegPath: 回退 idle 也找不到: %s", default_path);
         }
+        
+        // 用户层找不到，检查是否有任何用户角色动画存在
+        bool user_has_any = false;
+        const char* all_clips[3] = { "idle", "listen", "speak" };
+        for (int i = 0; i < 3; i++) {
+            char test_path[128];
+            snprintf(test_path, sizeof(test_path), "/sdcard/Emotion/%s-%ux%u.mjpeg",
+                     all_clips[i], (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
+            if (FileExists(test_path)) {
+                user_has_any = true;
+                break;
+            }
+        }
+        
+        // 如果用户层有角色动画但不包含请求的 state/idle，不再降级到 default 层
+        if (user_has_any) {
+            ESP_LOGW(TAG, "FindRoleAnimation: user has role animation but no %s, skip", state);
+            return "";
+        }
+        
+        // 用户层完全没有角色动画，尝试 default 层
+        for (int i = 0; i < 2; i++) {
+            char path[128];
+            snprintf(path, sizeof(path), "/sdcard/Emotion/default-%s-%ux%u.mjpeg", clips[i],
+                     (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
+            if (FileExists(path)) {
+                ESP_LOGI(TAG, "FindRoleAnimation: found default %s", path);
+                return path;
+            }
+        }
+        
+        ESP_LOGW(TAG, "FindRoleAnimation: no animation for state=%s", state);
         return "";
     }
 
@@ -292,7 +336,7 @@ private:
         return "idle";
     }
 
-    bool StartMjpegEmotion(const char* emotion) {
+    bool StartMjpegEmotion(const char* full_path) {
         if (!s_system_ready_) {
             ESP_LOGW(TAG, "MJPEG跳过：系统未就绪");
             return false;
@@ -301,15 +345,13 @@ private:
             ESP_LOGW(TAG, "MJPEG跳过：SD卡未挂载");
             return false;
         }
-
-        std::string clip_path = FindMjpegPath(emotion);
-        if (clip_path.empty()) {
-            ESP_LOGE(TAG, "StartMjpegEmotion: clip=%s 无可用文件，跳过", emotion);
+        if (full_path == nullptr || full_path[0] == '\0') {
+            ESP_LOGW(TAG, "MJPEG跳过：路径为空");
             return false;
         }
 
         if (mjpeg_player_is_running()) {
-            if (clip_path == current_mjpeg_path_) {
+            if (strcmp(full_path, current_mjpeg_path_.c_str()) == 0) {
                 return true;
             }
             mjpeg_player_stop();
@@ -325,7 +367,7 @@ private:
             ry = 0;
         }
 
-        current_mjpeg_path_ = clip_path;
+        current_mjpeg_path_ = full_path;
         mjpeg_player_cfg_t cfg = {};
         cfg.file_path = current_mjpeg_path_.c_str();
         cfg.panel = panel_;

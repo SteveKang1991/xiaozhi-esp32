@@ -55,6 +55,7 @@
         "DOWNLOAD_ASSETS_FAILED": "Failed to download assets",
         "LOADING_ASSETS": "Loading assets...",
         "HELLO_MY_FRIEND": "Hello, my friend!",
+        "BLUFI_CINFIG": "Logging in and scanning:",
         "DOWNLOADING_EMOTIONS": "Downloading animation resources...",
         "DOWNLOADING_EMOTION_PROGRESS": "Downloading:%d/%d",
         "EMOTION_SYNC_COMPLETE": "Animation sync complete"

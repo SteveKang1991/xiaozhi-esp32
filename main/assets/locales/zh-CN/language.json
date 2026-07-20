@@ -56,6 +56,7 @@
         "FLIGHT_MODE_OFF": "飞行模式已关闭",
         "FLIGHT_MODE_ON": "飞行模式已开启",
         "DOWNLOADING_EMOTIONS": "下载动画资源...",
+        "BLUFI_CINFIG": "登录系统扫描：",
         "DOWNLOADING_EMOTION_PROGRESS": "请勿关机，正在下载：%d/%d",
         "EMOTION_SYNC_COMPLETE": "动画同步完成"
     }
