@@ -303,17 +303,44 @@ esp_err_t Blufi::_host_and_cb_init() {
 
 esp_err_t Blufi::_controller_init() {
 #if defined(CONFIG_ESP_HOSTED_ENABLED) && defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
-    // ESP32-P4 with ESP-Hosted: BT controller is on external co-processor (ESP32-C6)
-    // The C6 co-processor runs factory firmware which already has BT pre-initialized.
-    // esp_hosted_bt_controller_init/enable RPC commands are NOT supported by factory firmware
-    // (Co-processor reports FW version 0.0.0), so we skip them and rely on the
-    // co-processor's pre-initialized BT controller. The VHCI HCI path is all we need.
+    // ESP32-P4 with ESP-Hosted: BT controller is on the co-processor (ESP32-C6).
+    // C6 slave firmware v2.12.x does NOT auto-init the BT controller at boot
+    // (unlike older factory firmware), so we MUST explicitly drive its BT controller
+    // here via RPC BEFORE opening the HCI channel and starting Bluedroid on the host.
+    //
+    // Reference: managed_components/espressif__esp_hosted/examples/host_bluedroid_host_only/main/main.c
+    //
+    // Required order on the host side (P4):
+    //   1. esp_hosted_bt_controller_init()    -> RPC to C6: initialize its BT controller
+    //   2. esp_hosted_bt_controller_enable()  -> RPC to C6: enable its BT controller (BLE mode) and register VHCI callback
+    //   3. hosted_hci_bluedroid_open()        -> Open the HCI channel (done in _host_init)
+    //   4. esp_bluedroid_attach_hci_driver()  -> Attach Bluedroid to the VHCI HCI driver
+    //   5. esp_bluedroid_init() / _enable()   -> Start the host-side BT stack
+    //
+    // Without steps 1+2, Bluedroid_enable() on P4 will send its first HCI command
+    // (HCI_RESET, opcode 0xC03) and time out after ~8s because the C6 controller
+    // is not initialised and has no VHCI callback registered.
+    ESP_LOGI(BLUFI_TAG, "_controller_init: ESP-Hosted mode, driving C6 BT controller via RPC");
 
-    ESP_LOGI(BLUFI_TAG, "_controller_init: ESP-Hosted mode, C6 factory firmware BT assumed active");
+    esp_err_t ret = esp_hosted_bt_controller_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "_controller_init: esp_hosted_bt_controller_init failed: %s",
+                 esp_err_to_name(ret));
+        // Hard failure: there is no point continuing without a BT controller.
+        return ret;
+    }
+    ESP_LOGI(BLUFI_TAG, "_controller_init: esp_hosted_bt_controller_init OK");
 
-    // NOTE: esp_hosted_init() and esp_hosted_connect_to_slave() are already called
-    // automatically at startup by esp-hosted's internal startup hooks.
-    // We only need to open the HCI channel and attach Bluedroid, which is done in _host_init().
+    ret = esp_hosted_bt_controller_enable();
+    if (ret != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "_controller_init: esp_hosted_bt_controller_enable failed: %s",
+                 esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(BLUFI_TAG, "_controller_init: esp_hosted_bt_controller_enable OK");
+
+    // NOTE: esp_hosted_init() and esp_hosted_connect_to_slave() are already
+    // called automatically at startup by esp-hosted's internal startup hooks.
 #else
     // Standard ESP targets with built-in BT controller
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
