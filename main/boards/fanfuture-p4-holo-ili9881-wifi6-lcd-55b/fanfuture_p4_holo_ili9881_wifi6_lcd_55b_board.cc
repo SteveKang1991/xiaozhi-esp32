@@ -144,23 +144,48 @@ private:
             ESP_ERROR_CHECK(pmic_->EnableAldo1(true));
             ESP_LOGI(TAG, "   💡 ALDO1: 3.3V");
 
-            ESP_ERROR_CHECK(pmic_->SetAldo2Voltage(1800));
+            /**ESP_ERROR_CHECK(pmic_->SetAldo2Voltage(1800));
             ESP_ERROR_CHECK(pmic_->EnableAldo2(true));
             ESP_LOGI(TAG, "   🔋 ALDO2: 1.8V");
 
             ESP_ERROR_CHECK(pmic_->SetAldo4Voltage(3300));
             ESP_ERROR_CHECK(pmic_->EnableAldo4(true));
-            ESP_LOGI(TAG, "   💡 ALDO4: 3.3V");
+            ESP_LOGI(TAG, "   💡 ALDO4: 3.3V");**/
 
             ESP_ERROR_CHECK(pmic_->EnableBatteryVoltageAdc(true));
             ESP_ERROR_CHECK(pmic_->EnableVbusVoltageAdc(true));
             ESP_ERROR_CHECK(pmic_->EnableSystemVoltageAdc(true));
             ESP_ERROR_CHECK(pmic_->EnableTemperatureAdc(true));
 
-            ESP_ERROR_CHECK(pmic_->SetChargeCurrent(Axp2101ChgCurr::CUR_3000MA));
+            // ----- 充电配置 -----
+            // 必须先读电池电压再决定充电参数，否则当电池未接 / 完全没电时
+            // 以 3A 大电流强行充电会产生巨大热损耗（4.2V × 3A ≈ 12W），
+            // AXP2101 会迅速过热甚至烧毁。
+            // 这里先用预充电电流试探电池是否真实存在。
             ESP_ERROR_CHECK(pmic_->SetChargeTargetVoltage(Axp2101ChgVol::VOL_4V2));
-            ESP_ERROR_CHECK(pmic_->EnableCharging(true));
-            ESP_LOGI(TAG, "⚡ 充电配置: 3000mA @ 4.2V");
+
+            uint16_t pre_bat_mv = pmic_->GetBatteryVoltage();
+            const uint16_t BAT_PRESENT_MV = 2500;   // 锂电池接入阈值 < 2.5V 认为未接 / 严重过放
+            const uint16_t BAT_FULL_MV    = 4100;   // 接近满电
+
+            if (pre_bat_mv < BAT_PRESENT_MV) {
+                // 电池未接或严重过放，禁止启动大电流充电，否则 PMIC 会剧烈发烫
+                ESP_LOGW(TAG, "⚠️  电池电压异常低 (%u mV) —— 疑似未接电池，禁止开启充电",
+                         pre_bat_mv);
+                ESP_ERROR_CHECK(pmic_->EnableCharging(false));
+                ESP_ERROR_CHECK(pmic_->SetChargeCurrent(Axp2101ChgCurr::CUR_0MA));
+                ESP_LOGW(TAG, "     已禁用充电以保护 PMIC。请检查电池连接 / 是否为真实电池。");
+            } else if (pre_bat_mv >= BAT_FULL_MV) {
+                // 已接近满电，开小电流涓流即可
+                ESP_ERROR_CHECK(pmic_->SetChargeCurrent(Axp2101ChgCurr::CUR_500MA));
+                ESP_ERROR_CHECK(pmic_->EnableCharging(true));
+                ESP_LOGI(TAG, "⚡ 充电配置: 500mA @ 4.2V (电池接近满电)");
+            } else {
+                // 正常电池范围
+                ESP_ERROR_CHECK(pmic_->SetChargeCurrent(Axp2101ChgCurr::CUR_3000MA));
+                ESP_ERROR_CHECK(pmic_->EnableCharging(true));
+                ESP_LOGI(TAG, "⚡ 充电配置: 3000mA @ 4.2V");
+            }
 
             ESP_LOGI(TAG, "✅ AXP2101初始化完成");
 
