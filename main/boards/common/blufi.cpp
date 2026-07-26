@@ -304,40 +304,70 @@ esp_err_t Blufi::_host_and_cb_init() {
 esp_err_t Blufi::_controller_init() {
 #if defined(CONFIG_ESP_HOSTED_ENABLED) && defined(CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID)
     // ESP32-P4 with ESP-Hosted: BT controller is on the co-processor (ESP32-C6).
-    // C6 slave firmware v2.12.x does NOT auto-init the BT controller at boot
-    // (unlike older factory firmware), so we MUST explicitly drive its BT controller
-    // here via RPC BEFORE opening the HCI channel and starting Bluedroid on the host.
+    //
+    // C6 slave firmware behaviour differs between versions:
+    //
+    //   * Legacy factory firmware (e.g. v1.4.1, esp_hosted_fg):
+    //       - Auto-initialises + enables its BT controller during boot.
+    //       - VHCI callback is already registered before the host comes up.
+    //       - Does NOT handle RPC opcode 0x183 (Req_FeatureControl); it silently
+    //         drops the request and the host times out after 5s.
+    //         -> We must SKIP esp_hosted_bt_controller_init/enable().
+    //
+    //   * Newer self-built slave firmware (e.g. v2.12.x, esp_hosted_mcu):
+    //       - Does NOT auto-initialise BT controller at boot.
+    //       - Implements RPC 0x183 with FEATURE_COMMAND_BT_INIT / BT_ENABLE.
+    //         -> We MUST call esp_hosted_bt_controller_init/enable() or the
+    //            first HCI command from Bluedroid will time out.
+    //
+    // Probe strategy: the slave firmware version alone is *not* a reliable
+    // way to discriminate (v1.4.1 reports its version via opcode 350, it just
+    // doesn't implement opcode 387). So we try the BT RPC and use its result:
+    //   - success    : newer slave, controller is now ready on the C6
+    //   - timeout    : legacy factory firmware, BT was already initialised at
+    //                  boot, so we proceed with Bluedroid on the host.
     //
     // Reference: managed_components/espressif__esp_hosted/examples/host_bluedroid_host_only/main/main.c
-    //
-    // Required order on the host side (P4):
-    //   1. esp_hosted_bt_controller_init()    -> RPC to C6: initialize its BT controller
-    //   2. esp_hosted_bt_controller_enable()  -> RPC to C6: enable its BT controller (BLE mode) and register VHCI callback
-    //   3. hosted_hci_bluedroid_open()        -> Open the HCI channel (done in _host_init)
-    //   4. esp_bluedroid_attach_hci_driver()  -> Attach Bluedroid to the VHCI HCI driver
-    //   5. esp_bluedroid_init() / _enable()   -> Start the host-side BT stack
-    //
-    // Without steps 1+2, Bluedroid_enable() on P4 will send its first HCI command
-    // (HCI_RESET, opcode 0xC03) and time out after ~8s because the C6 controller
-    // is not initialised and has no VHCI callback registered.
-    ESP_LOGI(BLUFI_TAG, "_controller_init: ESP-Hosted mode, driving C6 BT controller via RPC");
 
+    ESP_LOGI(BLUFI_TAG, "_controller_init: ESP-Hosted mode, probing C6 BT capability");
+
+    // First, log the slave firmware version for diagnostics. This RPC uses
+    // opcode 350 (Req_GetCoprocessorFwVersion) which is supported by both
+    // v1.4.1 factory firmware and v2.12.x.
+    esp_hosted_coprocessor_fwver_t fwver = {};
+    int ver_ret = esp_hosted_get_coprocessor_fwversion(&fwver);
+    if (ver_ret == 0) {
+        ESP_LOGI(BLUFI_TAG,
+                 "_controller_init: slave FW version %u.%u.%u (rev=%d)",
+                 (unsigned)fwver.major1, (unsigned)fwver.minor1, (unsigned)fwver.patch1,
+                 (int)fwver.revision);
+    } else {
+        ESP_LOGW(BLUFI_TAG, "_controller_init: failed to query slave FW version (ret=%d)", ver_ret);
+    }
+
+    // Attempt to drive BT init via RPC. On legacy factory firmware this will
+    // hang the host for ~5s before failing with ESP_FAIL, but that is harmless
+    // because the C6 controller is already initialised and we can proceed.
     esp_err_t ret = esp_hosted_bt_controller_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(BLUFI_TAG, "_controller_init: esp_hosted_bt_controller_init failed: %s",
-                 esp_err_to_name(ret));
-        // Hard failure: there is no point continuing without a BT controller.
-        return ret;
-    }
-    ESP_LOGI(BLUFI_TAG, "_controller_init: esp_hosted_bt_controller_init OK");
+    if (ret == ESP_OK) {
+        ESP_LOGI(BLUFI_TAG, "_controller_init: esp_hosted_bt_controller_init OK (newer slave)");
 
-    ret = esp_hosted_bt_controller_enable();
-    if (ret != ESP_OK) {
-        ESP_LOGE(BLUFI_TAG, "_controller_init: esp_hosted_bt_controller_enable failed: %s",
+        ret = esp_hosted_bt_controller_enable();
+        if (ret != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "_controller_init: esp_hosted_bt_controller_enable failed: %s",
+                     esp_err_to_name(ret));
+            return ret;
+        }
+        ESP_LOGI(BLUFI_TAG, "_controller_init: esp_hosted_bt_controller_enable OK");
+    } else {
+        // RPC not supported by this slave firmware. Most likely it is the
+        // legacy factory firmware (v1.4.1) which auto-initialises BT at boot.
+        // The C6 VHCI channel is already open, so we just continue.
+        ESP_LOGW(BLUFI_TAG,
+                 "_controller_init: esp_hosted_bt_controller_init failed (%s). "
+                 "Assuming legacy C6 factory firmware with BT already initialised.",
                  esp_err_to_name(ret));
-        return ret;
     }
-    ESP_LOGI(BLUFI_TAG, "_controller_init: esp_hosted_bt_controller_enable OK");
 
     // NOTE: esp_hosted_init() and esp_hosted_connect_to_slave() are already
     // called automatically at startup by esp-hosted's internal startup hooks.
