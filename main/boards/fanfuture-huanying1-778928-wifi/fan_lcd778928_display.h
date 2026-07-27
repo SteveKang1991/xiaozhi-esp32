@@ -284,16 +284,17 @@ private:
     /* 启动时（emotion_partition_storage 已 init）一次性扫描所有候选 flash 文件并缓存。
      * 后续 SetRoleAnimation 直接查此缓存，不再访问 SD 卡或 flash。
      * 文件命名约定：<name>-WxH.mjpeg（运行时 width/height）。
-     *   - 用户层：idle-240x290.mjpeg, listen-240x290.mjpeg, speak-240x290.mjpeg
-     *   - default 层：default-idle-240x290.mjpeg, default-listen-240x290.mjpeg, default-speak-240x290.mjpeg
+     *   - user 层：idle-240x290.mjpeg, listen-240x290.mjpeg, speak-240x290.mjpeg
+     *   - default 层：default-idle-240x290.mjpeg
      */
+    /* ClipCache 只存 user 层 3 个 slot + 唯一的 default-idle。
+     * user 层有任意文件时 FindRoleAnimation 永不 fallback 到 default 层。 */
     struct ClipCache {
-        bool scanned = false;        /* 是否已扫过 */
-        bool user_has_any = false;   /* 用户层是否存在任意一个 idle/listen/speak 文件 */
-        ClipLoc idle;
-        ClipLoc listen;
-        ClipLoc speak;
-        ClipLoc default_idle;        /* 单独的 default-idle，speak/listen fallback 用 */
+        bool scanned = false;
+        ClipLoc idle;       /* user idle-240x290.mjpeg */
+        ClipLoc listen;     /* user listen-240x290.mjpeg */
+        ClipLoc speak;      /* user speak-240x290.mjpeg */
+        ClipLoc default_clip;  /* default idle-240x290.mjpeg（只有 user 层全空时才用） */
     };
     static ClipCache s_clip_cache;
 
@@ -305,13 +306,12 @@ private:
                  (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
     }
 
-    /* 启动时一次扫描所有 6 个候选文件：user-layer 3 + default-layer 3。
-     * 全部走 emotion_partition_storage_find（emotions 分区），不再访问 SD 卡。 */
+    /* 启动时一次扫描 user 层 3 个 + default 层唯一的 default-idle。
+     * user 层有任意文件时 FindRoleAnimation 永不 fallback 到 default 层。 */
     static void ScanEmotionClips() {
         if (s_clip_cache.scanned) return;
         s_clip_cache.scanned = true;
 
-        /* 如果 emotion_partition_storage 还没 init，先 init 一次 */
         if (emotion_partition_storage_get_partition() == NULL) {
             esp_err_t r = emotion_partition_storage_init();
             if (r != ESP_OK) {
@@ -328,33 +328,28 @@ private:
             return loc;
         };
 
-        const char* all_names[3] = { "idle", "listen", "speak" };
         /* user 层 */
+        const char* user_names[3] = { "idle", "listen", "speak" };
         for (int i = 0; i < 3; i++) {
             char n[48];
-            FillClipName(n, sizeof(n), all_names[i]);
+            FillClipName(n, sizeof(n), user_names[i]);
             ClipLoc loc = try_find(n);
             if (loc.valid()) {
-                s_clip_cache.user_has_any = true;
                 if (i == 0) s_clip_cache.idle = loc;
                 else if (i == 1) s_clip_cache.listen = loc;
                 else s_clip_cache.speak = loc;
             }
         }
-        /* default 层：每个 state 单独查 */
-        char dn_idle[48], dn_listen[48], dn_speak[48];
-        FillClipName(dn_idle, sizeof(dn_idle), "default-idle");
-        FillClipName(dn_listen, sizeof(dn_listen), "default-listen");
-        FillClipName(dn_speak, sizeof(dn_speak), "default-speak");
-        ClipLoc dloc;
-        dloc = try_find(dn_idle);     if (dloc.valid()) s_clip_cache.default_idle = dloc;
-        dloc = try_find(dn_listen);   if (dloc.valid()) s_clip_cache.listen = dloc;
-        dloc = try_find(dn_speak);    if (dloc.valid()) s_clip_cache.speak = dloc;
 
-        ESP_LOGI(TAG, "ClipCache: user_has_any=%d idle=%s listen=%s speak=%s default_idle=%s",
-                 (int)s_clip_cache.user_has_any,
+        /* default 层：只扫 default-idle */
+        char dn[48];
+        FillClipName(dn, sizeof(dn), "default-idle");
+        ClipLoc dloc = try_find(dn);
+        if (dloc.valid()) s_clip_cache.default_clip = dloc;
+
+        ESP_LOGI(TAG, "ClipCache: idle=%s listen=%s speak=%s default_clip=%s",
                  s_clip_cache.idle.name.c_str(), s_clip_cache.listen.name.c_str(),
-                 s_clip_cache.speak.name.c_str(), s_clip_cache.default_idle.name.c_str());
+                 s_clip_cache.speak.name.c_str(), s_clip_cache.default_clip.name.c_str());
     }
 
     /* EmotionSync 下载/重试完成后调用：重新扫描并尝试启动 idle。
@@ -380,37 +375,40 @@ private:
         return "idle";
     }
 
-    /* 完全走缓存，不再访问 SD 卡或 flash。
-     * 优先级：用户层 <state> > 用户层 idle > default 层 <state> > default 层 idle > 空。 */
+    /* 完全走缓存。
+     * 规则：
+     *   - user 层有任意文件 → 只在 user 层找，不 fallback 到 default
+     *   - listen → user listen → user idle → 空
+     *   - speak  → user speak → user idle → 空
+     *   - idle   → user idle → 空
+     *   - user 层全空 → fallback 到 default_idle
+     */
     static ClipLoc FindRoleAnimation(const char* state) {
         if (!s_clip_cache.scanned) {
-            /* 兜底：万一在 ScanEmotionClips 前调用，仍需扫描 */
             ScanEmotionClips();
         }
-        const ClipLoc* primary = nullptr;
-        if (state && strcmp(state, "listen") == 0) {
-            primary = s_clip_cache.listen.valid() ? &s_clip_cache.listen : nullptr;
-        } else if (state && strcmp(state, "speak") == 0) {
-            primary = s_clip_cache.speak.valid() ? &s_clip_cache.speak : nullptr;
-        } else { /* idle */
-            primary = s_clip_cache.idle.valid() ? &s_clip_cache.idle : nullptr;
-        }
-        if (primary && primary->valid()) {
-            return *primary;
-        }
-        /* 自身缺：先尝试用户层 idle */
-        if (s_clip_cache.idle.valid()) {
+        const bool user_has_any = s_clip_cache.idle.valid()
+                                  || s_clip_cache.listen.valid()
+                                  || s_clip_cache.speak.valid();
+
+        if (user_has_any) {
+            /* user 层有文件：只在 user 层查找 */
+            if (state && strcmp(state, "listen") == 0) {
+                if (s_clip_cache.listen.valid()) return s_clip_cache.listen;
+                if (s_clip_cache.idle.valid())   return s_clip_cache.idle;
+                return {};
+            }
+            if (state && strcmp(state, "speak") == 0) {
+                if (s_clip_cache.speak.valid()) return s_clip_cache.speak;
+                if (s_clip_cache.idle.valid())  return s_clip_cache.idle;
+                return {};
+            }
+            /* idle */
             return s_clip_cache.idle;
         }
-        /* 用户层没有 idle，再尝试 default 层对应 state */
-        if (state && strcmp(state, "listen") == 0 && s_clip_cache.listen.valid()) {
-            return s_clip_cache.listen;
-        }
-        if (state && strcmp(state, "speak") == 0 && s_clip_cache.speak.valid()) {
-            return s_clip_cache.speak;
-        }
-        /* 最后用 default-idle */
-        return s_clip_cache.default_idle;
+
+        /* user 层全空：fallback 到 default_idle */
+        return s_clip_cache.default_clip;
     }
 
     bool StartMjpegEmotion(const ClipLoc& loc_in) {

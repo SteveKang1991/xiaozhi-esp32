@@ -288,10 +288,10 @@ static void mjpeg_log_memory_budget(void)
     const size_t static_tiles = black_tile_size + slab_size;
     const size_t dma_budget = (size_t)FRAME_BUF_SIZE * (size_t)NUM_DMA_BUFS;
     const size_t task_stack_budget = (size_t)(8192 + 8192);
-    ESP_LOGI(TAG, "预算: static_tiles=%uB(%uKB) dma_input=%uB(%uKB) task_stack=%uB(%uKB)",
-             (unsigned)static_tiles, (unsigned)(static_tiles / 1024),
-             (unsigned)dma_budget, (unsigned)(dma_budget / 1024),
-             (unsigned)task_stack_budget, (unsigned)(task_stack_budget / 1024));
+    // ESP_LOGI(TAG, "预算: static_tiles=%uB(%uKB) dma_input=%uB(%uKB) task_stack=%uB(%uKB)",
+    //          (unsigned)static_tiles, (unsigned)(static_tiles / 1024),
+    //          (unsigned)dma_budget, (unsigned)(dma_budget / 1024),
+    //          (unsigned)task_stack_budget, (unsigned)(task_stack_budget / 1024));
 }
 
 static esp_err_t mjpeg_alloc_roi_tiles(void)
@@ -330,7 +330,7 @@ static esp_err_t mjpeg_alloc_roi_tiles(void)
     }
     (void)memset(s_mjpeg_black_tile, 0, black_tile_size);
     (void)memset(s_mjpeg_slab, 0, slab_size);
-    ESP_LOGI(TAG, "ROI tiles allocated in %s", s_mjpeg_tiles_in_spiram ? "PSRAM" : "internal SRAM");
+    // ESP_LOGI(TAG, "ROI tiles allocated in %s", s_mjpeg_tiles_in_spiram ? "PSRAM" : "internal SRAM");
     return ESP_OK;
 }
 
@@ -492,7 +492,7 @@ static bool ctx_fill(read_ctx_t *ctx)
                      * 在 ctx_fill 里直接去掉。 */
                     ctx->end += got;
                 } else {
-                    ESP_LOGE(TAG, "esp_partition_read 失败: %s", esp_err_to_name(er));
+                    // ESP_LOGE(TAG, "esp_partition_read 失败: %s", esp_err_to_name(er));
                     got = 0;
                 }
             }
@@ -625,7 +625,7 @@ static bool extract_frame(read_ctx_t *ctx, const uint8_t **out_data, int *out_le
         /* 数据不足，尝试读取更多 */
         if (ctx->eof) return false;
         if (avail >= ctx->capacity) {
-            ESP_LOGW(TAG, "⚠️ 帧超过 %dKB，跳过", ctx->capacity / 1024);
+            // ESP_LOGW(TAG, "⚠️ 帧超过 %dKB，跳过", ctx->capacity / 1024);
             ctx->start += 2;
             continue;
         }
@@ -712,7 +712,7 @@ static bool validate_frame(const uint8_t *data, int len,
 
 static void mjpeg_read_task(void *arg)
 {
-    ESP_LOGI(TAG, "📜 读取任务启动");
+    // ESP_LOGI(TAG, "📜 读取任务启动");
 
     uint32_t skip_count = 0;
     FILE *opened_fp = NULL;
@@ -731,8 +731,8 @@ static void mjpeg_read_task(void *arg)
     }
 
     if (s_preload_buf && s_preload_size > 0) {
-        ESP_LOGI(TAG, "📦 使用 start 阶段预加载 PSRAM（%u KB），播放期不读 SD",
-                 (unsigned)(s_preload_size / 1024));
+        // ESP_LOGI(TAG, "📦 使用 start 阶段预加载 PSRAM（%u KB），播放期不读 SD",
+        //          (unsigned)(s_preload_size / 1024));
         ctx.buf = s_preload_buf;
         ctx.capacity = (int)s_preload_size;
         ctx.start = 0;
@@ -760,17 +760,17 @@ static void mjpeg_read_task(void *arg)
         if (s_cfg.src_type == MJPEG_SRC_PARTITION) {
             ctx.part = (const esp_partition_t *)s_cfg.partition;
             if (!ctx.part || s_cfg.partition_size == 0) {
-                ESP_LOGE(TAG, "❌ PARTITION 源未配置（partition=%p size=%lu）",
-                         s_cfg.partition, (unsigned long)s_cfg.partition_size);
+                // ESP_LOGE(TAG, "❌ PARTITION 源未配置（partition=%p size=%lu）",
+                //          s_cfg.partition, (unsigned long)s_cfg.partition_size);
                 s_running = false;
                 goto exit;
             }
             ctx.part_offset = s_cfg.partition_offset;
             ctx.part_size = s_cfg.partition_size;
             ctx.part_read = 0;
-            ESP_LOGI(TAG, "📦 PARTITION 源: part=%s off=0x%x size=%lu KB",
-                     ctx.part->label, (unsigned)ctx.part_offset,
-                     (unsigned long)(ctx.part_size / 1024));
+            // ESP_LOGI(TAG, "📦 PARTITION 源: part=%s off=0x%x size=%lu KB",
+            //          ctx.part->label, (unsigned)ctx.part_offset,
+            //          (unsigned long)(ctx.part_size / 1024));
         } else {
             /* FILE 源：SD 卡可能刚被上一个任务释放，fopen 可能失败时重试 5 次，每次 200ms */
             for (int open_retry = 0; open_retry < 5; open_retry++) {
@@ -778,11 +778,11 @@ static void mjpeg_read_task(void *arg)
                 if (ctx.fp) {
                     break;
                 }
-                ESP_LOGW(TAG, "SD 卡重试 fopen 失败 %d/5: %s", open_retry + 1, s_cfg.file_path);
+                // ESP_LOGW(TAG, "SD 卡重试 fopen 失败 %d/5: %s", open_retry + 1, s_cfg.file_path);
                 vTaskDelay(pdMS_TO_TICKS(200));
             }
             if (!ctx.fp) {
-                ESP_LOGE(TAG, "❌ 无法打开文件: %s", s_cfg.file_path);
+                // ESP_LOGE(TAG, "❌ 无法打开文件: %s", s_cfg.file_path);
                 s_running = false;
                 goto exit;
             }
@@ -794,7 +794,7 @@ static void mjpeg_read_task(void *arg)
             fseek(ctx.fp, 0, SEEK_END);
             long file_size = ftell(ctx.fp);
             fseek(ctx.fp, 0, SEEK_SET);
-            ESP_LOGI(TAG, "📄 文件大小: %.1f MB", file_size / (1024.0 * 1024.0));
+            // ESP_LOGI(TAG, "📄 文件大小: %.1f MB", file_size / (1024.0 * 1024.0));
         }
 
         read_buf = heap_caps_malloc(READ_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -804,7 +804,7 @@ static void mjpeg_read_task(void *arg)
             read_buf = malloc(READ_BUF_SIZE);
         }
         if (!read_buf) {
-            ESP_LOGE(TAG, "❌ 分配读取缓冲区失败");
+            // ESP_LOGE(TAG, "❌ 分配读取缓冲区失败");
             s_running = false;
             goto exit;
         }
@@ -835,8 +835,8 @@ static void mjpeg_read_task(void *arg)
                                  s_cfg.screen_width, s_cfg.screen_height)) {
                 skip_count++;
                 if (skip_count <= 5 || skip_count % 100 == 0) {
-                    ESP_LOGW(TAG, "🛡️ 帧校验失败 #%lu（帧=%d字节）",
-                             (unsigned long)skip_count, frame_len);
+                    // ESP_LOGW(TAG, "🛡️ 帧校验失败 #%lu（帧=%d字节）",
+                    //          (unsigned long)skip_count, frame_len);
                 }
                 continue;
             }
@@ -856,7 +856,7 @@ static void mjpeg_read_task(void *arg)
 
             if (frame_len > FRAME_BUF_SIZE) {
                 skip_count++;
-                ESP_LOGW(TAG, "⚠️ 帧过大(%dB > %dB)，跳过", frame_len, FRAME_BUF_SIZE);
+                // ESP_LOGW(TAG, "⚠️ 帧过大(%dB > %dB)，跳过", frame_len, FRAME_BUF_SIZE);
                 /* 归还缓冲，避免 free_queue 被耗尽 */
                 msg.len = 0;
                 xQueueSend(s_free_queue, &msg, pdMS_TO_TICKS(100));
@@ -927,7 +927,7 @@ exit:
             free(io_buf);
         }
     }
-    ESP_LOGI(TAG, "📜 读取任务结束 (跳过帧: %lu)", (unsigned long)skip_count);
+    // ESP_LOGI(TAG, "📜 读取任务结束 (跳过帧: %lu)", (unsigned long)skip_count);
     s_read_task = NULL;
     vTaskDelete(NULL);
 }
@@ -938,7 +938,7 @@ exit:
 
 static void mjpeg_decode_task(void *arg)
 {
-    ESP_LOGI(TAG, "decode task start");
+    // ESP_LOGI(TAG, "decode task start");
 
 #if CONFIG_IDF_TARGET_ESP32P4
     jpeg_decode_engine_cfg_t engine_cfg = {
@@ -948,11 +948,11 @@ static void mjpeg_decode_task(void *arg)
     jpeg_decoder_handle_t decoder = NULL;
     esp_err_t ret = jpeg_new_decoder_engine(&engine_cfg, &decoder);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "HW jpeg engine failed: %s", esp_err_to_name(ret));
+        // ESP_LOGE(TAG, "HW jpeg engine failed: %s", esp_err_to_name(ret));
         s_running = false;
         goto exit;
     }
-    ESP_LOGI(TAG, "HW JPEG ready (timeout=%dms)", engine_cfg.timeout_ms);
+    // ESP_LOGI(TAG, "HW JPEG ready (timeout=%dms)", engine_cfg.timeout_ms);
 
     jpeg_decode_cfg_t decode_cfg = {
         .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
@@ -968,11 +968,11 @@ static void mjpeg_decode_task(void *arg)
     sw_dec_cfg.rotate = JPEG_ROTATE_0D;
     jpeg_dec_handle_t sw_dec = NULL;
     if (jpeg_dec_open(&sw_dec_cfg, &sw_dec) != JPEG_ERR_OK || sw_dec == NULL) {
-        ESP_LOGE(TAG, "esp_new_jpeg jpeg_dec_open failed");
+        // ESP_LOGE(TAG, "esp_new_jpeg jpeg_dec_open failed");
         s_running = false;
         goto exit;
     }
-    ESP_LOGI(TAG, "SW JPEG (esp_new_jpeg) ready");
+    // ESP_LOGI(TAG, "SW JPEG (esp_new_jpeg) ready");
     esp_err_t ret = ESP_OK;
 #endif
 
@@ -1010,11 +1010,11 @@ static void mjpeg_decode_task(void *arg)
         if (msg.len == 0) {
             if (frame_count > 0) {
                 int64_t elapsed = esp_timer_get_time() - start_time;
-                ESP_LOGD(TAG, "✅ 播放结束: %lu帧, %.1f fps, %.1f秒, 错误%lu",
-                         (unsigned long)frame_count,
-                         frame_count * 1e6f / elapsed,
-                         elapsed / 1e6f,
-                         (unsigned long)decode_errors);
+                // ESP_LOGD(TAG, "✅ 播放结束: %lu帧, %.1f fps, %.1f秒, 错误%lu",
+                //          (unsigned long)frame_count,
+                //          frame_count * 1e6f / elapsed,
+                //          elapsed / 1e6f,
+                //          (unsigned long)decode_errors);
             }
             frame_count = 0;
             decode_errors = 0;
@@ -1041,14 +1041,14 @@ static void mjpeg_decode_task(void *arg)
             ret = ESP_FAIL;
         } else if ((uint32_t)hdr.width != (uint32_t)s_cfg.screen_width
                    || (uint32_t)hdr.height != (uint32_t)s_cfg.screen_height) {
-            ESP_LOGW(TAG, "JPEG %ux%u != clip %ux%u", (unsigned)hdr.width, (unsigned)hdr.height,
-                     (unsigned)s_cfg.screen_width, (unsigned)s_cfg.screen_height);
+            // ESP_LOGW(TAG, "JPEG %ux%u != clip %ux%u", (unsigned)hdr.width, (unsigned)hdr.height,
+            //          (unsigned)s_cfg.screen_width, (unsigned)s_cfg.screen_height);
             ret = ESP_ERR_INVALID_SIZE;
         } else {
             int inbuf_consumed = jpeg_io.inbuf_len - jpeg_io.inbuf_remain;
             if (inbuf_consumed < 0 || inbuf_consumed > jpeg_io.inbuf_len) {
-                ESP_LOGW(TAG, "jpeg header 游标异常: consumed=%d, in=%d, remain=%d",
-                         inbuf_consumed, jpeg_io.inbuf_len, jpeg_io.inbuf_remain);
+                // ESP_LOGW(TAG, "jpeg header 游标异常: consumed=%d, in=%d, remain=%d",
+                //          inbuf_consumed, jpeg_io.inbuf_len, jpeg_io.inbuf_remain);
                 ret = ESP_FAIL;
                 goto sw_decode_done;
             }
@@ -1079,9 +1079,9 @@ sw_decode_done:
             decode_errors++;
             consecutive_errors++;
             if (decode_errors <= 5 || decode_errors % 50 == 0) {
-                ESP_LOGW(TAG, "decode fail #%lu (ret=%s, decoded=%lu expect=%lu, jpeg=%d)",
-                         (unsigned long)decode_errors, esp_err_to_name(ret),
-                         (unsigned long)decoded_size, (unsigned long)expect_decoded, msg.len);
+                // ESP_LOGW(TAG, "decode fail #%lu (ret=%s, decoded=%lu expect=%lu, jpeg=%d)",
+                //          (unsigned long)decode_errors, esp_err_to_name(ret),
+                //          (unsigned long)decoded_size, (unsigned long)expect_decoded, msg.len);
             }
 #if CONFIG_IDF_TARGET_ESP32P4
             jpeg_del_decoder_engine(decoder);
@@ -1089,7 +1089,7 @@ sw_decode_done:
             vTaskDelay(pdMS_TO_TICKS(5));
             ret = jpeg_new_decoder_engine(&engine_cfg, &decoder);
             if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "reopen HW jpeg failed");
+                // ESP_LOGE(TAG, "reopen HW jpeg failed");
                 break;
             }
 #else
@@ -1099,12 +1099,12 @@ sw_decode_done:
             }
             vTaskDelay(pdMS_TO_TICKS(5));
             if (jpeg_dec_open(&sw_dec_cfg, &sw_dec) != JPEG_ERR_OK || sw_dec == NULL) {
-                ESP_LOGE(TAG, "reopen SW jpeg failed");
+                // ESP_LOGE(TAG, "reopen SW jpeg failed");
                 break;
             }
 #endif
             if (consecutive_errors >= 20) {
-                ESP_LOGE(TAG, "too many decode errors, stop");
+                // ESP_LOGE(TAG, "too many decode errors, stop");
                 s_running = false;
                 break;
             }
@@ -1114,8 +1114,8 @@ sw_decode_done:
 
         if (!first_frame_logged_once) {
             const char *mode = s_panel_roi_blit ? "紧密缓冲+draw_bitmap" : (s_embed_lvgl ? "LVGL画布" : "DPI 帧缓冲");
-            ESP_LOGI(TAG, "🎬 首帧: JPEG=%d字节, RGB565=%lu字节 (%s)",
-                     msg.len, (unsigned long)decoded_size, mode);
+            // ESP_LOGI(TAG, "🎬 首帧: JPEG=%d字节, RGB565=%lu字节 (%s)",
+            //          msg.len, (unsigned long)decoded_size, mode);
             first_frame_logged_once = true;
         }
 
@@ -1169,8 +1169,8 @@ sw_decode_done:
                 esp_err_t blit = mjpeg_panel_draw_bitmap_banded(s_cfg.panel, x1, y1, w, h, s_cfg.fb[fb_idx]);
                 if (blit != ESP_OK) {
                     consecutive_draw_fail++;
-                    ESP_LOGW(TAG, "⚠️ ROI draw失败: %s (连续%d次)",
-                             esp_err_to_name(blit), consecutive_draw_fail);
+                    // ESP_LOGW(TAG, "⚠️ ROI draw失败: %s (连续%d次)",
+                    //          esp_err_to_name(blit), consecutive_draw_fail);
                     /* 整帧放弃，让 WiFi/UDP 加密握手抢占的 SRAM 恢复
                      * 连续失败累积后适度延长退避（最多 200ms） */
                     lvgl_port_unlock();
@@ -1199,10 +1199,10 @@ sw_decode_done:
 #if MJPEG_PROFILE_FIRST_FRAMES > 0
         if (frame_count <= MJPEG_PROFILE_FIRST_FRAMES) {
             const int64_t t_after_blit = esp_timer_get_time();
-            ESP_LOGI(TAG, "⏱ prof #%lu: jpeg_decode=%lldus blit=%lldus",
-                     (unsigned long)frame_count,
-                     (long long)(t_after_decode - t_start),
-                     (long long)(t_after_blit - t_after_decode));
+            // ESP_LOGI(TAG, "⏱ prof #%lu: jpeg_decode=%lldus blit=%lldus",
+            //          (unsigned long)frame_count,
+            //          (long long)(t_after_decode - t_start),
+            //          (long long)(t_after_blit - t_after_decode));
         }
 #endif
 
@@ -1211,10 +1211,10 @@ sw_decode_done:
             if (elapsed < 1) {
                 elapsed = 1;
             }
-            ESP_LOGI(TAG, "📊 %lu帧, %.1f fps, 错误%lu",
-                     (unsigned long)frame_count,
-                     (float)frame_count * 1e6f / (float)elapsed,
-                     (unsigned long)decode_errors);
+            // ESP_LOGI(TAG, "📊 %lu帧, %.1f fps, 错误%lu",
+            //          (unsigned long)frame_count,
+            //          (float)frame_count * 1e6f / (float)elapsed,
+            //          (unsigned long)decode_errors);
         }
 
         /* 帧率控制 */
@@ -1224,7 +1224,7 @@ sw_decode_done:
         int64_t t_end = esp_timer_get_time();
         int64_t frame_us = t_end - t_start;
         if (frame_us > MJPEG_SLOW_FRAME_US && frame_count < 200) {
-            ESP_LOGW(TAG, "🐢 慢帧 #%lu: total=%lldus (t_start→blit→end)", (unsigned long)frame_count, (long long)frame_us);
+            // ESP_LOGW(TAG, "🐢 慢帧 #%lu: total=%lldus (t_start→blit→end)", (unsigned long)frame_count, (long long)frame_us);
         }
     }
 
@@ -1238,7 +1238,7 @@ exit:
         jpeg_dec_close(sw_dec);
     }
 #endif
-    ESP_LOGI(TAG, "decode task exit");
+    // ESP_LOGI(TAG, "decode task exit");
     s_decode_task = NULL;
     vTaskDelete(NULL);
 }
@@ -1279,11 +1279,11 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     /* 若 stop 已调用但任务还在退出（s_running=false 但任务句柄仍非空），
      * 同步等待任务完全退出后再判断，避免 start 撞到半退出的任务。 */
     if (!s_running && (s_read_task || s_decode_task)) {
-        ESP_LOGI(TAG, "等待上一轮任务退出...");
+        // ESP_LOGI(TAG, "等待上一轮任务退出...");
         TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
         while (s_read_task || s_decode_task) {
             if (xTaskGetTickCount() > deadline) {
-                ESP_LOGW(TAG, "⚠️ 等待任务退出超时，强制清理");
+                // ESP_LOGW(TAG, "⚠️ 等待任务退出超时，强制清理");
                 if (s_read_task) { vTaskDelete(s_read_task); s_read_task = NULL; }
                 if (s_decode_task) { vTaskDelete(s_decode_task); s_decode_task = NULL; }
                 break;
@@ -1309,10 +1309,10 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
             same = (strncmp(s_last_partition_key, key, sizeof(s_last_partition_key)) == 0);
         }
         if (same) {
-            ESP_LOGI(TAG, "🔄 同一文件已播放中，跳过重启");
+            // ESP_LOGI(TAG, "🔄 同一文件已播放中，跳过重启");
             return ESP_OK;
         }
-        ESP_LOGW(TAG, "⚠️ 播放器已在运行（不同文件）");
+        // ESP_LOGW(TAG, "⚠️ 播放器已在运行（不同文件）");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1333,9 +1333,9 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
 #endif
 #endif
     }
-    ESP_LOGI(TAG, "MJPEG颜色链路: panel_roi=%d lvgl=%d RGB565_BE解码=%d RGB565字节矫正=%d",
-             s_panel_roi_blit ? 1 : 0, s_embed_lvgl ? 1 : 0,
-             s_mjpeg_sw_decode_rgb565_be ? 1 : 0, s_mjpeg_swap_rgb565_bytes ? 1 : 0);
+    // ESP_LOGI(TAG, "MJPEG颜色链路: panel_roi=%d lvgl=%d RGB565_BE解码=%d RGB565字节矫正=%d",
+//          s_panel_roi_blit ? 1 : 0, s_embed_lvgl ? 1 : 0,
+//          s_mjpeg_sw_decode_rgb565_be ? 1 : 0, s_mjpeg_swap_rgb565_bytes ? 1 : 0);
 
     if (s_embed_lvgl || s_panel_roi_blit) {
         const size_t sz = (size_t)s_cfg.screen_width * (size_t)s_cfg.screen_height * sizeof(uint16_t);
@@ -1352,7 +1352,7 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
                     s_cfg.fb[i] = heap_caps_aligned_alloc(64, sz_al, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
                 }
                 if (!s_cfg.fb[i]) {
-                    ESP_LOGE(TAG, "❌ 分配解码缓冲 %d 失败", i);
+                    // ESP_LOGE(TAG, "❌ 分配解码缓冲 %d 失败", i);
                     for (int j = 0; j < i; j++) {
                         heap_caps_free(s_cfg.fb[j]);
                         s_cfg.fb[j] = NULL;
@@ -1369,21 +1369,21 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
         }
         if (s_cfg.fb[0] && need_fb_alloc) {
 #if MJPEG_HAVE_ESP_PTR_EXTERNAL_RAM
-            ESP_LOGI(TAG, "解码输出缓冲[0]: %s",
-                     esp_ptr_external_ram(s_cfg.fb[0]) ? "PSRAM" : "内部SRAM(优先)");
+            // ESP_LOGI(TAG, "解码输出缓冲[0]: %s",
+            //          esp_ptr_external_ram(s_cfg.fb[0]) ? "PSRAM" : "内部SRAM(优先)");
 #else
-            ESP_LOGI(TAG, "解码输出缓冲[0]: 已分配（优先内部SRAM）");
+            // ESP_LOGI(TAG, "解码输出缓冲[0]: 已分配（优先内部SRAM）");
 #endif
         }
         if (s_embed_lvgl) {
             lv_obj_t *cv = (lv_obj_t *)s_cfg.lv_video_canvas;
             lv_canvas_set_buffer(cv, s_cfg.fb[0], s_cfg.screen_width, s_cfg.screen_height, LV_COLOR_FORMAT_RGB565);
-            ESP_LOGI(TAG, "💾 LVGL 画布模式: 解码缓冲 %dx%d ×2", s_cfg.screen_width, s_cfg.screen_height);
+            // ESP_LOGI(TAG, "💾 LVGL 画布模式: 解码缓冲 %dx%d ×2", s_cfg.screen_width, s_cfg.screen_height);
         } else if (need_fb_alloc) {
             /* ROI tile 也只在首次分配（黑条 + 竖条） */
             esp_err_t tile_ret = mjpeg_alloc_roi_tiles();
             if (tile_ret != ESP_OK) {
-                ESP_LOGE(TAG, "❌ 分配 ROI tiles 失败: %s", esp_err_to_name(tile_ret));
+                // ESP_LOGE(TAG, "❌ 分配 ROI tiles 失败: %s", esp_err_to_name(tile_ret));
                 if (s_cfg.fb[0]) {
                     heap_caps_free(s_cfg.fb[0]);
                     s_cfg.fb[0] = NULL;
@@ -1395,15 +1395,15 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
                 s_output_fb_shared = false;
                 return tile_ret;
             }
-            ESP_LOGI(TAG, "💾 面板 ROI: %dx%d @ (%u,%u) draw_bitmap（短互斥，单缓冲 %dx%d）",
-                     s_cfg.screen_width, s_cfg.screen_height,
-                     (unsigned)s_cfg.panel_roi_x, (unsigned)s_cfg.panel_roi_y,
-                     s_cfg.screen_width, s_cfg.screen_height);
+            // ESP_LOGI(TAG, "💾 面板 ROI: %dx%d @ (%u,%u) draw_bitmap（短互斥，单缓冲 %dx%d）",
+            //          s_cfg.screen_width, s_cfg.screen_height,
+            //          (unsigned)s_cfg.panel_roi_x, (unsigned)s_cfg.panel_roi_y,
+            //          s_cfg.screen_width, s_cfg.screen_height);
         }
     } else if (!s_cfg.fb[0] || !s_cfg.fb[1]) {
         esp_err_t gf = mjpeg_get_frame_buffers(s_cfg.panel, &s_cfg.fb[0], &s_cfg.fb[1]);
         if (gf != ESP_OK || !s_cfg.fb[0] || !s_cfg.fb[1]) {
-            ESP_LOGE(TAG, "❌ 获取 DPI 帧缓冲失败: %s", esp_err_to_name(gf));
+            // ESP_LOGE(TAG, "❌ 获取 DPI 帧缓冲失败: %s", esp_err_to_name(gf));
             return gf != ESP_OK ? gf : ESP_ERR_INVALID_STATE;
         }
     }
@@ -1428,7 +1428,7 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
                     if (er == ESP_OK) {
                         sz = s_cfg.partition_size;
                     } else {
-                        ESP_LOGE(TAG, "PARTITION 预加载读失败: %s", esp_err_to_name(er));
+                        // ESP_LOGE(TAG, "PARTITION 预加载读失败: %s", esp_err_to_name(er));
                         heap_caps_free(pb);
                         pb = NULL;
                     }
@@ -1472,7 +1472,7 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
                                 s_preload_is_malloc = false;
                             }
                         } else {
-                            ESP_LOGW(TAG, "⚠️ 预加载分配失败，使用流式读取");
+                            // ESP_LOGW(TAG, "⚠️ 预加载分配失败，使用流式读取");
                         }
                     }
                 }
@@ -1482,9 +1482,9 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
         if (pb && sz > 0) {
             s_preload_buf = pb;
             s_preload_size = sz;
-            ESP_LOGI(TAG, "📦 预加载 %u KB（%s），读任务从内存取帧",
-                     (unsigned)(sz / 1024),
-                     s_preload_is_malloc ? "内部堆" : "PSRAM");
+            // ESP_LOGI(TAG, "📦 预加载 %u KB（%s），读任务从内存取帧",
+            //          (unsigned)(sz / 1024),
+            //          s_preload_is_malloc ? "内部堆" : "PSRAM");
         }
     }
 #endif
@@ -1514,7 +1514,7 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
             size_t actual = FRAME_BUF_SIZE;
 #endif
             if (!s_dma_bufs[i]) {
-                ESP_LOGE(TAG, "frame buf %d alloc failed", i);
+                // ESP_LOGE(TAG, "frame buf %d alloc failed", i);
                 mjpeg_release_preload_buf();
                 s_running = false;
                 return ESP_ERR_NO_MEM;
@@ -1526,15 +1526,15 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
         frame_msg_t msg = { .buf = s_dma_bufs[i], .len = 0 };
         xQueueSend(s_free_queue, &msg, 0);
         if (need_dma_alloc) {
-            ESP_LOGI(TAG, "frame buf %d: %uKB", i, (unsigned)(FRAME_BUF_SIZE / 1024));
+            // ESP_LOGI(TAG, "frame buf %d: %uKB", i, (unsigned)(FRAME_BUF_SIZE / 1024));
         }
     }
 
     if (!s_embed_lvgl && !s_panel_roi_blit) {
         uint32_t panel_fb = (uint32_t)MJPEG_PANEL_WIDTH * (uint32_t)MJPEG_PANEL_HEIGHT * sizeof(uint16_t);
-        ESP_LOGI(TAG, "💾 异步流水线: 读取=%dKB, DMA=%dKB×%d, 输出=DPI FB×2(%luKB×2, %dx%d)",
-                 READ_BUF_SIZE / 1024, FRAME_BUF_SIZE / 1024, NUM_DMA_BUFS,
-                 (unsigned long)(panel_fb / 1024), MJPEG_PANEL_WIDTH, MJPEG_PANEL_HEIGHT);
+        // ESP_LOGI(TAG, "💾 异步流水线: 读取=%dKB, DMA=%dKB×%d, 输出=DPI FB×2(%luKB×2, %dx%d)",
+        //          READ_BUF_SIZE / 1024, FRAME_BUF_SIZE / 1024, NUM_DMA_BUFS,
+        //          (unsigned long)(panel_fb / 1024), MJPEG_PANEL_WIDTH, MJPEG_PANEL_HEIGHT);
     }
 
     /* 创建双任务 */
@@ -1543,7 +1543,7 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     ret = xTaskCreatePinnedToCore(mjpeg_read_task, "mjpeg_read", 8192, NULL, MJPEG_READ_TASK_PRIORITY, &s_read_task,
                                   MJPEG_READ_TASK_CORE_ID);
     if (ret != pdPASS) {
-        ESP_LOGE(TAG, "❌ 创建读取任务失败");
+        // ESP_LOGE(TAG, "❌ 创建读取任务失败");
         mjpeg_release_preload_buf();
         s_running = false;
         return ESP_ERR_NO_MEM;
@@ -1552,7 +1552,7 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     ret = xTaskCreatePinnedToCore(mjpeg_decode_task, "mjpeg_dec", 8192, NULL, MJPEG_DECODE_TASK_PRIORITY,
                                   &s_decode_task, MJPEG_DECODE_TASK_CORE_ID);
     if (ret != pdPASS) {
-        ESP_LOGE(TAG, "❌ 创建解码任务失败");
+        // ESP_LOGE(TAG, "❌ 创建解码任务失败");
         mjpeg_release_preload_buf();
         s_running = false;
         return ESP_ERR_NO_MEM;
@@ -1576,7 +1576,7 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
         s_last_partition_key[0] = '\0';
     }
 
-    ESP_LOGI(TAG, "🚀 异步流水线已启动");
+    // ESP_LOGI(TAG, "🚀 异步流水线已启动");
     return ESP_OK;
 }
 
@@ -1646,7 +1646,7 @@ static void mjpeg_wait_read_task_exit(void)
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
     while (s_read_task) {
         if (xTaskGetTickCount() > deadline) {
-            ESP_LOGW(TAG, "⚠️ read_task 退出超时，强制删除");
+            // ESP_LOGW(TAG, "⚠️ read_task 退出超时，强制删除");
             if (s_read_task) {
                 vTaskDelete(s_read_task);
                 s_read_task = NULL;
@@ -1668,7 +1668,7 @@ static void mjpeg_wait_decode_task_exit(void)
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(200);
     while (s_decode_task) {
         if (xTaskGetTickCount() > deadline) {
-            ESP_LOGW(TAG, "⚠️ decode_task 退出超时，强制 vTaskDelete");
+            // ESP_LOGW(TAG, "⚠️ decode_task 退出超时，强制 vTaskDelete");
             if (s_decode_task) {
                 vTaskDelete(s_decode_task);
                 s_decode_task = NULL;
@@ -1703,7 +1703,7 @@ void mjpeg_player_stop_async(void)
         }
         return;
     }
-    ESP_LOGI(TAG, "⏹️ 正在停止播放（异步）...");
+    // ESP_LOGI(TAG, "⏹️ 正在停止播放（异步）...");
     s_running = false;
 
     /* 同步等待 read_task 退出（释放大块 PSRAM），decode_task 异步退出。 */
@@ -1717,7 +1717,7 @@ void mjpeg_player_stop_async(void)
     s_last_partition_key[0] = '\0';
     s_last_src_type = MJPEG_SRC_FILE;
 
-    ESP_LOGI(TAG, "💾 播放器异步停止中（read_task 已退，decode_task 自退，下次 start 时收尾）");
+    // ESP_LOGI(TAG, "💾 播放器异步停止中（read_task 已退，decode_task 自退，下次 start 时收尾）");
 }
 
 void mjpeg_player_stop(void)
@@ -1731,7 +1731,7 @@ void mjpeg_player_stop(void)
         }
         return;
     }
-    ESP_LOGI(TAG, "⏹️ 正在停止播放...");
+    // ESP_LOGI(TAG, "⏹️ 正在停止播放...");
     s_running = false;
 
     /* 同步等待两个任务退出。加超时避免 WiFi/SD 卡拥堵时永久死等。 */
@@ -1740,7 +1740,7 @@ void mjpeg_player_stop(void)
 
     mjpeg_release_player_resources();
 
-    ESP_LOGI(TAG, "💾 播放器资源已释放（DMA/fb 缓冲被复用，不立即释放）");
+    // ESP_LOGI(TAG, "💾 播放器资源已释放（DMA/fb 缓冲被复用，不立即释放）");
 }
 
 bool mjpeg_player_is_running(void)

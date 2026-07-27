@@ -18,6 +18,11 @@
 #include <src/misc/cache/lv_cache.h>
 
 #include "board.h"
+#include <esp_timer.h>
+
+extern "C" {
+#include "mjpeg_player.h"
+}
 
 #define TAG "FanLcd20Display"
 
@@ -114,26 +119,44 @@ public:
     }
 
     virtual void SetEmotion(const char* emotion) override {
+        /* SetEmotion 用于系统开机阶段的表情（microchip_ai / download / circle_xmark 等）
+         * 以及升级提示、错误告警等系统级状态。系统就绪（s_system_ready_=true）后，
+         * 待机画面完全交给 SetRoleAnimation 接管，SetEmotion 直接 noop。
+         * 这样状态机切换不会触发"先 stop MJPEG 再 start 同一路径"的诡异闪烁。 */
+        if (s_system_ready_) {
+            ESP_LOGD(TAG, "SetEmotion(%s) ignored: system ready, role animation owns the display", emotion ? emotion : "<null>");
+            return;
+        }
+
         // Stop any running GIF animation
         if (gif_controller_) {
             DisplayLockGuard lock(this);
             gif_controller_->Stop();
             gif_controller_.reset();
         }
-        
+
+        // 如果角色动画（MJPEG）正在播放，关闭它让位给 SetEmotion 的图标。
+        // 注意：保留 current_clip_name_ 不清空，这样 SetRoleAnimation 进来时
+        // 路径相同能直接 skip（表情包只显示几秒，下一次状态切换大概率还是同一文件）。
+        // 异步 stop：避免长同步等待拖慢表情图标显示。
+        if (mjpeg_player_is_running()) {
+            mjpeg_player_stop_async();
+        }
+
         if (emoji_image_ == nullptr) {
             return;
         }
 
+        DisplayLockGuard lock(this);
         auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
         auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
         if (image == nullptr) {
             image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage("neutral") : nullptr;
         }
         if (image == nullptr) {
+            StopMjpegIfRunning();
             const char* utf8 = font_awesome_get_utf8(emotion);
             if (utf8 != nullptr && emoji_label_ != nullptr) {
-                DisplayLockGuard lock(this);
                 lv_label_set_text(emoji_label_, utf8);
                 lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
@@ -141,21 +164,21 @@ public:
             return;
         }
 
-        DisplayLockGuard lock(this);
+        StopMjpegIfRunning();
         if (image->IsGif()) {
             // Create new GIF controller
             gif_controller_ = std::make_unique<LvglGif>(image->image_dsc());
-            
+
             if (gif_controller_->IsLoaded()) {
                 // Set up frame update callback
                 gif_controller_->SetFrameCallback([this]() {
                     lv_image_set_src(emoji_image_, gif_controller_->image_dsc());
                 });
-                
+
                 // Set initial frame and start animation
                 lv_image_set_src(emoji_image_, gif_controller_->image_dsc());
                 gif_controller_->Start();
-                
+
                 // Show GIF, hide others
                 lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
@@ -170,7 +193,270 @@ public:
         }
     }
 
+    void SetSystemReady() override {
+        s_system_ready_ = true;
+        ESP_LOGI(TAG, "MJPEG ready: system is ready, ScanEmotionClips");
+        ScanEmotionClips();
+    }
+
+    /* 角色状态切换（idle / listen / speak），走 flash 分区缓存。
+     * 注意：即使没有对应的 MJPEG 动画文件，此函数仍会隐藏表情图标，
+     * 状态栏更新由 application.cc 调用 SetStatus 负责，两者互不干扰。 */
+    void SetRoleAnimation(const char* state) override {
+        if (!state) {
+            return;
+        }
+
+        {
+            DisplayLockGuard lock(this);
+            lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+        }
+
+        if (!s_system_ready_) {
+            return;
+        }
+
+        const char* clip = MapRoleStateToClip(state);
+        const ClipLoc clip_loc = FindRoleAnimation(clip);
+        if (!clip_loc.valid()) {
+            ESP_LOGI(TAG, "SetRoleAnimation: no available MJPEG for state=%s, skip", clip);
+            return;
+        }
+
+        /* 单一真相源：文件名 + offset + size 联合比较。
+         * 注意 current_clip_name_ 在 mjpeg_player_start 成功后才更新，确保永远反映"已播放"的状态。 */
+        if (!current_clip_name_.empty() && clip_loc.name == current_clip_name_) {
+            if (mjpeg_player_is_running()) {
+                ESP_LOGI(TAG, "SetRoleAnimation: same clip %s, skip (state=%s)", clip_loc.name.c_str(), state ? state : "null");
+                return;
+            }
+        }
+
+        if (mjpeg_player_is_running()) {
+            if (clip_loc.name != current_clip_name_) {
+                ESP_LOGI(TAG, "SetRoleAnimation: clip change %s -> %s, stop first (async)",
+                         current_clip_name_.c_str(), clip_loc.name.c_str());
+                mjpeg_player_stop_async();
+            }
+        }
+
+        if (!StartMjpegEmotion(clip_loc)) {
+            ESP_LOGW(TAG, "SetRoleAnimation: StartMjpegEmotion failed for state=%s", state);
+            return;
+        }
+
+        current_clip_name_ = clip_loc.name;
+        ESP_LOGI(TAG, "SetRoleAnimation: playing %s (state=%s)", clip_loc.name.c_str(), state);
+    }
+
+    /* EmotionSync 下载/重试完成后调用：重新扫描并尝试启动 idle。 */
+    void RescanAndTryIdle() {
+        s_clip_cache.scanned = false;
+        s_clip_cache = ClipCache{};
+        ScanEmotionClips();
+        if (!mjpeg_player_is_running() && s_clip_cache.idle.valid()) {
+            SetRoleAnimation("idle");
+        }
+    }
+
 private:
+    inline static bool s_system_ready_ = false;
+
+    static constexpr uint16_t kMjpegVideoWidth = 240;
+    static constexpr uint16_t kMjpegVideoHeight = 290;
+    static constexpr uint8_t kMjpegTargetFps = 30;
+
+    /* 当前播放的 clip 名，用于去重判断。 */
+    std::string current_clip_name_;
+
+    /* ── ClipCache：flash 分区资产缓存 ─────────────────────────────── */
+
+    /* flash 资产位置：文件表里的文件名 + offset + size */
+    struct ClipLoc {
+        std::string name;
+        uint32_t offset = 0;
+        uint32_t size = 0;
+        bool valid() const { return !name.empty() && size > 0; }
+    };
+
+    /* ClipCache 只存 user 层 3 个 slot + 唯一的 default-idle。
+     * user 层有任意文件时 FindRoleAnimation 永不 fallback 到 default 层。 */
+    struct ClipCache {
+        bool scanned = false;
+        ClipLoc idle;           /* user idle-240x290.mjpeg */
+        ClipLoc listen;         /* user listen-240x290.mjpeg */
+        ClipLoc speak;          /* user speak-240x290.mjpeg */
+        ClipLoc default_clip;    /* default idle-240x290.mjpeg（只有 user 层全空时才用） */
+    };
+    static ClipCache s_clip_cache;
+
+    /* 把 clip name + 分辨率组合成 flash 资产名。 */
+    static void FillClipName(char* out, size_t out_size, const char* name) {
+        snprintf(out, out_size, "%s-%ux%u.mjpeg", name,
+                 (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
+    }
+
+    /* 启动时一次扫描 user 层 3 个 + default 层唯一的 default-idle。
+     * user 层有任意文件时 FindRoleAnimation 永不 fallback 到 default 层。 */
+    static void ScanEmotionClips() {
+        if (s_clip_cache.scanned) return;
+        s_clip_cache.scanned = true;
+
+        if (emotion_partition_storage_get_partition() == NULL) {
+            esp_err_t r = emotion_partition_storage_init();
+            if (r != ESP_OK) {
+                ESP_LOGW(TAG, "emotion_partition_storage_init 失败: %s", esp_err_to_name(r));
+                return;
+            }
+        }
+
+        auto try_find = [](const char* asset_name) -> ClipLoc {
+            ClipLoc loc;
+            if (emotion_partition_storage_find(asset_name, &loc.offset, &loc.size)) {
+                loc.name = asset_name;
+            }
+            return loc;
+        };
+
+        /* user 层 */
+        const char* user_names[3] = { "idle", "listen", "speak" };
+        for (int i = 0; i < 3; i++) {
+            char n[48];
+            FillClipName(n, sizeof(n), user_names[i]);
+            ClipLoc loc = try_find(n);
+            if (loc.valid()) {
+                if (i == 0) s_clip_cache.idle = loc;
+                else if (i == 1) s_clip_cache.listen = loc;
+                else s_clip_cache.speak = loc;
+            }
+        }
+
+        /* default 层：只扫 default-idle */
+        char dn[48];
+        FillClipName(dn, sizeof(dn), "default-idle");
+        ClipLoc dloc = try_find(dn);
+        if (dloc.valid()) s_clip_cache.default_clip = dloc;
+
+        ESP_LOGI(TAG, "ClipCache: idle=%s listen=%s speak=%s default_clip=%s",
+                 s_clip_cache.idle.name.c_str(), s_clip_cache.listen.name.c_str(),
+                 s_clip_cache.speak.name.c_str(), s_clip_cache.default_clip.name.c_str());
+    }
+
+    static const char* MapRoleStateToClip(const char* state) {
+        if (state == nullptr) {
+            return "idle";
+        }
+        if (strcmp(state, "idle") == 0 ||
+            strcmp(state, "listen") == 0 ||
+            strcmp(state, "speak") == 0) {
+            return state;
+        }
+        return "idle";
+    }
+
+    /* 完全走缓存。
+     * 规则：
+     *   - user 层有任意文件 → 只在 user 层找，不 fallback 到 default
+     *   - listen → user listen → user idle → 空
+     *   - speak  → user speak → user idle → 空
+     *   - idle   → user idle → 空
+     *   - user 层全空 → fallback 到 default_idle
+     */
+    static ClipLoc FindRoleAnimation(const char* state) {
+        if (!s_clip_cache.scanned) {
+            ScanEmotionClips();
+        }
+        const bool user_has_any = s_clip_cache.idle.valid()
+                                  || s_clip_cache.listen.valid()
+                                  || s_clip_cache.speak.valid();
+
+        if (user_has_any) {
+            if (state && strcmp(state, "listen") == 0) {
+                if (s_clip_cache.listen.valid()) return s_clip_cache.listen;
+                if (s_clip_cache.idle.valid())   return s_clip_cache.idle;
+                return {};
+            }
+            if (state && strcmp(state, "speak") == 0) {
+                if (s_clip_cache.speak.valid()) return s_clip_cache.speak;
+                if (s_clip_cache.idle.valid())  return s_clip_cache.idle;
+                return {};
+            }
+            /* idle */
+            return s_clip_cache.idle;
+        }
+
+        /* user 层全空：fallback 到 default_idle */
+        return s_clip_cache.default_clip;
+    }
+
+    bool StartMjpegEmotion(const ClipLoc& loc_in) {
+        if (!s_system_ready_) {
+            ESP_LOGW(TAG, "MJPEG跳过：系统未就绪");
+            return false;
+        }
+        if (!loc_in.valid()) {
+            ESP_LOGW(TAG, "MJPEG跳过：loc 无效");
+            return false;
+        }
+        ClipLoc loc = loc_in;
+
+        /* 同一文件已播放中？直接跳过。 */
+        if (loc.name == current_clip_name_ && mjpeg_player_is_running()) {
+            ESP_LOGI(TAG, "StartMjpegEmotion: same clip %s, skip (already running)", loc.name.c_str());
+            return true;
+        }
+        if (loc.name != current_clip_name_ && mjpeg_player_is_running()) {
+            ESP_LOGI(TAG, "StartMjpegEmotion: clip change %s -> %s, stop first (async)",
+                     current_clip_name_.c_str(), loc.name.c_str());
+            mjpeg_player_stop_async();
+        }
+
+        int rx = (width_ - static_cast<int>(kMjpegVideoWidth)) / 2;
+        int ry = 0;
+        if (rx < 0) rx = 0;
+        if (ry < 0) ry = 0;
+
+        mjpeg_player_cfg_t cfg = {};
+        cfg.src_type = MJPEG_SRC_PARTITION;
+        cfg.partition = emotion_partition_storage_get_partition();
+        cfg.partition_offset = loc.offset;
+        cfg.partition_size = loc.size;
+        cfg.file_path = nullptr;
+        cfg.panel = panel_;
+        cfg.fb[0] = nullptr;
+        cfg.fb[1] = nullptr;
+        cfg.screen_width = kMjpegVideoWidth;
+        cfg.screen_height = kMjpegVideoHeight;
+        cfg.panel_width = static_cast<uint16_t>(width_);
+        cfg.panel_height = static_cast<uint16_t>(height_);
+        cfg.target_fps = kMjpegTargetFps;
+        cfg.loop = true;
+        cfg.fb_stride = 0;
+        cfg.fb_size = 0;
+        cfg.lv_video_canvas = nullptr;
+        cfg.panel_blit_roi = true;
+        cfg.panel_roi_x = static_cast<uint16_t>(rx);
+        cfg.panel_roi_y = static_cast<uint16_t>(ry);
+
+        const esp_err_t ret = mjpeg_player_start(&cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "MJPEG启动失败（%s）：%s", loc.name.c_str(), esp_err_to_name(ret));
+            current_clip_name_.clear();
+            return false;
+        }
+
+        ESP_LOGI(TAG, "MJPEG表情播放：%s", loc.name.c_str());
+        return true;
+    }
+
+    void StopMjpegIfRunning() {
+        if (mjpeg_player_is_running()) {
+            mjpeg_player_stop();
+        }
+        /* 不清 current_clip_name_：保留让 SetRoleAnimation 去重判断更准确 */
+    }
+
     void SetupUI() {
         DisplayLockGuard lock(this);
         LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
@@ -215,60 +501,21 @@ private:
         lv_obj_align(preview_image_, LV_ALIGN_CENTER, 0, 0);
         lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
 
-        /* Layer 1: Top bar - for status icons */
-        /**top_bar_ = lv_obj_create(screen);
-        lv_obj_set_size(top_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(top_bar_, 0, 0);
-        lv_obj_set_style_bg_opa(top_bar_, LV_OPA_50, 0);  // 50% opacity background
-        lv_obj_set_style_bg_color(top_bar_, lvgl_theme->background_color(), 0);
-        lv_obj_set_style_border_width(top_bar_, 0, 0);
-        lv_obj_set_style_pad_all(top_bar_, 0, 0);
-        lv_obj_set_style_pad_top(top_bar_, lvgl_theme->spacing(2), 0);
-        lv_obj_set_style_pad_bottom(top_bar_, lvgl_theme->spacing(2), 0);
-        lv_obj_set_style_pad_left(top_bar_, lvgl_theme->spacing(4), 0);
-        lv_obj_set_style_pad_right(top_bar_, lvgl_theme->spacing(4), 0);
-        lv_obj_set_flex_flow(top_bar_, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(top_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_scrollbar_mode(top_bar_, LV_SCROLLBAR_MODE_OFF);
-        lv_obj_align(top_bar_, LV_ALIGN_TOP_MID, 0, 0);
-
-        // Left icon
-        network_label_ = lv_label_create(top_bar_);
-        lv_label_set_text(network_label_, "");
-        lv_obj_set_style_text_font(network_label_, icon_font, 0);
-        lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
-
-        // Right icons container
-        lv_obj_t* right_icons = lv_obj_create(top_bar_);
-        lv_obj_set_size(right_icons, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-        lv_obj_set_style_bg_opa(right_icons, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(right_icons, 0, 0);
-        lv_obj_set_style_pad_all(right_icons, 0, 0);
-        lv_obj_set_flex_flow(right_icons, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(right_icons, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);**/
-
         // Left icon
         network_label_ = lv_label_create(screen);
         lv_label_set_text(network_label_, "");
-        // 保留原字体、文字颜色样式
         lv_obj_set_style_text_font(network_label_, icon_font, 0);
         lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
-        // 对齐：顶部左侧，匹配原top_bar_的左内边距+垂直居中
-        // x偏移=原top_bar_的left padding（spacing(4)），y偏移=垂直居中（top_bar_的上下padding均值）
         lv_obj_align(network_label_, LV_ALIGN_TOP_LEFT, lvgl_theme->spacing(4), lvgl_theme->spacing(2));
 
         // Right icons container
         lv_obj_t* right_icons = lv_obj_create(screen);
-        // 保留原right_icons的样式（透明背景、无边框、无内边距）
         lv_obj_set_size(right_icons, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
         lv_obj_set_style_bg_opa(right_icons, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(right_icons, 0, 0);
         lv_obj_set_style_pad_all(right_icons, 0, 0);
-        // 保留原flex布局（横向排列、右对齐、垂直居中）
         lv_obj_set_flex_flow(right_icons, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(right_icons, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        // 对齐：顶部右侧，匹配原top_bar_的右内边距+垂直居中
-        // x偏移=-原top_bar_的right padding（spacing(4)），y偏移和network_label_一致
         lv_obj_align(right_icons, LV_ALIGN_TOP_RIGHT, -lvgl_theme->spacing(4), lvgl_theme->spacing(2));
 
         mute_label_ = lv_label_create(right_icons);
@@ -286,14 +533,14 @@ private:
         status_bar_ = lv_obj_create(screen);
         lv_obj_set_size(status_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
         lv_obj_set_style_radius(status_bar_, 0, 0);
-        lv_obj_set_style_bg_opa(status_bar_, LV_OPA_TRANSP, 0);  // Transparent background
+        lv_obj_set_style_bg_opa(status_bar_, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(status_bar_, 0, 0);
         lv_obj_set_style_pad_all(status_bar_, 0, 0);
         lv_obj_set_style_pad_top(status_bar_, lvgl_theme->spacing(2), 0);
         lv_obj_set_style_pad_bottom(status_bar_, lvgl_theme->spacing(2), 0);
         lv_obj_set_scrollbar_mode(status_bar_, LV_SCROLLBAR_MODE_OFF);
-        lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);  // Use absolute positioning
-        lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);  // Overlap with top_bar_
+        lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);
+        lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);
 
         notification_label_ = lv_label_create(status_bar_);
         lv_obj_set_width(notification_label_, LV_HOR_RES * 0.75);
@@ -311,30 +558,13 @@ private:
         lv_label_set_text(status_label_, Lang::Strings::INITIALIZING);
         lv_obj_align(status_label_, LV_ALIGN_CENTER, 0, 0);
 
-        /* Top layer: Bottom bar - fixed at bottom, minimum height 48, height can be adaptive */
-        /**bottom_bar_ = lv_obj_create(screen);
-        lv_obj_set_width(bottom_bar_, LV_HOR_RES);
-        lv_obj_set_height(bottom_bar_, LV_SIZE_CONTENT);
-        lv_obj_set_style_min_height(bottom_bar_, 48, 0); // Set minimum height 48
-        lv_obj_set_style_radius(bottom_bar_, 0, 0);
-        lv_obj_set_style_bg_color(bottom_bar_, lvgl_theme->background_color(), 0);
-        lv_obj_set_style_text_color(bottom_bar_, lvgl_theme->text_color(), 0);
-        lv_obj_set_style_pad_top(bottom_bar_, lvgl_theme->spacing(2), 0);
-        lv_obj_set_style_pad_bottom(bottom_bar_, lvgl_theme->spacing(2), 0);
-        lv_obj_set_style_pad_left(bottom_bar_, lvgl_theme->spacing(4), 0);
-        lv_obj_set_style_pad_right(bottom_bar_, lvgl_theme->spacing(4), 0);
-        lv_obj_set_style_border_width(bottom_bar_, 0, 0);
-        lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, 0);**/
-
         /* chat_message_label_ placed in bottom_bar_ and vertically centered */
         chat_message_label_ = lv_label_create(screen);
         lv_label_set_text(chat_message_label_, "");
-        lv_obj_set_width(chat_message_label_, LV_HOR_RES - lvgl_theme->spacing(8)); // Subtract left and right padding
-        //lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP); // Auto wrap mode
-        lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);  // 文字超出会滚动
-        lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0); // Center text alignment
+        lv_obj_set_width(chat_message_label_, LV_HOR_RES - lvgl_theme->spacing(8));
+        lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
-        //lv_obj_align(chat_message_label_, LV_ALIGN_CENTER, 0, 0); // Vertically and horizontally centered in bottom_bar_
         lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_MID, 0, -10);
 
         low_battery_popup_ = lv_obj_create(screen);
@@ -343,7 +573,7 @@ private:
         lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, -lvgl_theme->spacing(4));
         lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
         lv_obj_set_style_radius(low_battery_popup_, lvgl_theme->spacing(4), 0);
-        
+
         low_battery_label_ = lv_label_create(low_battery_popup_);
         lv_label_set_text(low_battery_label_, Lang::Strings::BATTERY_NEED_CHARGE);
         lv_obj_set_style_text_color(low_battery_label_, lv_color_white(), 0);
@@ -351,5 +581,7 @@ private:
         lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
     }
 };
+
+FanLcd20Display::ClipCache FanLcd20Display::s_clip_cache;
 
 #endif // FAN_LCD20_DISPLAY_H

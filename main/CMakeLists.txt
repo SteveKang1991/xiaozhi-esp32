@@ -1117,7 +1117,22 @@ function(build_default_assets_bin)
     if(DEFAULT_ASSETS_EXTRA_FILES)
         list(APPEND BUILD_ARGS "--extra_files" "${DEFAULT_ASSETS_EXTRA_FILES}")
     endif()
-    
+
+    # 扫描 main/assets/default-*.mjpeg，作为出厂默认表情打包到 emotions 分区
+    set(GENERATED_EMOTIONS_BIN "${CMAKE_BINARY_DIR}/generated_emotions.bin")
+    file(GLOB DEFAULT_EMOTION_MJPEGS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+         "${CMAKE_CURRENT_SOURCE_DIR}/assets/default-*.mjpeg")
+    set(EMOTION_ARGS "")
+    foreach(MJPEG ${DEFAULT_EMOTION_MJPEGS})
+        get_filename_component(NAME_NO_EXT "${MJPEG}" NAME)
+        list(APPEND EMOTION_ARGS "--default_emotion_mjpegs" "${NAME_NO_EXT}=${CMAKE_CURRENT_SOURCE_DIR}/${MJPEG}")
+        message(STATUS "Found default emotion: ${NAME_NO_EXT}")
+    endforeach()
+    if(EMOTION_ARGS)
+        list(APPEND BUILD_ARGS "--emotions_output" "${GENERATED_EMOTIONS_BIN}")
+        list(APPEND BUILD_ARGS ${EMOTION_ARGS})
+    endif()
+
     list(APPEND BUILD_ARGS "--esp_sr_model_path" "${ESP_SR_MODEL_PATH}")
     list(APPEND BUILD_ARGS "--xiaozhi_fonts_path" "${XIAOZHI_FONTS_PATH}")
     
@@ -1128,6 +1143,7 @@ function(build_default_assets_bin)
         DEPENDS
             ${SDKCONFIG}
             ${PROJECT_DIR}/scripts/build_default_assets.py
+            ${PROJECT_DIR}/scripts/emotion_bin_packer.py
         COMMENT "Building default assets.bin based on configuration"
         VERBATIM
     )
@@ -1139,8 +1155,14 @@ function(build_default_assets_bin)
     
     # Set the generated file path in parent scope
     set(GENERATED_ASSETS_LOCAL_FILE ${GENERATED_ASSETS_BIN} PARENT_SCOPE)
-    
+    if(EMOTION_ARGS)
+        set(GENERATED_EMOTIONS_LOCAL_FILE ${GENERATED_EMOTIONS_BIN} PARENT_SCOPE)
+    endif()
+
     message(STATUS "Default assets build configured: ${GENERATED_ASSETS_BIN}")
+    if(EMOTION_ARGS)
+        message(STATUS "Default emotions bin build configured: ${GENERATED_EMOTIONS_BIN}")
+    endif()
 endfunction()
 
 
@@ -1209,6 +1231,11 @@ if ("${size}" AND "${offset}")
         build_default_assets_bin()
         esptool_py_flash_to_partition(flash "assets" "${GENERATED_ASSETS_LOCAL_FILE}")
         message(STATUS "Generated default assets flash configured: ${GENERATED_ASSETS_LOCAL_FILE} -> assets partition")
+        # 如果有默认表情（main/assets/default-*.mjpeg），也烧到 emotions 分区
+        if(GENERATED_EMOTIONS_LOCAL_FILE)
+            esptool_py_flash_to_partition(flash "emotions" "${GENERATED_EMOTIONS_LOCAL_FILE}")
+            message(STATUS "Generated default emotions flash configured: ${GENERATED_EMOTIONS_LOCAL_FILE} -> emotions partition")
+        endif()
     elseif(CONFIG_FLASH_CUSTOM_ASSETS)
         # Flash custom assets
         get_assets_local_file("${CONFIG_CUSTOM_ASSETS_FILE}" ASSETS_LOCAL_FILE)

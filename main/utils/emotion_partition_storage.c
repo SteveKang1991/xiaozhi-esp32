@@ -219,6 +219,15 @@ esp_err_t emotion_partition_storage_init(void) {
             ESP_LOGE(TAG, "读 entries 失败: %s", esp_err_to_name(ret));
             return ret;
         }
+        /* 防御：name[32] 必须以 '\0' 结尾，否则后续 strcmp/printf 会越过 name 数组。
+         * 历史镜像（旧版 emotion_bin_packer / 老镜像）可能没显式 \0，这里强制补 \0。 */
+        for (uint8_t i = 0; i < s_header.entry_count; i++) {
+            size_t name_len = strnlen(s_entries[i].name, EMOTION_STORAGE_NAME_MAX);
+            if (name_len >= EMOTION_STORAGE_NAME_MAX) {
+                ESP_LOGW(TAG, "entry[%u] name 无 \\0 终止，强制截断", i);
+                s_entries[i].name[EMOTION_STORAGE_NAME_MAX - 1] = '\0';
+            }
+        }
     }
 
     uint8_t valid_count = 0;

@@ -72,6 +72,7 @@ LvglDisplay::~LvglDisplay() {
 }
 
 void LvglDisplay::SetStatus(const char* status) {
+    ESP_LOGW(TAG, "SetStatus('%s') called 11", status);
     if (!setup_ui_called_) {
         ESP_LOGW(TAG, "SetStatus('%s') called before SetupUI() - message will be lost!", status);
     }
@@ -82,6 +83,7 @@ void LvglDisplay::SetStatus(const char* status) {
         }
         return;
     }
+    ESP_LOGW(TAG, "SetStatus('%s') called 22", status);
     lv_label_set_text(status_label_, status);
     lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);

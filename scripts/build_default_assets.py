@@ -817,6 +817,13 @@ def main():
     parser.add_argument('--esp_sr_model_path', help='Path to ESP-SR model directory')
     parser.add_argument('--xiaozhi_fonts_path', help='Path to xiaozhi-fonts component directory')
     parser.add_argument('--extra_files', help='Path to extra files directory to be included in assets')
+    parser.add_argument('--default_emotion_mjpegs', action='append', default=[],
+                        help='emotion mjpeg to package into generated_emotions.bin. '
+                             'Format: name=path (e.g. default-idle-240x290.mjpeg=main/assets/default-idle-240x290.mjpeg). '
+                             'Can be passed multiple times.')
+    parser.add_argument('--emotions_output', default=None,
+                        help='Output path for generated_emotions.bin (emotion_partition_storage 兼容 .bin). '
+                             'If not set, no emotions bin is generated.')
     
     args = parser.parse_args()
     
@@ -921,12 +928,34 @@ def main():
         return
     
     # Build the assets
-    success = build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font_path, emoji_collection_path, 
+    success = build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font_path, emoji_collection_path,
                                      extra_files_path, args.output, multinet_model_info)
-    
+
     if not success:
         sys.exit(1)
-    
+
+    # 如果指定了 --default_emotion_mjpegs + --emotions_output，单独打包一份
+    # emotion_partition_storage 兼容的 bin（供烧录到 emotions 分区）
+    if args.emotions_output and args.default_emotion_mjpegs:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from emotion_bin_packer import build_emotion_bin
+        except ImportError as e:
+            sys.exit(f"[错误] 无法 import emotion_bin_packer: {e}")
+
+        files = []
+        for spec in args.default_emotion_mjpegs:
+            if "=" not in spec:
+                sys.exit(f"[错误] --default_emotion_mjpegs 项需 name=path 格式: {spec}")
+            name, path = spec.split("=", 1)
+            files.append((name.strip(), path.strip()))
+        try:
+            build_emotion_bin(files, args.emotions_output)
+        except SystemExit:
+            raise
+        except Exception as e:
+            sys.exit(f"[错误] 生成 emotions bin 失败: {e}")
+
     print("Build completed successfully!")
 
 
