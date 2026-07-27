@@ -1211,10 +1211,10 @@ sw_decode_done:
             if (elapsed < 1) {
                 elapsed = 1;
             }
-            // ESP_LOGI(TAG, "📊 %lu帧, %.1f fps, 错误%lu",
-            //          (unsigned long)frame_count,
-            //          (float)frame_count * 1e6f / (float)elapsed,
-            //          (unsigned long)decode_errors);
+             ESP_LOGI(TAG, "📊 %lu帧, %.1f fps, 错误%lu",
+                      (unsigned long)frame_count,
+                      (float)frame_count * 1e6f / (float)elapsed,
+                      (unsigned long)decode_errors);
         }
 
         /* 帧率控制 */

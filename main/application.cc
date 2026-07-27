@@ -203,7 +203,7 @@ void Application::CheckEmotionFiles() {
         // 需要下载
         download_count++;
         char progress_msg[64];
-        snprintf(progress_msg, sizeof(progress_msg), "下载表情 %d/%d", download_count, total_count);
+        snprintf(progress_msg, sizeof(progress_msg), Lang::Strings::DOWNLOADING_EMOTION_PROGRESS, download_count, total_count);
         display->SetChatMessage("system", progress_msg);
 
         ProcessEmotionFile(info);
@@ -212,8 +212,8 @@ void Application::CheckEmotionFiles() {
 
     CleanOrphanEmotionFiles(valid_asset_names);
 
-    display->SetStatus(Lang::Strings::EMOTION_SYNC_COMPLETE);
-    display->SetChatMessage("system", Lang::Strings::EMOTION_SYNC_COMPLETE);
+    //display->SetStatus(Lang::Strings::EMOTION_SYNC_COMPLETE);
+    //display->SetChatMessage("system", Lang::Strings::EMOTION_SYNC_COMPLETE);
     vTaskDelay(pdMS_TO_TICKS(500));
 }
 
@@ -435,7 +435,7 @@ void Application::Initialize() {
 
     SetDeviceState(kDeviceStateStarting);
     // Print board name/version info
-    display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
+    //display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
 
     // Setup the audio service
     auto codec = board.GetAudioCodec();
@@ -491,7 +491,7 @@ void Application::Initialize() {
             }
             case NetworkEvent::Connected: {
                 std::string msg = Lang::Strings::CONNECTED_TO;
-                msg += data;
+                //msg += data;
                 display->ShowNotification(msg.c_str(), 30000);
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_CONNECTED);
                 break;
@@ -675,7 +675,7 @@ void Application::HandleActivationDoneEvent() {
 
     auto display = Board::GetInstance().GetDisplay();
     std::string message = std::string(Lang::Strings::VERSION) + ota_->GetCurrentVersion();
-    display->ShowNotification(message.c_str());
+    //display->ShowNotification(message.c_str());
     display->SetChatMessage("system", "");
     display->SetSystemReady();
 

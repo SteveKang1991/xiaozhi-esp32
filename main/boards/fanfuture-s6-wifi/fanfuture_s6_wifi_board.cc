@@ -374,6 +374,19 @@ public:
         return camera_;
     }
     #endif
+
+    #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+        virtual void StartWifiConfigMode() override {
+            ESP_LOGI(TAG, "Starting BluFi WiFi configuration mode");
+
+            // Call parent implementation
+            WifiBoard::StartWifiConfigMode();
+
+            // Show notification on display
+            std::string hint = std::string(Lang::Strings::BLUFI_CINFIG) + "Xiaozhi-Blufi";
+            Application::GetInstance().Alert(hint.c_str(), Lang::Strings::ENTERING_WIFI_CONFIG_MODE, "gear", Lang::Sounds::OGG_WIFICONFIG);
+        }
+    #endif
 };
 
 DECLARE_BOARD(FanFutureS6WiFiBoard);

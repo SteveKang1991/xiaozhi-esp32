@@ -73,7 +73,7 @@ public:
 
         ESP_LOGI(TAG, "Initialize LVGL port");
         lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-        port_cfg.task_priority = 2;
+        port_cfg.task_priority = 5;
     #if CONFIG_SOC_CPU_CORES_NUM > 1
         port_cfg.task_affinity = 1;
     #endif
