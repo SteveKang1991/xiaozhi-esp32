@@ -12,12 +12,32 @@
 extern "C" {
 #endif
 
+/**
+ * 数据源选择：
+ *   MJPEG_SRC_FILE      - 传统：file_path 路径文件 (fopen)
+ *   MJPEG_SRC_PARTITION - 从 SPI flash partition 读取（esp_partition_read）
+ *                        用 partition + partition_offset + partition_size
+ */
+typedef enum {
+    MJPEG_SRC_FILE = 0,
+    MJPEG_SRC_PARTITION = 1,
+} mjpeg_player_src_t;
+
 typedef struct {
-    const char *file_path;
+    /* 数据源（默认 FILE 兼容老用法） */
+    mjpeg_player_src_t src_type;
+    const char *file_path;             /* src=FILE 时用 */
+    /* src=PARTITION 时用：partition 由 esp_partition_find_first 返回的指针 */
+    const void *partition;
+    uint32_t partition_offset;         /* 相对分区起始 */
+    uint32_t partition_size;           /* 文件字节数 */
+
     esp_lcd_panel_handle_t panel;
     void *fb[2];
     uint16_t screen_width;
     uint16_t screen_height;
+    uint16_t panel_width;   /**< 实际 LCD 面板宽度 */
+    uint16_t panel_height;  /**< 实际 LCD 面板高度 */
     uint8_t target_fps;
     bool loop;
     uint16_t fb_stride;
@@ -36,6 +56,13 @@ typedef struct {
 
 esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg);
 void mjpeg_player_stop(void);
+/**
+ * 异步停止：仅同步等待 read_task 退出（释放 256KB PSRAM read_buf + 32KB io_buf），
+ * 旧 decode_task 由它在 s_running=false 后自行退出，资源回收推迟到下次 start。
+ * 用于频繁 state-switch 场景（idle/listen/speak 间切换），可大幅缩短状态切换
+ * 卡顿窗口（典型从 ~200ms 降到 ~50ms）。同步释放路径见 mjpeg_player_stop。
+ */
+void mjpeg_player_stop_async(void);
 bool mjpeg_player_is_running(void);
 
 #ifdef __cplusplus

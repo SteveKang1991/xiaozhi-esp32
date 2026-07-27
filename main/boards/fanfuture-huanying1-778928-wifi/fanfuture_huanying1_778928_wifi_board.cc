@@ -122,7 +122,10 @@ private:
         buscfg.sclk_io_num = DISPLAY_CLK_PIN;
         buscfg.quadwp_io_num = GPIO_NUM_NC;
         buscfg.quadhd_io_num = GPIO_NUM_NC;
-        buscfg.max_transfer_sz = DISPLAY_WIDTH * 32 * sizeof(uint16_t);
+        /* max_transfer_sz 减到 14 行（6720B），强制 panel_io 内部每次 DMA 申请 ≤ 7KB 内部 SRAM。
+         * TTS 期间 internal SRAM 紧张（UDP/WiFi/opus 临时缓冲），大 block 申请会 ESP_ERR_NO_MEM 重试
+         * 几十次 ~300ms 卡顿。mask 7KB 几乎一定能分配。 */
+        buscfg.max_transfer_sz = DISPLAY_WIDTH * 14 * sizeof(uint16_t);
         ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
     }
 
@@ -134,7 +137,9 @@ private:
         io_config.dc_gpio_num = DISPLAY_DC_PIN;
         io_config.spi_mode = DISPLAY_SPI_MODE;
         io_config.pclk_hz = 70 * 1000 * 1000;
-        io_config.trans_queue_depth = 4;
+        /* trans_queue_depth 4→2：4 个 7KB trans 队列 = 28KB SRAM 占用，2 个 = 14KB。
+         * TTS 期间堆紧张时更易分配，且 14 行 banded 21 次中 2 个 trans 在飞足够流水。 */
+        io_config.trans_queue_depth = 2;
         io_config.lcd_cmd_bits = 8;
         io_config.lcd_param_bits = 8;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io_));
@@ -247,7 +252,7 @@ public:
         InitializeI2c();
         InitializeSpi();
         InitializeLcdDisplay();
-        InitializeSdForMjpeg();
+        //InitializeSdForMjpeg();
         InitializeButtons();
         InitializeIot();
         //InitializeCamera();

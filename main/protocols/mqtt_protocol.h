@@ -33,6 +33,7 @@ public:
     bool OpenAudioChannel() override;
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
+    EmotionFetchResult FetchDeviceEmotions() override;
 
 private:
     // Alive flag for safe scheduled callbacks - set to false in destructor

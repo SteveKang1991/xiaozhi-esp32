@@ -35,6 +35,30 @@ enum AbortReason {
     kAbortReasonWakeWordDetected
 };
 
+/**
+ * 设备表情文件信息
+ * 由 Protocol::FetchDeviceEmotions() 返回
+ */
+struct EmotionInfo {
+    std::string type;        // "idle" / "listen" / "speak"
+    std::string url;          // COS 下载地址
+    std::string hash;        // MD5
+    size_t size = 0;         // 文件大小
+    int width = 0;           // MJPEG 视频宽度
+    int height = 0;          // MJPEG 视频高度
+    std::string local_path;  // 设备本地保存路径（旧 SD 路径形式，仅用于日志/兼容）
+    std::string asset_name;  // flash 资产名（写入 emotion_partition_storage 用）
+};
+
+/**
+ * 获取表情列表的结果
+ * 区分"请求成功但列表为空"和"请求失败"
+ */
+struct EmotionFetchResult {
+    bool success = false;                    // HTTP 请求是否成功
+    std::vector<EmotionInfo> emotions;      // 表情列表（可能为空）
+};
+
 enum ListeningMode {
     kListeningModeAutoStop,
     kListeningModeManualStop,
@@ -73,6 +97,13 @@ public:
     virtual void SendStopListening();
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+
+    /**
+     * 从服务器拉取当前设备已关联的表情文件列表
+     * 通过 HTTP GET 调用 /api/device/emotions?hardware_id={mac}
+     * @return EmotionFetchResult 包含 success 标记和表情列表
+     */
+    virtual EmotionFetchResult FetchDeviceEmotions() = 0;
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;

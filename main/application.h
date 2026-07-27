@@ -169,6 +169,12 @@ private:
     
     // State change handler called by state machine
     void OnStateChanged(DeviceState old_state, DeviceState new_state);
+
+    // Emotion sync
+    void CheckEmotionFiles();
+    bool DownloadEmotionFile(const std::string& url, const std::string& local_path, size_t expected_size);
+    void ProcessEmotionFile(const EmotionInfo& info);
+    void CleanOrphanEmotionFiles(const std::vector<std::string>& valid_paths);
 };
 
 

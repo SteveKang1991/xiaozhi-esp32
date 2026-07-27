@@ -20,6 +20,7 @@ public:
     bool OpenAudioChannel() override;
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
+    EmotionFetchResult FetchDeviceEmotions() override;
 
 private:
     EventGroupHandle_t event_group_handle_;

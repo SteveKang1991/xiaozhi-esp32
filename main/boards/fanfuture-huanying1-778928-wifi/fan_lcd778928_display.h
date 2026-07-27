@@ -17,13 +17,13 @@
 #include <cstring>
 #include <cstdio>
 #include <src/misc/cache/lv_cache.h>
-#include <sys/stat.h>
 
 #include "board.h"
 
 extern "C" {
 #include "mjpeg_player.h"
 #include "sd_scanner.h"
+#include "emotion_partition_storage.h"
 }
 
 #define TAG "FanLcd778928Display"
@@ -125,50 +125,41 @@ public:
     }
 
     virtual void SetEmotion(const char* emotion) override {
+        /* SetEmotion 用于系统开机阶段的表情（microchip_ai / download / circle_xmark 等）
+         * 以及升级提示、错误告警等系统级状态。系统就绪（s_system_ready_=true）后，
+         * 待机画面完全交给 SetRoleAnimation 接管，SetEmotion 直接 noop。
+         * 这样状态机切换不会触发"先 stop MJPEG 再 start 同一路径"的诡异闪烁。 */
+        if (s_system_ready_) {
+            ESP_LOGD(TAG, "SetEmotion(%s) ignored: system ready, role animation owns the display", emotion ? emotion : "<null>");
+            return;
+        }
+
         // Stop any running GIF animation
         if (gif_controller_) {
             DisplayLockGuard lock(this);
             gif_controller_->Stop();
             gif_controller_.reset();
         }
-        
+
+        // 如果角色动画（MJPEG）正在播放，关闭它让位给 SetEmotion 的图标。
+        // 注意：保留 current_clip_name_ 不清空，这样 SetRoleAnimation 进来时
+        // 路径相同能直接 skip（表情包只显示几秒，下一次状态切换大概率还是同一文件）。
+        // 异步 stop：避免长同步等待拖慢表情图标显示。
+        if (mjpeg_player_is_running()) {
+            mjpeg_player_stop_async();
+        }
+
         if (emoji_image_ == nullptr) {
             return;
         }
 
-        /* ── MJPEG 路径 ─────────────────────────────────────────────────
-         * StartMjpegEmotion 在以下情况返回 false（无任何堆分配）：
-         *   1. 系统未就绪（s_system_ready_ == false，WiFi 配网期间）
-         *   2. SD 卡未挂载
-         * 确认就绪后才会执行文件存在检查等堆操作。 */
-        if (s_system_ready_ && sd_scanner_is_mounted()) {
-            if (StartMjpegEmotion(emotion)) {
-                DisplayLockGuard lock(this);
-                lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-                return;
-            }
-
-            /* 说话/LLM 会频繁 SetEmotion；若 MJPEG 已在播而本次又未能启动新 clip，
-            * 切勿走主题 GIF 分支里的 StopMjpegIfRunning()，
-            * 否则会把正播的视频整段停掉。 */
-            if (mjpeg_player_is_running()) {
-                DisplayLockGuard lock(this);
-                lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-                return;
-            }
-        } else {
-            StopMjpegIfRunning();
-        }
-
+		DisplayLockGuard lock(this);
         auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
         auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
         if (image == nullptr) {
             image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage("neutral") : nullptr;
         }
         if (image == nullptr) {
-            StopMjpegIfRunning();
             const char* utf8 = font_awesome_get_utf8(emotion);
             if (utf8 != nullptr && emoji_label_ != nullptr) {
                 DisplayLockGuard lock(this);
@@ -179,22 +170,20 @@ public:
             return;
         }
 
-        StopMjpegIfRunning();
-        DisplayLockGuard lock(this);
         if (image->IsGif()) {
             // Create new GIF controller
             gif_controller_ = std::make_unique<LvglGif>(image->image_dsc());
-            
+
             if (gif_controller_->IsLoaded()) {
                 // Set up frame update callback
                 gif_controller_->SetFrameCallback([this]() {
                     lv_image_set_src(emoji_image_, gif_controller_->image_dsc());
                 });
-                
+
                 // Set initial frame and start animation
                 lv_image_set_src(emoji_image_, gif_controller_->image_dsc());
                 gif_controller_->Start();
-                
+
                 // Show GIF, hide others
                 lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
@@ -209,9 +198,67 @@ public:
         }
     }
 
+    virtual void SetRoleAnimation(const char* state) override {
+        if (emoji_image_ == nullptr) {
+            return;
+        }
+
+        if (gif_controller_) {
+            DisplayLockGuard lock(this);
+            gif_controller_->Stop();
+            gif_controller_.reset();
+        }
+
+        {
+            DisplayLockGuard lock(this);
+            lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+        }
+
+        if (!s_system_ready_) {
+            return;
+        }
+
+        const char* clip = MapRoleStateToClip(state);
+        const ClipLoc clip_loc = FindRoleAnimation(clip);
+        if (!clip_loc.valid()) {
+            ESP_LOGI(TAG, "SetRoleAnimation: no available MJPEG for state=%s, skip", clip);
+            return;
+        }
+
+        /* 单一真相源：文件名 + offset + size 联合比较。
+         * 注意 current_clip_name_ 在 mjpeg_player_start 成功后才更新，确保永远反映"已播放"的状态。 */
+        char cur_key[160] = {0};
+        if (!current_clip_name_.empty()) {
+            /* 简化：只比较 name（同一文件 offset/size 不会变） */
+            snprintf(cur_key, sizeof(cur_key), "%s", current_clip_name_.c_str());
+        }
+        if (clip_loc.name == current_clip_name_) {
+            if (mjpeg_player_is_running()) {
+                ESP_LOGI(TAG, "SetRoleAnimation: same clip %s, skip (state=%s)", clip_loc.name.c_str(), state ? state : "null");
+                return;
+            }
+            /* name 相同但 MJPEG 未运行（可能被 SetEmotion stop 了）→ 直接重启 */
+            ESP_LOGI(TAG, "SetRoleAnimation: same clip %s but not running, restart (state=%s)",
+                     clip_loc.name.c_str(), state ? state : "null");
+        } else {
+            ESP_LOGI(TAG, "SetRoleAnimation: state=%s clip=%s name=%s (differs from %s)",
+                     state ? state : "null", clip, clip_loc.name.c_str(), current_clip_name_.c_str());
+        }
+        StartMjpegEmotion(clip_loc);
+    }
+
     void SetSystemReady() override {
         s_system_ready_ = true;
-        ESP_LOGI(TAG, "MJPEG ready: system is ready, SD card operations permitted");
+        ESP_LOGI(TAG, "MJPEG ready: system is ready");
+        /* 一次性扫描 assets 分区上的 Emotion 文件并缓存。 */
+        ScanEmotionClips();
+        /* 第一次进入 idle 时 s_system_ready_ 还没置位（SetSystemReady 在 SetDeviceState(idle) 之后调用），
+         * SetRoleAnimation("idle") 会被上面的 ready 检查跳过，导致第一帧 idle 没启动。
+         * 这里在就绪后再尝试一次，让待机的表情真正起得来。 */
+        if (!mjpeg_player_is_running()) {
+            SetRoleAnimation("idle");
+        }
     }
 
 private:
@@ -219,60 +266,176 @@ private:
 
     static constexpr uint16_t kMjpegVideoWidth = 240;
     static constexpr uint16_t kMjpegVideoHeight = 290;
-    static constexpr uint8_t kMjpegTargetFps = 30;
+    /* S3 软解 esp_new_jpeg：30fps × 30ms/帧 几乎打满 CPU，与 Opus 解码抢 CPU 导致 TTS 卡顿。
+     * 实测降到 20fps 后每帧 50ms 预算，软解 + Opus 不再争 CPU，TTS 流畅。 */
+    static constexpr uint8_t kMjpegTargetFps = 24;
     std::string current_mjpeg_path_;
+    std::string current_clip_name_;  /* 当前播放的 flash 文件名（part:offset:size 表示法） */
 
-    static bool FileExists(const std::string& path) {
-        struct stat st = {};
-        return stat(path.c_str(), &st) == 0;
+    /* flash 资产位置：文件表里的文件名 + offset + size
+     * name 是资产名（如 "idle-240x290.mjpeg"），offset/size 是相对分区的偏移 */
+    struct ClipLoc {
+        std::string name;
+        uint32_t offset = 0;
+        uint32_t size = 0;
+        bool valid() const { return !name.empty() && size > 0; }
+    };
+
+    /* 启动时（emotion_partition_storage 已 init）一次性扫描所有候选 flash 文件并缓存。
+     * 后续 SetRoleAnimation 直接查此缓存，不再访问 SD 卡或 flash。
+     * 文件命名约定：<name>-WxH.mjpeg（运行时 width/height）。
+     *   - 用户层：idle-240x290.mjpeg, listen-240x290.mjpeg, speak-240x290.mjpeg
+     *   - default 层：default-idle-240x290.mjpeg, default-listen-240x290.mjpeg, default-speak-240x290.mjpeg
+     */
+    struct ClipCache {
+        bool scanned = false;        /* 是否已扫过 */
+        bool user_has_any = false;   /* 用户层是否存在任意一个 idle/listen/speak 文件 */
+        ClipLoc idle;
+        ClipLoc listen;
+        ClipLoc speak;
+        ClipLoc default_idle;        /* 单独的 default-idle，speak/listen fallback 用 */
+    };
+    static ClipCache s_clip_cache;
+
+    /* 把 clip name + 分辨率组合成 flash 资产名。
+     * 例如 ("idle") -> "idle-240x290.mjpeg"，("default-idle") -> "default-idle-240x290.mjpeg"。
+     * 注意 out 缓冲必须 ≥ 48 字节。 */
+    static void FillClipName(char* out, size_t out_size, const char* name) {
+        snprintf(out, out_size, "%s-%ux%u.mjpeg", name,
+                 (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
     }
 
-    static std::string BuildMjpegPath(const char* name) {
-        char suffix[48];
-        snprintf(suffix, sizeof(suffix), "-%ux%u.mjpeg", (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
-        return std::string("/sdcard/Emotion/") + name + suffix;
+    /* 启动时一次扫描所有 6 个候选文件：user-layer 3 + default-layer 3。
+     * 全部走 emotion_partition_storage_find（emotions 分区），不再访问 SD 卡。 */
+    static void ScanEmotionClips() {
+        if (s_clip_cache.scanned) return;
+        s_clip_cache.scanned = true;
+
+        /* 如果 emotion_partition_storage 还没 init，先 init 一次 */
+        if (emotion_partition_storage_get_partition() == NULL) {
+            esp_err_t r = emotion_partition_storage_init();
+            if (r != ESP_OK) {
+                ESP_LOGW(TAG, "emotion_partition_storage_init 失败: %s", esp_err_to_name(r));
+                return;
+            }
+        }
+
+        auto try_find = [](const char* asset_name) -> ClipLoc {
+            ClipLoc loc;
+            if (emotion_partition_storage_find(asset_name, &loc.offset, &loc.size)) {
+                loc.name = asset_name;
+            }
+            return loc;
+        };
+
+        const char* all_names[3] = { "idle", "listen", "speak" };
+        /* user 层 */
+        for (int i = 0; i < 3; i++) {
+            char n[48];
+            FillClipName(n, sizeof(n), all_names[i]);
+            ClipLoc loc = try_find(n);
+            if (loc.valid()) {
+                s_clip_cache.user_has_any = true;
+                if (i == 0) s_clip_cache.idle = loc;
+                else if (i == 1) s_clip_cache.listen = loc;
+                else s_clip_cache.speak = loc;
+            }
+        }
+        /* default 层：每个 state 单独查 */
+        char dn_idle[48], dn_listen[48], dn_speak[48];
+        FillClipName(dn_idle, sizeof(dn_idle), "default-idle");
+        FillClipName(dn_listen, sizeof(dn_listen), "default-listen");
+        FillClipName(dn_speak, sizeof(dn_speak), "default-speak");
+        ClipLoc dloc;
+        dloc = try_find(dn_idle);     if (dloc.valid()) s_clip_cache.default_idle = dloc;
+        dloc = try_find(dn_listen);   if (dloc.valid()) s_clip_cache.listen = dloc;
+        dloc = try_find(dn_speak);    if (dloc.valid()) s_clip_cache.speak = dloc;
+
+        ESP_LOGI(TAG, "ClipCache: user_has_any=%d idle=%s listen=%s speak=%s default_idle=%s",
+                 (int)s_clip_cache.user_has_any,
+                 s_clip_cache.idle.name.c_str(), s_clip_cache.listen.name.c_str(),
+                 s_clip_cache.speak.name.c_str(), s_clip_cache.default_idle.name.c_str());
     }
 
-    static const char* MapEmotionToClip(const char* emotion) {
-        if (emotion == nullptr || std::strlen(emotion) == 0) {
+    /* EmotionSync 下载/重试完成后调用：重新扫描并尝试启动 idle。
+     * 注意：先清空已扫描标志，让 ScanEmotionClips 真正重扫。 */
+    void RescanAndTryIdle() {
+        s_clip_cache.scanned = false;
+        s_clip_cache = ClipCache{};  /* 清空所有 entry */
+        ScanEmotionClips();
+        if (!mjpeg_player_is_running() && s_clip_cache.idle.valid()) {
+            SetRoleAnimation("idle");
+        }
+    }
+
+    static const char* MapRoleStateToClip(const char* state) {
+        if (state == nullptr) {
             return "idle";
         }
-        if (strcmp(emotion, "neutral") == 0) {
-            return "idle";
+        if (strcmp(state, "idle") == 0 ||
+            strcmp(state, "listen") == 0 ||
+            strcmp(state, "speak") == 0) {
+            return state;
         }
-        return emotion;
+        return "idle";
     }
 
-    bool StartMjpegEmotion(const char* emotion) {
+    /* 完全走缓存，不再访问 SD 卡或 flash。
+     * 优先级：用户层 <state> > 用户层 idle > default 层 <state> > default 层 idle > 空。 */
+    static ClipLoc FindRoleAnimation(const char* state) {
+        if (!s_clip_cache.scanned) {
+            /* 兜底：万一在 ScanEmotionClips 前调用，仍需扫描 */
+            ScanEmotionClips();
+        }
+        const ClipLoc* primary = nullptr;
+        if (state && strcmp(state, "listen") == 0) {
+            primary = s_clip_cache.listen.valid() ? &s_clip_cache.listen : nullptr;
+        } else if (state && strcmp(state, "speak") == 0) {
+            primary = s_clip_cache.speak.valid() ? &s_clip_cache.speak : nullptr;
+        } else { /* idle */
+            primary = s_clip_cache.idle.valid() ? &s_clip_cache.idle : nullptr;
+        }
+        if (primary && primary->valid()) {
+            return *primary;
+        }
+        /* 自身缺：先尝试用户层 idle */
+        if (s_clip_cache.idle.valid()) {
+            return s_clip_cache.idle;
+        }
+        /* 用户层没有 idle，再尝试 default 层对应 state */
+        if (state && strcmp(state, "listen") == 0 && s_clip_cache.listen.valid()) {
+            return s_clip_cache.listen;
+        }
+        if (state && strcmp(state, "speak") == 0 && s_clip_cache.speak.valid()) {
+            return s_clip_cache.speak;
+        }
+        /* 最后用 default-idle */
+        return s_clip_cache.default_idle;
+    }
+
+    bool StartMjpegEmotion(const ClipLoc& loc_in) {
         if (!s_system_ready_) {
             ESP_LOGW(TAG, "MJPEG跳过：系统未就绪");
             return false;
         }
-        if (!sd_scanner_is_mounted()) {
-            ESP_LOGW(TAG, "MJPEG跳过：SD卡未挂载");
+        if (!loc_in.valid()) {
+            ESP_LOGW(TAG, "MJPEG跳过：loc 无效");
             return false;
         }
+        /* 拷贝成非 const 引用，避免后面 mjpeg_player_cfg_t 写入干扰逻辑读 */
+        ClipLoc loc = loc_in;
 
-        const char* clip_name = MapEmotionToClip(emotion);
-        std::string clip_path = BuildMjpegPath(clip_name);
-        if (!FileExists(clip_path)) {
-            ESP_LOGW(TAG, "未找到情绪视频文件 '%s'：%s", clip_name, clip_path.c_str());
-            clip_path = BuildMjpegPath("idle");
-            if (!FileExists(clip_path)) {
-                ESP_LOGW(TAG, "未找到回退视频文件：%s", clip_path.c_str());
-                ESP_LOGW(TAG, "请放置文件：/sdcard/Emotion/<emotion>-%ux%u.mjpeg（当前目标分辨率 %ux%u）",
-                         (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight,
-                         (unsigned)kMjpegVideoWidth, (unsigned)kMjpegVideoHeight);
-                return false;
-            }
-            ESP_LOGI(TAG, "使用回退视频文件：%s", clip_path.c_str());
+        /* 同一文件已播放中？直接跳过。 */
+        if (loc.name == current_clip_name_ && mjpeg_player_is_running()) {
+            ESP_LOGI(TAG, "StartMjpegEmotion: same clip %s, skip (already running)", loc.name.c_str());
+            return true;
         }
-
-        if (mjpeg_player_is_running()) {
-            if (clip_path == current_mjpeg_path_) {
-                return true;
-            }
-            mjpeg_player_stop();
+        if (loc.name != current_clip_name_ && mjpeg_player_is_running()) {
+            ESP_LOGI(TAG, "StartMjpegEmotion: clip change %s -> %s, stop first (async)",
+                     current_clip_name_.c_str(), loc.name.c_str());
+            /* 用异步 stop：仅等 read_task 退出（释放大块 PSRAM），旧 decode_task 自行退出，
+             * 状态切换卡顿从 ~200ms 降到 ~50ms，与 P4 项目相同的处理方式。 */
+            mjpeg_player_stop_async();
         }
 
         int rx = (width_ - static_cast<int>(kMjpegVideoWidth)) / 2;
@@ -285,14 +448,19 @@ private:
             ry = 0;
         }
 
-        current_mjpeg_path_ = clip_path;
         mjpeg_player_cfg_t cfg = {};
-        cfg.file_path = current_mjpeg_path_.c_str();
+        cfg.src_type = MJPEG_SRC_PARTITION;
+        cfg.partition = emotion_partition_storage_get_partition();
+        cfg.partition_offset = loc.offset;
+        cfg.partition_size = loc.size;
+        cfg.file_path = nullptr;   /* PARTITION 模式不用 */
         cfg.panel = panel_;
         cfg.fb[0] = nullptr;
         cfg.fb[1] = nullptr;
         cfg.screen_width = kMjpegVideoWidth;
         cfg.screen_height = kMjpegVideoHeight;
+        cfg.panel_width = static_cast<uint16_t>(width_);
+        cfg.panel_height = static_cast<uint16_t>(height_);
         cfg.target_fps = kMjpegTargetFps;
         cfg.loop = true;
         cfg.fb_stride = 0;
@@ -304,20 +472,24 @@ private:
 
         const esp_err_t ret = mjpeg_player_start(&cfg);
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "MJPEG启动失败（%s）：%s", current_mjpeg_path_.c_str(), esp_err_to_name(ret));
-            current_mjpeg_path_.clear();
+            ESP_LOGW(TAG, "MJPEG启动失败（%s）：%s", loc.name.c_str(), esp_err_to_name(ret));
             return false;
         }
+        /* start 成功才更新 current_xxx，保持单一真相源。 */
+        current_clip_name_ = loc.name;
+        current_mjpeg_path_ = loc.name;   /* 兼容旧代码读 current_mjpeg_path_ */
 
-        ESP_LOGI(TAG, "MJPEG表情播放：%s", current_mjpeg_path_.c_str());
+        ESP_LOGI(TAG, "MJPEG表情播放（flash 分区）：%s off=0x%x size=%u",
+                 loc.name.c_str(), (unsigned)loc.offset, (unsigned)loc.size);
         return true;
     }
 
     void StopMjpegIfRunning() {
-        if (mjpeg_player_is_running()) {
-            mjpeg_player_stop();
-        }
+        /* 析构 / 关闭时同步等待，确保资源完全释放。普通状态切换走 StartMjpegEmotion
+         * 里的 mjpeg_player_stop_async()，避免阻塞。 */
+        mjpeg_player_stop();
         current_mjpeg_path_.clear();
+        current_clip_name_.clear();
     }
 
     void SetupUI() {
@@ -504,5 +676,7 @@ private:
         lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
     }
 };
+
+FanLcd778928Display::ClipCache FanLcd778928Display::s_clip_cache;
 
 #endif // FAN_LCD778928_DISPLAY_H

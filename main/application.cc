@@ -9,6 +9,8 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "utils/md5.h"
+#include "utils/emotion_partition_storage.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -19,6 +21,373 @@
 
 #define TAG "Application"
 
+
+// =====================================================
+// 用户表情文件同步（开机阶段下载到 flash emotions 分区）
+// =====================================================
+
+static const char* kEmotionTag = "EmotionSync";
+
+/**
+ * 把表情 type + 分辨率打包成 flash 资产名（写入 emotion_partition_storage 用）。
+ * 形如 "idle-240x290.mjpeg"。
+ */
+static std::string MakeEmotionAssetName(const std::string& type, int width, int height) {
+    char suffix[64];
+    snprintf(suffix, sizeof(suffix), "-%dx%d.mjpeg", width, height);
+    return type + suffix;
+}
+
+/**
+ * 兼容旧代码：返回 asset_name（与 MakeEmotionAssetName 同义）。
+ * 旧版返回 "/sdcard/Emotion/<type>-<W>x<H>.mjpeg"，新版等价于纯文件名。
+ */
+static std::string MakeEmotionLocalPath(const std::string& type, int width, int height) {
+    return MakeEmotionAssetName(type, width, height);
+}
+
+/** 检查 flash 中文件存在且大小匹配；如需 MD5 校验可读取整文件 */
+static bool IsEmotionFileUpToDate(const std::string& asset_name, size_t expected_size,
+                                  const std::string& expected_md5) {
+    uint32_t off = 0, sz = 0;
+    if (!emotion_partition_storage_find(asset_name.c_str(), &off, &sz)) return false;
+    if (expected_size > 0 && sz != expected_size) return false;
+    if (expected_md5.empty()) return true;
+    /* 需要 MD5 校验：读出整个文件到 RAM 算 MD5 */
+    if (sz > 4 * 1024 * 1024) {
+        ESP_LOGW(kEmotionTag, "%s 太大 (%u) 跳过 MD5 校验", asset_name.c_str(), (unsigned)sz);
+        return true;
+    }
+    uint8_t* buf = (uint8_t*)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) buf = (uint8_t*)malloc(sz);
+    if (!buf) {
+        ESP_LOGW(kEmotionTag, "%s MD5 校验内存不足，跳过", asset_name.c_str());
+        return true;
+    }
+    esp_err_t er = emotion_partition_storage_read(asset_name.c_str(), buf, sz, NULL);
+    bool ok = false;
+    if (er == ESP_OK) {
+        std::string md5 = MD5::Calculate(buf, sz);
+        ok = (!md5.empty() && md5 == expected_md5);
+    }
+    free(buf);
+    return ok;
+}
+
+/**
+ * 老的 EnsureEmotionDir 仍保留以兼容其它代码（SD 卡仍可能使用）。
+ * 但 emotion sync 不再依赖 SD 卡，所以返回 true 直接放行。
+ */
+static bool EnsureEmotionDir() {
+    /* 确保 emotion_partition_storage 已初始化 */
+    if (emotion_partition_storage_get_partition() == NULL) {
+        esp_err_t r = emotion_partition_storage_init();
+        if (r != ESP_OK) {
+            ESP_LOGE(kEmotionTag, "emotion_partition_storage_init 失败: %s", esp_err_to_name(r));
+            return false;
+        }
+    }
+    return true;
+}
+
+void Application::CheckEmotionFiles() {
+    if (ota_ == nullptr) {
+        return;
+    }
+
+    if (!EnsureEmotionDir()) {
+        ESP_LOGW(kEmotionTag, "Emotion directory unavailable, skip sync");
+        return;
+    }
+
+    // 获取服务器表情列表
+    EmotionFetchResult fetch_result;
+    /* 用堆分配避免栈帧过大（MqttProtocol/WebsocketProtocol 内部有较大缓冲） */
+    std::unique_ptr<MqttProtocol> mqtt_probe;
+    std::unique_ptr<WebsocketProtocol> ws_probe;
+    if (ota_->HasMqttConfig()) {
+        mqtt_probe = std::make_unique<MqttProtocol>();
+        fetch_result = mqtt_probe->FetchDeviceEmotions();
+    } else if (ota_->HasWebsocketConfig()) {
+        ws_probe = std::make_unique<WebsocketProtocol>();
+        fetch_result = ws_probe->FetchDeviceEmotions();
+    } else {
+        mqtt_probe = std::make_unique<MqttProtocol>();
+        fetch_result = mqtt_probe->FetchDeviceEmotions();
+    }
+    /* 显式释放：probe 在 activation task 中持有，protocol 可能占内存 */
+    mqtt_probe.reset();
+    ws_probe.reset();
+
+    // HTTP 请求失败，跳过同步，保留本地文件
+    if (!fetch_result.success) {
+        ESP_LOGW(kEmotionTag, "Failed to fetch emotion list from server, preserving local files");
+        return;
+    }
+
+    ESP_LOGI(kEmotionTag, "Fetched %d emotion(s) from server", (int)fetch_result.emotions.size());
+
+    // 服务器返回空列表（用户已删除所有角色动画），清三个角色文件
+    if (fetch_result.emotions.empty()) {
+        auto display = Board::GetInstance().GetDisplay();
+        int w = display ? display->width() : 0;
+        int h = display ? display->height() : 0;
+        if (w <= 0) w = 240;
+        if (h <= 0) h = 290;
+        std::vector<std::string> role_only_asset = {
+            MakeEmotionAssetName("idle", w, h),
+            MakeEmotionAssetName("listen", w, h),
+            MakeEmotionAssetName("speak", w, h),
+        };
+        CleanOrphanEmotionFiles(role_only_asset);
+        ESP_LOGI(kEmotionTag, "No role emotions on server, cleared role files only (flash)");
+        return;
+    }
+
+    std::vector<EmotionInfo>& emotions = fetch_result.emotions;
+
+    // 对比服务器列表与 flash 资产，同步表情
+    std::vector<std::string> valid_asset_names;
+    int download_count = 0;
+    int total_count = 0;
+
+    for (auto& info : emotions) {
+        if (info.type.empty() || info.url.empty()) {
+            continue;
+        }
+        int width = info.width > 0 ? info.width : 240;
+        int height = info.height > 0 ? info.height : 290;
+        info.local_path = MakeEmotionLocalPath(info.type, width, height);
+        info.asset_name = MakeEmotionAssetName(info.type, width, height);
+
+        // 检查本地 flash 中是否已存在且大小/MD5匹配
+        if (IsEmotionFileUpToDate(info.asset_name, info.size, info.hash)) {
+            ESP_LOGI(kEmotionTag, "Emotion %s is up-to-date, skip", info.type.c_str());
+            valid_asset_names.push_back(info.asset_name);
+            continue;
+        }
+
+        // 需要下载
+        total_count++;
+    }
+
+    if (total_count == 0) {
+        ESP_LOGI(kEmotionTag, "All emotions are up-to-date, checking orphan files in flash");
+        CleanOrphanEmotionFiles(valid_asset_names);
+        return;
+    }
+
+    // 确有需要下载的，显示下载提示
+    auto display = Board::GetInstance().GetDisplay();
+    display->SetStatus(Lang::Strings::DOWNLOADING_EMOTIONS);
+    display->SetEmotion("download");
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // 重新遍历，实际下载
+    download_count = 0;
+    for (auto& info : emotions) {
+        if (info.type.empty() || info.url.empty()) {
+            continue;
+        }
+        int width = info.width > 0 ? info.width : 240;
+        int height = info.height > 0 ? info.height : 290;
+        info.local_path = MakeEmotionLocalPath(info.type, width, height);
+        info.asset_name = MakeEmotionAssetName(info.type, width, height);
+
+        // 再次检查（避免多线程竞态）
+        if (IsEmotionFileUpToDate(info.asset_name, info.size, info.hash)) {
+            valid_asset_names.push_back(info.asset_name);
+            continue;
+        }
+
+        // 需要下载
+        download_count++;
+        char progress_msg[64];
+        snprintf(progress_msg, sizeof(progress_msg), "下载表情 %d/%d", download_count, total_count);
+        display->SetChatMessage("system", progress_msg);
+
+        ProcessEmotionFile(info);
+        valid_asset_names.push_back(info.asset_name);
+    }
+
+    CleanOrphanEmotionFiles(valid_asset_names);
+
+    display->SetStatus(Lang::Strings::EMOTION_SYNC_COMPLETE);
+    display->SetChatMessage("system", Lang::Strings::EMOTION_SYNC_COMPLETE);
+    vTaskDelay(pdMS_TO_TICKS(500));
+}
+
+bool Application::DownloadEmotionFile(const std::string& url, const std::string& asset_name,
+                                       size_t expected_size) {
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    auto http = network->CreateHttp(0);
+    http->SetTimeout(15000);
+
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(kEmotionTag, "Failed to open HTTP: %s", url.c_str());
+        return false;
+    }
+
+    int status = http->GetStatusCode();
+    if (status != 200) {
+        ESP_LOGE(kEmotionTag, "HTTP status %d for %s", status, url.c_str());
+        http->Close();
+        return false;
+    }
+
+    /* 一次性把整个 mjpeg 读到 PSRAM（典型 ≤2MB，可接受）。
+     * 失败再退回到 64KB 分块流式缓冲。 */
+    size_t initial_cap = expected_size > 0 ? expected_size : (2 * 1024 * 1024);
+    if (initial_cap > 8 * 1024 * 1024) initial_cap = 8 * 1024 * 1024;
+    uint8_t* buf = (uint8_t*)heap_caps_malloc(initial_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) buf = (uint8_t*)malloc(initial_cap);
+    if (!buf) {
+        ESP_LOGE(kEmotionTag, "无法分配 %u 字节缓冲", (unsigned)initial_cap);
+        http->Close();
+        return false;
+    }
+    size_t total = 0;
+    size_t cap = initial_cap;
+    char chunk[4096];
+    int got;
+    while ((got = http->Read(chunk, sizeof(chunk))) > 0) {
+        if (total + (size_t)got > cap) {
+            size_t new_cap = cap * 2;
+            if (new_cap > 8 * 1024 * 1024) new_cap = 8 * 1024 * 1024;
+            if (total + (size_t)got > new_cap) new_cap = total + (size_t)got;
+            uint8_t* nb = (uint8_t*)heap_caps_malloc(new_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!nb) nb = (uint8_t*)malloc(new_cap);
+            if (!nb) {
+                ESP_LOGE(kEmotionTag, "缓冲扩展失败 (need %u)", (unsigned)new_cap);
+                free(buf);
+                http->Close();
+                return false;
+            }
+            memcpy(nb, buf, total);
+            free(buf);
+            buf = nb;
+            cap = new_cap;
+        }
+        memcpy(buf + total, chunk, got);
+        total += (size_t)got;
+    }
+    http->Close();
+
+    if (expected_size > 0 && total != expected_size) {
+        ESP_LOGE(kEmotionTag, "Size mismatch: got %u, expect %u", (unsigned)total, (unsigned)expected_size);
+        free(buf);
+        return false;
+    }
+
+    esp_err_t er = emotion_partition_storage_upsert(asset_name.c_str(), buf, total);
+    free(buf);
+    if (er != ESP_OK) {
+        ESP_LOGE(kEmotionTag, "emotion_partition_storage_upsert(%s) 失败: %s",
+                 asset_name.c_str(), esp_err_to_name(er));
+        return false;
+    }
+
+    ESP_LOGI(kEmotionTag, "已写入 flash 资产: %s (%u bytes)", asset_name.c_str(), (unsigned)total);
+    return true;
+}
+
+void Application::ProcessEmotionFile(const EmotionInfo& info) {
+    const std::string& asset_name = info.asset_name;
+    const std::string& url = info.url;
+
+    // 检查 flash 中是否已存在且 MD5 匹配
+    if (IsEmotionFileUpToDate(asset_name, info.size, info.hash)) {
+        ESP_LOGI(kEmotionTag, "Emotion %s is up-to-date", asset_name.c_str());
+        return;
+    }
+
+    if (!DownloadEmotionFile(url, asset_name, info.size)) {
+        ESP_LOGE(kEmotionTag, "Failed to download emotion: %s", url.c_str());
+        return;
+    }
+
+    /* 二次 MD5 校验（写入后读回再算） */
+    if (!info.hash.empty()) {
+        uint32_t off = 0, sz = 0;
+        if (emotion_partition_storage_find(asset_name.c_str(), &off, &sz)
+            && sz > 0 && sz <= 4 * 1024 * 1024) {
+            uint8_t* buf = (uint8_t*)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!buf) buf = (uint8_t*)malloc(sz);
+            if (buf) {
+                if (emotion_partition_storage_read(asset_name.c_str(), buf, sz, NULL) == ESP_OK) {
+                    std::string md5 = MD5::Calculate(buf, sz);
+                    if (!md5.empty() && md5 != info.hash) {
+                        ESP_LOGE(kEmotionTag, "MD5 mismatch for %s (写入 flash 后校验失败)，标记删除待重下",
+                                 asset_name.c_str());
+                        emotion_partition_storage_delete(asset_name.c_str());
+                    }
+                }
+                free(buf);
+            }
+        }
+    }
+
+    ESP_LOGI(kEmotionTag, "Emotion ready (flash): %s", asset_name.c_str());
+}
+
+/**
+ * 删除 flash asset 表中不在 valid_asset_names 列表里的"角色动画"文件。
+ * 只删除 idle-/listen-/speak- 前缀的文件；default-* 等不出现在这里的不会被删。
+ *
+ * 不再操作 SD 卡（项目已不再用 SD 存表情）。
+ */
+static void CleanOrphanEmotionFiles_Cb(const char* name, uint32_t offset, uint32_t size, void* user);
+struct OrphanCtx {
+    const std::vector<std::string>* valid;
+    int deleted = 0;
+    int kept = 0;
+};
+
+static bool IsRoleAnimationName(const char* name) {
+    if (!name) return false;
+    return (strncmp(name, "idle-", 5) == 0
+         || strncmp(name, "listen-", 7) == 0
+         || strncmp(name, "speak-", 6) == 0);
+}
+
+static void CleanOrphanEmotionFiles_Cb(const char* name, uint32_t offset, uint32_t size, void* user) {
+    (void)offset; (void)size;
+    OrphanCtx* ctx = static_cast<OrphanCtx*>(user);
+    if (!IsRoleAnimationName(name)) {
+        ctx->kept++;
+        return;
+    }
+    for (const auto& v : *ctx->valid) {
+        if (v == name) {
+            ctx->kept++;
+            return;
+        }
+    }
+    /* 不在 valid 列表 → 标记删除（不立即擦 flash） */
+    esp_err_t er = emotion_partition_storage_delete(name);
+    if (er == ESP_OK) {
+        ESP_LOGI(kEmotionTag, "CleanOrphan: 标记删除 %s", name);
+        ctx->deleted++;
+    } else if (er == ESP_ERR_NOT_FOUND) {
+        ctx->kept++;
+    } else {
+        ESP_LOGE(kEmotionTag, "CleanOrphan: 删除 %s 失败: %s", name, esp_err_to_name(er));
+    }
+}
+
+void Application::CleanOrphanEmotionFiles(const std::vector<std::string>& valid_asset_names) {
+    if (emotion_partition_storage_get_partition() == NULL) {
+        esp_err_t r = emotion_partition_storage_init();
+        if (r != ESP_OK) {
+            ESP_LOGW(kEmotionTag, "CleanOrphan: emotion_partition_storage 不可用，跳过");
+            return;
+        }
+    }
+    OrphanCtx ctx{&valid_asset_names, 0, 0};
+    emotion_partition_storage_enum(CleanOrphanEmotionFiles_Cb, &ctx);
+    ESP_LOGI(kEmotionTag, "CleanOrphan 完成: 删 %d 个, 保留 %d 个", ctx.deleted, ctx.kept);
+}
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -275,7 +644,7 @@ void Application::HandleNetworkConnectedEvent() {
             app->ActivationTask();
             app->activation_task_handle_ = nullptr;
             vTaskDelete(NULL);
-        }, "activation", 4096 * 2, this, 2, &activation_task_handle_);
+        }, "activation", 4096 * 4, this, 2, &activation_task_handle_);
     }
 
     // Update the status bar immediately to show the network state
@@ -330,6 +699,9 @@ void Application::ActivationTask() {
 
     // Check for new firmware version
     CheckNewVersion();
+
+    // Sync emotion files from server
+    CheckEmotionFiles();
 
     // Initialize the protocol
     InitializeProtocol();
@@ -861,10 +1233,12 @@ void Application::HandleStateChangedEvent() {
     
     switch (new_state) {
         case kDeviceStateUnknown:
+            /* 系统启动阶段，不走角色动画——开机/下载/告警仍由 SetEmotion 走主题 GIF / 内置图标 */
+            break;
         case kDeviceStateIdle:
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
-            display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+            display->SetRoleAnimation("idle"); // Then play idle MJPEG
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
@@ -875,7 +1249,7 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
-            display->SetEmotion("neutral");
+            display->SetRoleAnimation("listen");
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
@@ -906,6 +1280,7 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+            display->SetRoleAnimation("speak");
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);

@@ -23,6 +23,7 @@
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
 #include "esp_rom_sys.h"
+#include "esp_partition.h"
 #if CONFIG_IDF_TARGET_ESP32P4
 #include "esp_lcd_mipi_dsi.h"
 #endif
@@ -50,20 +51,28 @@ static const char *TAG = "MJPEG";
 #define MJPEG_PANEL_HEIGHT 320
 #endif
 /* LVGL 与面板共用同一 SPI 时，draw_bitmap 与 LVGL flush 仍须互斥，否则可能花屏/卡死；ROI 用短超时即可。 */
-#define MJPEG_DRAW_RETRY_MAX        20
 #define MJPEG_ROI_LVGL_LOCK_MS      5
 #define MJPEG_LVGL_LOCK_TIMEOUT_MS  40
 #define MJPEG_POST_LOCK_DRAIN_MS    0
-#define MJPEG_DRAW_RETRY_US_MIN     500
-#define MJPEG_DRAW_RETRY_US_MAX     5000
-#define MJPEG_ROI_BAND_LINES        32
-/** 严格逐帧校验会重复解析 JPEG（extract+validate），会显著增加 read 侧 CPU 占用 */
+/* ROI band 行数：esp_lcd_panel_io 内部已按 max_transfer_sz 自动 DMA 分包，
+ * 14 行 ≈ 6.7KB < 16KB 单 DMA 限制。21 次小传输在 TTS 期间因 SRAM 拥塞反复
+ * 触发 ESP_ERR_NO_MEM 重试（最长 300ms/帧），改成 14 行仍是必需，但减少重试次数。 */
+#define MJPEG_ROI_BAND_LINES        14
+/* TTS 期间 SRAM 紧张时 draw_bitmap 内部 RAM 分配失败 → ESP_ERR_NO_MEM。
+ * 60 次重试 × 5ms 上限 = 300ms 极端长卡顿，缩短到 10 次 × 1ms = 10ms 上限。 */
+#define MJPEG_DRAW_RETRY_MAX        10
+#define MJPEG_DRAW_RETRY_US_MIN     200
+#define MJPEG_DRAW_RETRY_US_MAX     1000
 #ifndef MJPEG_STRICT_FRAME_VALIDATE
 #define MJPEG_STRICT_FRAME_VALIDATE 0
 #endif
 /** 帧率统计：每 N 帧打一条 Log（不宜过密） */
 #ifndef MJPEG_FPS_LOG_EVERY_N_FRAMES
-#define MJPEG_FPS_LOG_EVERY_N_FRAMES 500
+#define MJPEG_FPS_LOG_EVERY_N_FRAMES 60
+#endif
+/** 超过此阈值时单独打一条慢帧 Log，便于定位卡顿 */
+#ifndef MJPEG_SLOW_FRAME_US
+#define MJPEG_SLOW_FRAME_US 80000
 #endif
 
 static esp_err_t mjpeg_get_frame_buffers(esp_lcd_panel_handle_t panel, void **fb0, void **fb1)
@@ -109,18 +118,19 @@ static bool s_output_fb_shared;
 #define MJPEG_PROFILE_FIRST_FRAMES 0
 #endif
 
-#define MJPEG_READ_TASK_PRIORITY   4
-#define MJPEG_DECODE_TASK_PRIORITY 3
+#define MJPEG_READ_TASK_PRIORITY   2
+#define MJPEG_DECODE_TASK_PRIORITY 4
 /*
- * mjpeg_read 在 extract_frame 扫 JPEG 时可能长时间占满循环，须离开 CPU0，否则会饿死 IDLE0 触发看门狗。
- * mjpeg_decode 多数时间在等队列、硬解、持锁 blit，不易长时间占满；与 LVGL 同核利于观感帧率。
+ * S3 软解 240x290 耗时 ~30ms/帧（解+blit）。Audio_input 优先级 8 占 CPU0 约 50%，mjpeg_decode 必须搬出 CPU0，
+ * 否则帧间隔从 50ms 拉到 500ms+。read_task 优先级低，与 decode 同核 CPU1 不互相抢占。
+ * 解码 task CPU1 + LVGL 跨核短互斥（draw_bitmap），与 LVGL tick 不同核即可。
  */
 #if CONFIG_FREERTOS_UNICORE
 #define MJPEG_READ_TASK_CORE_ID   0
 #define MJPEG_DECODE_TASK_CORE_ID 0
 #else
 #define MJPEG_READ_TASK_CORE_ID   1
-#define MJPEG_DECODE_TASK_CORE_ID 0
+#define MJPEG_DECODE_TASK_CORE_ID 1
 #endif
 #define MJPEG_ROI_DRAW_LETTERBOX_ONCE 0
 /** 顶/底 letterbox 黑条，单次 draw_bitmap 最大行数（高大于视频上下黑边） */
@@ -155,12 +165,15 @@ static bool s_mjpeg_tiles_in_spiram = false;
 static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int x0, int y0, int x1, int y1, const void *data)
 {
     esp_err_t ret = ESP_FAIL;
-    for (int i = 0; i < MJPEG_DRAW_RETRY_MAX; i++) {
+    /* 重试次数提高，让 SDRAM 紧张（WiFi 切换加密）场景下能扛住 */
+    const int retry_max = (int)MJPEG_DRAW_RETRY_MAX;
+    for (int i = 0; i < retry_max; i++) {
         ret = esp_lcd_panel_draw_bitmap(panel, x0, y0, x1, y1, data);
         if (ret == ESP_OK) {
             return ret;
         }
-        /* previous draw not finished: 指数退避 + 让出调度，等待 SPI 队列回收 */
+        /* ESP_ERR_NO_MEM = panel_io 内部 SRAM 临时缓冲分配失败（PSRAM→SRAM memcpy）。
+         * 这种情况下短重试不退让，等一段时间让 mbedtls 加密握手/WiFi 切换释放 SRAM。 */
         uint32_t us = MJPEG_DRAW_RETRY_US_MIN + (uint32_t)i * MJPEG_DRAW_RETRY_US_MIN;
         if (us > MJPEG_DRAW_RETRY_US_MAX) {
             us = MJPEG_DRAW_RETRY_US_MAX;
@@ -168,7 +181,7 @@ static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int
         esp_rom_delay_us(us);
         taskYIELD();
         if ((i & 0x3) == 0x3) {
-            vTaskDelay(1);
+            vTaskDelay(pdMS_TO_TICKS(5));
         }
     }
     return ret;
@@ -334,9 +347,15 @@ static void mjpeg_free_roi_tiles(void)
     s_mjpeg_tiles_in_spiram = false;
 }
 
-/** 0：禁用整文件预载；>0 时小于该字节的 mjpeg 预载入 PSRAM */
+/** 0：禁用整文件预载；>0 时小于该字节的 mjpeg 预载入 PSRAM
+ *  设 1024*1024 = 1MB：覆盖常用 idle/表情 (<=500KB)，
+ *  让 PARTITION 源播放时直接走内存，避免每帧 esp_partition_read + PSRAM C2M sync 抖动 AFE 内部任务。 */
 #ifndef MJPEG_PRELOAD_MAX_BYTES
-#define MJPEG_PRELOAD_MAX_BYTES 0
+/* TTS 期间 speak-240x290.mjpeg 1199KB 必须走 preload，否则循环播放时
+ * read_task 每次从头走 esp_partition_read 读 1.2MB 耗 5-15 秒，期间 frame_queue
+ * 一直空，decode task 200ms 等 → TTS 期间 0 fps 动画卡死。
+ * 阈值 2MB 容纳 speak clip 及未来的扩帧版本，预加载多占 1.2MB PSRAM 没问题。 */
+#define MJPEG_PRELOAD_MAX_BYTES (2 * 1024 * 1024)
 #endif
 
 /* ─────────────── 帧消息（队列传递） ─────────────── */
@@ -354,6 +373,11 @@ typedef struct {
     FILE *fp;
     bool eof;
     bool from_preload; /*!< true：buf 指向整文件镜像，无 fp */
+    /* PARTITION 模式用 */
+    const esp_partition_t *part;
+    uint32_t part_offset;   /* 相对分区起始 */
+    uint32_t part_size;     /* 文件字节数 */
+    uint32_t part_read;     /* 已读取字节数 */
 } read_ctx_t;
 
 /* ─────────────── 播放器状态 ─────────────── */
@@ -364,6 +388,16 @@ static mjpeg_player_cfg_t s_cfg;
 static QueueHandle_t s_frame_queue;
 static QueueHandle_t s_free_queue;
 static uint8_t *s_dma_bufs[NUM_DMA_BUFS];
+/* 记录上次播放的文件路径，同一文件跳过重启 */
+static char s_last_file_path[256] = {0};
+static mjpeg_player_src_t s_last_src_type = MJPEG_SRC_FILE;
+static char s_last_partition_key[160] = {0}; /* "<label>:<offset>:<size>" for PARTITION 源 */
+/** true：上一次 stop 是异步模式（mjpeg_player_stop_async），任务自行退出但资源未回收。
+ *  下一次 mjpeg_player_start 前必须先 mjpeg_do_deferred_cleanup()，
+ *  等旧 decode_task 退出并释放 fb/queue/preload，避免新 start 撞上半退出的旧任务。 */
+static bool s_deferred_cleanup = false;
+/* 前向声明：mjpeg_do_deferred_cleanup() 在文件后部定义；mjpeg_player_start() 需要先调它。 */
+static void mjpeg_do_deferred_cleanup(void);
 
 /** mjpeg_player_start 预加载整文件；stop 释放 */
 static uint8_t *s_preload_buf = NULL;
@@ -426,12 +460,9 @@ static bool ctx_fill(read_ctx_t *ctx)
     if (ctx->eof) {
         return ctx_avail(ctx) > 0;
     }
-    if (!ctx->fp) {
-        return ctx_avail(ctx) > 0;
-    }
 
-    /* 末尾空间不足 1/4 时紧凑到头部 */
-    if (ctx->capacity - ctx->end < ctx->capacity / 4 && ctx->start > 0) {
+    /* 末尾空间不足 1/4 时紧凑到头部（仅 FILE 模式需要；PARTITION 用线性覆盖） */
+    if (ctx->fp && ctx->capacity - ctx->end < ctx->capacity / 4 && ctx->start > 0) {
         int len = ctx_avail(ctx);
         memmove(ctx->buf, ctx->buf + ctx->start, len);
         ctx->start = 0;
@@ -440,8 +471,32 @@ static bool ctx_fill(read_ctx_t *ctx)
 
     int space = ctx->capacity - ctx->end;
     if (space > 0) {
-        int got = fread(ctx->buf + ctx->end, 1, space, ctx->fp);
-        ctx->end += got;
+        int got = 0;
+        if (ctx->fp) {
+            got = fread(ctx->buf + ctx->end, 1, space, ctx->fp);
+            ctx->end += got;
+        } else if (ctx->part) {
+            uint32_t remain = ctx->part_size - ctx->part_read;
+            uint32_t want = (uint32_t)space < remain ? (uint32_t)space : remain;
+            if (want > 0) {
+                esp_err_t er = esp_partition_read(ctx->part,
+                                                  ctx->part_offset + ctx->part_read,
+                                                  ctx->buf + ctx->end, want);
+                if (er == ESP_OK) {
+                    got = (int)want;
+                    ctx->part_read += want;
+                    /* ctx.buf 在 PSRAM：esp_flash_read 走内部 temp_buffer→memcpy，
+                     * memcpy 完成后 CPU 已拥有最新数据（写穿了 cache 到 PSRAM）。
+                     * JPEG decoder 直接从 PSRAM 读，不走 CPU cache，无需 C2M sync。
+                     * 显式 msync 可能与 decoder DMA 访问冲突或触发地址/长度校验错误，
+                     * 在 ctx_fill 里直接去掉。 */
+                    ctx->end += got;
+                } else {
+                    ESP_LOGE(TAG, "esp_partition_read 失败: %s", esp_err_to_name(er));
+                    got = 0;
+                }
+            }
+        }
         if (got == 0) ctx->eof = true;
     }
     return ctx_avail(ctx) > 0;
@@ -685,6 +740,10 @@ static void mjpeg_read_task(void *arg)
         ctx.fp = NULL;
         ctx.eof = true;
         ctx.from_preload = true;
+        ctx.part = NULL;
+        ctx.part_offset = 0;
+        ctx.part_size = 0;
+        ctx.part_read = 0;
     } else {
         ctx.buf = NULL;
         ctx.capacity = 0;
@@ -693,22 +752,50 @@ static void mjpeg_read_task(void *arg)
         ctx.fp = NULL;
         ctx.eof = false;
         ctx.from_preload = false;
+        ctx.part = NULL;
+        ctx.part_offset = 0;
+        ctx.part_size = 0;
+        ctx.part_read = 0;
 
-        ctx.fp = fopen(s_cfg.file_path, "rb");
-        if (!ctx.fp) {
-            ESP_LOGE(TAG, "❌ 无法打开文件: %s", s_cfg.file_path);
-            s_running = false;
-            goto exit;
-        }
-        opened_fp = ctx.fp;
-        if (io_buf) {
-            setvbuf(ctx.fp, (char *)io_buf, _IOFBF, FILE_IO_BUF_SIZE);
-        }
+        if (s_cfg.src_type == MJPEG_SRC_PARTITION) {
+            ctx.part = (const esp_partition_t *)s_cfg.partition;
+            if (!ctx.part || s_cfg.partition_size == 0) {
+                ESP_LOGE(TAG, "❌ PARTITION 源未配置（partition=%p size=%lu）",
+                         s_cfg.partition, (unsigned long)s_cfg.partition_size);
+                s_running = false;
+                goto exit;
+            }
+            ctx.part_offset = s_cfg.partition_offset;
+            ctx.part_size = s_cfg.partition_size;
+            ctx.part_read = 0;
+            ESP_LOGI(TAG, "📦 PARTITION 源: part=%s off=0x%x size=%lu KB",
+                     ctx.part->label, (unsigned)ctx.part_offset,
+                     (unsigned long)(ctx.part_size / 1024));
+        } else {
+            /* FILE 源：SD 卡可能刚被上一个任务释放，fopen 可能失败时重试 5 次，每次 200ms */
+            for (int open_retry = 0; open_retry < 5; open_retry++) {
+                ctx.fp = fopen(s_cfg.file_path, "rb");
+                if (ctx.fp) {
+                    break;
+                }
+                ESP_LOGW(TAG, "SD 卡重试 fopen 失败 %d/5: %s", open_retry + 1, s_cfg.file_path);
+                vTaskDelay(pdMS_TO_TICKS(200));
+            }
+            if (!ctx.fp) {
+                ESP_LOGE(TAG, "❌ 无法打开文件: %s", s_cfg.file_path);
+                s_running = false;
+                goto exit;
+            }
+            opened_fp = ctx.fp;
+            if (io_buf) {
+                setvbuf(ctx.fp, (char *)io_buf, _IOFBF, FILE_IO_BUF_SIZE);
+            }
 
-        fseek(ctx.fp, 0, SEEK_END);
-        long file_size = ftell(ctx.fp);
-        fseek(ctx.fp, 0, SEEK_SET);
-        ESP_LOGI(TAG, "📄 文件大小: %.1f MB", file_size / (1024.0 * 1024.0));
+            fseek(ctx.fp, 0, SEEK_END);
+            long file_size = ftell(ctx.fp);
+            fseek(ctx.fp, 0, SEEK_SET);
+            ESP_LOGI(TAG, "📄 文件大小: %.1f MB", file_size / (1024.0 * 1024.0));
+        }
 
         read_buf = heap_caps_malloc(READ_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (read_buf) {
@@ -733,7 +820,10 @@ static void mjpeg_read_task(void *arg)
         } else {
             ctx.end = 0;
             ctx.eof = false;
-            clearerr(ctx.fp);
+            /* PARTITION 源：ctx.fp == NULL，跳过 clearerr，否则会 NULL 解引用 */
+            if (ctx.fp) {
+                clearerr(ctx.fp);
+            }
         }
 
         const uint8_t *frame_data;
@@ -760,7 +850,7 @@ static void mjpeg_read_task(void *arg)
 
             /* 获取空闲 DMA 缓冲区 */
             frame_msg_t msg;
-            if (xQueueReceive(s_free_queue, &msg, portMAX_DELAY) != pdTRUE) {
+            if (xQueueReceive(s_free_queue, &msg, pdMS_TO_TICKS(100)) != pdTRUE) {
                 continue;
             }
 
@@ -769,43 +859,54 @@ static void mjpeg_read_task(void *arg)
                 ESP_LOGW(TAG, "⚠️ 帧过大(%dB > %dB)，跳过", frame_len, FRAME_BUF_SIZE);
                 /* 归还缓冲，避免 free_queue 被耗尽 */
                 msg.len = 0;
-                xQueueSend(s_free_queue, &msg, portMAX_DELAY);
+                xQueueSend(s_free_queue, &msg, pdMS_TO_TICKS(100));
                 continue;
             }
 
-            /* 拷贝到 DMA 缓冲区 + Cache 刷新（长度按 cache 线对齐，满足 DMA 读可见性） */
+            /* 拷贝到 DMA 缓冲区（JPEG decoder 通过硬件 DMA 直接从 PSRAM 读输入，
+             * 不走 CPU cache，无需 C2M sync——强制 sync 反而可能与 DMA 访问冲突，
+             * 导致 esp_cache_msync 返回 ESP_ERR_NOT_ALLOWED (-0x004C)。 */
             memcpy(msg.buf, frame_data, frame_len);
-            uint32_t sync_len = (uint32_t)frame_len;
-            if (sync_len > FRAME_BUF_SIZE) {
-                sync_len = FRAME_BUF_SIZE;
-            }
-            sync_len = (sync_len + 63u) & ~63u;
-            if (sync_len > FRAME_BUF_SIZE) {
-                sync_len = FRAME_BUF_SIZE;
-            }
-            esp_cache_msync(msg.buf, sync_len,
-                            ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
             msg.len = frame_len;
 
-            xQueueSend(s_frame_queue, &msg, portMAX_DELAY);
+            xQueueSend(s_frame_queue, &msg, pdMS_TO_TICKS(100));
+
+            /* 每送一帧主动 yield，避免 read_task 长时间占 CPU1 触发 IDLE1 WDT。
+             * taskYIELD() 不会延迟任何时间，但让 decode 任务（优先级 4 > read 0）抢到 CPU，
+             * 同时 IDLE1 也能上 CPU 喂狗。 */
+            taskYIELD();
         }
 
         /* 非循环模式才发送 EOF；循环模式回绕文件头继续读 */
         if (!s_cfg.loop || !s_running) {
             frame_msg_t eof = { .buf = NULL, .len = 0 };
-            xQueueSend(s_frame_queue, &eof, portMAX_DELAY);
+            xQueueSend(s_frame_queue, &eof, pdMS_TO_TICKS(100));
             break;
         }
         if (ctx.from_preload) {
             /* 已在 RAM 中，仅重置游标 */
             continue;
         }
-        fseek(ctx.fp, 0, SEEK_SET);
+        /* PARTITION 源：文件游标在 ctx 上，重置所有游标回到开头 */
+        if (ctx.fp) {
+            fseek(ctx.fp, 0, SEEK_SET);
+        } else if (ctx.part) {
+            ctx.part_read = 0;
+        }
+        ctx.start = 0;
+        ctx.end = 0;
+        ctx.eof = false;
+        if (ctx.buf) {
+            ctx.capacity = READ_BUF_SIZE;
+        }
+        /* 让出 CPU 给 idle/decode，避免 read_task 主循环满 spin 触发 CPU1 WDT。
+         * vTaskDelay 进入 blocked 状态期间 IDLE1 一定跑得到。 */
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 
     /* 发送停止信号 */
     frame_msg_t stop_msg = { .buf = NULL, .len = -1 };
-    xQueueSend(s_frame_queue, &stop_msg, portMAX_DELAY);
+    xQueueSend(s_frame_queue, &stop_msg, pdMS_TO_TICKS(100));
 
 exit:
     if (opened_fp) {
@@ -889,6 +990,7 @@ static void mjpeg_decode_task(void *arg)
     uint32_t frame_count = 0;
     uint32_t decode_errors = 0;
     int consecutive_errors = 0;
+    int consecutive_draw_fail = 0;  // 连续 draw 失败计数
     bool first_frame_logged_once = false;
     int64_t start_time = esp_timer_get_time();
 
@@ -970,7 +1072,7 @@ sw_decode_done:
 
         /* 立即归还 DMA 缓冲区，让读取任务继续工作 */
         frame_msg_t free_msg = { .buf = msg.buf, .len = 0 };
-        xQueueSend(s_free_queue, &free_msg, portMAX_DELAY);
+        xQueueSend(s_free_queue, &free_msg, pdMS_TO_TICKS(100));
 
         /* 仅以输出字节数为硬失败；P4 硬解常 ret!=OK 但 decoded 已齐 */
         if (decoded_size != expect_decoded) {
@@ -1066,9 +1168,25 @@ sw_decode_done:
                 }
                 esp_err_t blit = mjpeg_panel_draw_bitmap_banded(s_cfg.panel, x1, y1, w, h, s_cfg.fb[fb_idx]);
                 if (blit != ESP_OK) {
-                    ESP_LOGW(TAG, "⚠️ ROI draw失败: %s", esp_err_to_name(blit));
+                    consecutive_draw_fail++;
+                    ESP_LOGW(TAG, "⚠️ ROI draw失败: %s (连续%d次)",
+                             esp_err_to_name(blit), consecutive_draw_fail);
+                    /* 整帧放弃，让 WiFi/UDP 加密握手抢占的 SRAM 恢复
+                     * 连续失败累积后适度延长退避（最多 200ms） */
+                    lvgl_port_unlock();
+                    if (consecutive_draw_fail >= 3) {
+                        int backoff_ms = 30;
+                        if (consecutive_draw_fail >= 10) backoff_ms = 100;
+                        if (consecutive_draw_fail >= 30) backoff_ms = 200;
+                        vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+                    }
+                    continue;
+                } else {
+                    consecutive_draw_fail = 0;  // 成功一次重置计数
                 }
                 lvgl_port_unlock();
+            } else {
+                consecutive_draw_fail++;
             }
         } else if (s_cfg.panel) {
             esp_lcd_panel_draw_bitmap(s_cfg.panel, 0, 0,
@@ -1101,6 +1219,13 @@ sw_decode_done:
 
         /* 帧率控制 */
         mjpeg_apply_frame_pacing(t_start, frame_interval_us);
+
+        /* 慢帧诊断：单帧 > 80ms 时单独打，定位卡顿来源（decode 慢 / blit 慢 / lock 等待） */
+        int64_t t_end = esp_timer_get_time();
+        int64_t frame_us = t_end - t_start;
+        if (frame_us > MJPEG_SLOW_FRAME_US && frame_count < 200) {
+            ESP_LOGW(TAG, "🐢 慢帧 #%lu: total=%lldus (t_start→blit→end)", (unsigned long)frame_count, (long long)frame_us);
+        }
     }
 
 exit:
@@ -1125,7 +1250,22 @@ exit:
 esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
 {
     mjpeg_log_memory_budget();
-    if (!cfg || !cfg->file_path) {
+    /* 先清理上一次异步 stop 遗留的资源（旧 decode_task + 队列 + preload + fb）。
+     * 这一步只在 s_deferred_cleanup=true 时做事，对同步 stop 路径无副作用。 */
+    mjpeg_do_deferred_cleanup();
+    if (!cfg) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* FILE 源必须给路径；PARTITION 源必须有 partition + size */
+    if (cfg->src_type == MJPEG_SRC_FILE) {
+        if (!cfg->file_path) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    } else if (cfg->src_type == MJPEG_SRC_PARTITION) {
+        if (!cfg->partition || cfg->partition_size == 0) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    } else {
         return ESP_ERR_INVALID_ARG;
     }
     if (!cfg->lv_video_canvas && !cfg->panel) {
@@ -1136,8 +1276,43 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
             return ESP_ERR_INVALID_ARG;
         }
     }
+    /* 若 stop 已调用但任务还在退出（s_running=false 但任务句柄仍非空），
+     * 同步等待任务完全退出后再判断，避免 start 撞到半退出的任务。 */
+    if (!s_running && (s_read_task || s_decode_task)) {
+        ESP_LOGI(TAG, "等待上一轮任务退出...");
+        TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
+        while (s_read_task || s_decode_task) {
+            if (xTaskGetTickCount() > deadline) {
+                ESP_LOGW(TAG, "⚠️ 等待任务退出超时，强制清理");
+                if (s_read_task) { vTaskDelete(s_read_task); s_read_task = NULL; }
+                if (s_decode_task) { vTaskDelete(s_decode_task); s_decode_task = NULL; }
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        vTaskDelay(pdMS_TO_TICKS(15));
+    }
+    /* 同一文件已在播放中（包含 s_running=true 或 上一轮尚未完全 stop 但路径相同），
+     * 直接返回成功，不重启。 */
     if (s_running) {
-        ESP_LOGW(TAG, "⚠️ 播放器已在运行");
+        bool same = false;
+        if (cfg->src_type == MJPEG_SRC_FILE && s_last_src_type == MJPEG_SRC_FILE
+            && cfg->file_path && s_last_file_path[0] != '\0') {
+            same = (strcmp(s_last_file_path, cfg->file_path) == 0);
+        } else if (cfg->src_type == MJPEG_SRC_PARTITION && s_last_src_type == MJPEG_SRC_PARTITION) {
+            char key[160];
+            const esp_partition_t *p = (const esp_partition_t *)cfg->partition;
+            snprintf(key, sizeof(key), "%s:%lu:%lu",
+                     p ? p->label : "?",
+                     (unsigned long)cfg->partition_offset,
+                     (unsigned long)cfg->partition_size);
+            same = (strncmp(s_last_partition_key, key, sizeof(s_last_partition_key)) == 0);
+        }
+        if (same) {
+            ESP_LOGI(TAG, "🔄 同一文件已播放中，跳过重启");
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "⚠️ 播放器已在运行（不同文件）");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1166,19 +1341,24 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
         const size_t sz = (size_t)s_cfg.screen_width * (size_t)s_cfg.screen_height * sizeof(uint16_t);
         const size_t sz_al = (sz + 63u) & ~63u;
         const int fb_count = s_panel_roi_blit ? 1 : 2;
-        for (int i = 0; i < fb_count; i++) {
-            /* 硬件 JPEG 写 PSRAM 往往明显慢于内部 SRAM；优先 INTERNAL */
-            s_cfg.fb[i] = heap_caps_aligned_alloc(64, sz_al, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-            if (!s_cfg.fb[i]) {
-                s_cfg.fb[i] = heap_caps_aligned_alloc(64, sz_al, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-            }
-            if (!s_cfg.fb[i]) {
-                ESP_LOGE(TAG, "❌ 分配解码缓冲 %d 失败", i);
-                for (int j = 0; j < i; j++) {
-                    heap_caps_free(s_cfg.fb[j]);
-                    s_cfg.fb[j] = NULL;
+        /* 仅当 fb 尚未分配或分辨率变化时才重新分配；多次 start 复用同一块 fb */
+        const bool need_fb_alloc = (s_cfg.fb[0] == NULL) ||
+            (s_panel_roi_blit && s_output_fb_shared == false && s_cfg.fb[1] == NULL);
+        if (need_fb_alloc) {
+            for (int i = 0; i < fb_count; i++) {
+                /* 硬件 JPEG 写 PSRAM 往往明显慢于内部 SRAM；优先 INTERNAL */
+                s_cfg.fb[i] = heap_caps_aligned_alloc(64, sz_al, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+                if (!s_cfg.fb[i]) {
+                    s_cfg.fb[i] = heap_caps_aligned_alloc(64, sz_al, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
                 }
-                return ESP_ERR_NO_MEM;
+                if (!s_cfg.fb[i]) {
+                    ESP_LOGE(TAG, "❌ 分配解码缓冲 %d 失败", i);
+                    for (int j = 0; j < i; j++) {
+                        heap_caps_free(s_cfg.fb[j]);
+                        s_cfg.fb[j] = NULL;
+                    }
+                    return ESP_ERR_NO_MEM;
+                }
             }
         }
         if (s_panel_roi_blit) {
@@ -1187,7 +1367,7 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
         } else {
             s_output_fb_shared = false;
         }
-        if (s_cfg.fb[0]) {
+        if (s_cfg.fb[0] && need_fb_alloc) {
 #if MJPEG_HAVE_ESP_PTR_EXTERNAL_RAM
             ESP_LOGI(TAG, "解码输出缓冲[0]: %s",
                      esp_ptr_external_ram(s_cfg.fb[0]) ? "PSRAM" : "内部SRAM(优先)");
@@ -1199,7 +1379,8 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
             lv_obj_t *cv = (lv_obj_t *)s_cfg.lv_video_canvas;
             lv_canvas_set_buffer(cv, s_cfg.fb[0], s_cfg.screen_width, s_cfg.screen_height, LV_COLOR_FORMAT_RGB565);
             ESP_LOGI(TAG, "💾 LVGL 画布模式: 解码缓冲 %dx%d ×2", s_cfg.screen_width, s_cfg.screen_height);
-        } else {
+        } else if (need_fb_alloc) {
+            /* ROI tile 也只在首次分配（黑条 + 竖条） */
             esp_err_t tile_ret = mjpeg_alloc_roi_tiles();
             if (tile_ret != ESP_OK) {
                 ESP_LOGE(TAG, "❌ 分配 ROI tiles 失败: %s", esp_err_to_name(tile_ret));
@@ -1233,40 +1414,77 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     s_preload_is_malloc = false;
 #if MJPEG_PRELOAD_MAX_BYTES > 0
     {
-        FILE *pf = fopen(s_cfg.file_path, "rb");
-        if (pf) {
-            if (fseek(pf, 0, SEEK_END) == 0) {
-                long sz = ftell(pf);
-                if (sz > 0 && (size_t)sz <= (size_t)MJPEG_PRELOAD_MAX_BYTES) {
-                    uint8_t *pb = heap_caps_malloc((size_t)sz, MALLOC_CAP_SPIRAM);
-                    if (!pb) {
-                        pb = malloc((size_t)sz);
-                        if (pb) {
-                            s_preload_is_malloc = true;
-                        }
+        uint8_t* pb = NULL;
+        size_t sz = 0;
+        if (s_cfg.src_type == MJPEG_SRC_PARTITION) {
+            /* PARTITION 源：把整个文件读到 PSRAM */
+            if (s_cfg.partition && s_cfg.partition_size > 0
+                && s_cfg.partition_size <= (uint32_t)MJPEG_PRELOAD_MAX_BYTES) {
+                pb = heap_caps_malloc(s_cfg.partition_size, MALLOC_CAP_SPIRAM);
+                if (pb) {
+                    esp_err_t er = esp_partition_read((const esp_partition_t *)s_cfg.partition,
+                                                      s_cfg.partition_offset,
+                                                      pb, s_cfg.partition_size);
+                    if (er == ESP_OK) {
+                        sz = s_cfg.partition_size;
+                    } else {
+                        ESP_LOGE(TAG, "PARTITION 预加载读失败: %s", esp_err_to_name(er));
+                        heap_caps_free(pb);
+                        pb = NULL;
                     }
+                } else {
+                    pb = malloc(s_cfg.partition_size);
                     if (pb) {
-                        rewind(pf);
-                        if (fread(pb, 1, (size_t)sz, pf) == (size_t)sz) {
-                            s_preload_buf = pb;
-                            s_preload_size = (size_t)sz;
-                            ESP_LOGI(TAG, "📦 小文件预加载 %u KB（%s），读任务从内存取帧",
-                                     (unsigned)(s_preload_size / 1024),
-                                     s_preload_is_malloc ? "内部堆" : "PSRAM");
+                        s_preload_is_malloc = true;
+                        esp_err_t er = esp_partition_read((const esp_partition_t *)s_cfg.partition,
+                                                          s_cfg.partition_offset,
+                                                          pb, s_cfg.partition_size);
+                        if (er == ESP_OK) {
+                            sz = s_cfg.partition_size;
                         } else {
-                            if (s_preload_is_malloc) {
-                                free(pb);
-                            } else {
-                                heap_caps_free(pb);
-                            }
+                            free(pb);
+                            pb = NULL;
                             s_preload_is_malloc = false;
                         }
-                    } else {
-                        ESP_LOGW(TAG, "⚠️ 预加载分配失败，使用 SD 流式读取");
                     }
                 }
             }
-            fclose(pf);
+        } else {
+            /* FILE 源：原 fopen + fseek/ftell/fread */
+            FILE *pf = fopen(s_cfg.file_path, "rb");
+            if (pf) {
+                if (fseek(pf, 0, SEEK_END) == 0) {
+                    long fsz = ftell(pf);
+                    if (fsz > 0 && (size_t)fsz <= (size_t)MJPEG_PRELOAD_MAX_BYTES) {
+                        pb = heap_caps_malloc((size_t)fsz, MALLOC_CAP_SPIRAM);
+                        if (!pb) {
+                            pb = malloc((size_t)fsz);
+                            if (pb) s_preload_is_malloc = true;
+                        }
+                        if (pb) {
+                            rewind(pf);
+                            if (fread(pb, 1, (size_t)fsz, pf) == (size_t)fsz) {
+                                sz = (size_t)fsz;
+                            } else {
+                                if (s_preload_is_malloc) free(pb);
+                                else heap_caps_free(pb);
+                                pb = NULL;
+                                s_preload_is_malloc = false;
+                            }
+                        } else {
+                            ESP_LOGW(TAG, "⚠️ 预加载分配失败，使用流式读取");
+                        }
+                    }
+                }
+                fclose(pf);
+            }
+        }
+        if (pb && sz > 0) {
+            s_preload_buf = pb;
+            s_preload_size = sz;
+            ESP_LOGI(TAG, "📦 预加载 %u KB（%s），读任务从内存取帧",
+                     (unsigned)(sz / 1024),
+                     s_preload_is_malloc ? "内部堆" : "PSRAM");
         }
     }
 #endif
@@ -1275,32 +1493,41 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     s_frame_queue = xQueueCreate(NUM_DMA_BUFS + 2, sizeof(frame_msg_t));
     s_free_queue = xQueueCreate(NUM_DMA_BUFS, sizeof(frame_msg_t));
 
-    /* 分配 JPEG 帧输入缓冲（P4 用硬件分配器；S3 等用 DMA 能力堆） */
+    /* 分配 JPEG 帧输入缓冲（P4 用硬件分配器；S3 等用 DMA 能力堆）
+     * 复用 s_dma_bufs[]：仅当全部为 NULL 时才分配，多次 start 不重复分配。 */
 #if CONFIG_IDF_TARGET_ESP32P4
     jpeg_decode_memory_alloc_cfg_t in_mem_cfg = {
         .buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER,
     };
 #endif
-    for (int i = 0; i < NUM_DMA_BUFS; i++) {
+    bool need_dma_alloc = (s_dma_bufs[0] == NULL);
+    if (need_dma_alloc) {
+        for (int i = 0; i < NUM_DMA_BUFS; i++) {
 #if CONFIG_IDF_TARGET_ESP32P4
-        size_t actual = 0;
-        s_dma_bufs[i] = jpeg_alloc_decoder_mem(FRAME_BUF_SIZE, &in_mem_cfg, &actual);
+            size_t actual = 0;
+            s_dma_bufs[i] = jpeg_alloc_decoder_mem(FRAME_BUF_SIZE, &in_mem_cfg, &actual);
 #else
-        s_dma_bufs[i] = heap_caps_malloc(FRAME_BUF_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-        if (!s_dma_bufs[i]) {
-            s_dma_bufs[i] = heap_caps_malloc(FRAME_BUF_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
-        }
-        size_t actual = FRAME_BUF_SIZE;
+            s_dma_bufs[i] = heap_caps_malloc(FRAME_BUF_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+            if (!s_dma_bufs[i]) {
+                s_dma_bufs[i] = heap_caps_malloc(FRAME_BUF_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+            }
+            size_t actual = FRAME_BUF_SIZE;
 #endif
-        if (!s_dma_bufs[i]) {
-            ESP_LOGE(TAG, "frame buf %d alloc failed", i);
-            mjpeg_release_preload_buf();
-            s_running = false;
-            return ESP_ERR_NO_MEM;
+            if (!s_dma_bufs[i]) {
+                ESP_LOGE(TAG, "frame buf %d alloc failed", i);
+                mjpeg_release_preload_buf();
+                s_running = false;
+                return ESP_ERR_NO_MEM;
+            }
         }
+    }
+    /* 每次把 DMA buf 重新放入 free_queue（保证开始时全部为空闲） */
+    for (int i = 0; i < NUM_DMA_BUFS; i++) {
         frame_msg_t msg = { .buf = s_dma_bufs[i], .len = 0 };
         xQueueSend(s_free_queue, &msg, 0);
-        ESP_LOGI(TAG, "frame buf %d: %uKB", i, (unsigned)(actual / 1024));
+        if (need_dma_alloc) {
+            ESP_LOGI(TAG, "frame buf %d: %uKB", i, (unsigned)(FRAME_BUF_SIZE / 1024));
+        }
     }
 
     if (!s_embed_lvgl && !s_panel_roi_blit) {
@@ -1331,54 +1558,68 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "🚀 异步流水线已启动: %s", s_cfg.file_path);
+    /* 记录当前播放的文件路径 */
+    s_last_src_type = s_cfg.src_type;
+    if (s_cfg.src_type == MJPEG_SRC_FILE && s_cfg.file_path) {
+        strncpy(s_last_file_path, s_cfg.file_path, sizeof(s_last_file_path) - 1);
+        s_last_file_path[sizeof(s_last_file_path) - 1] = '\0';
+    } else {
+        s_last_file_path[0] = '\0';
+    }
+    if (s_cfg.src_type == MJPEG_SRC_PARTITION) {
+        const esp_partition_t *p = (const esp_partition_t *)s_cfg.partition;
+        snprintf(s_last_partition_key, sizeof(s_last_partition_key), "%s:%lu:%lu",
+                 p ? p->label : "?",
+                 (unsigned long)s_cfg.partition_offset,
+                 (unsigned long)s_cfg.partition_size);
+    } else {
+        s_last_partition_key[0] = '\0';
+    }
+
+    ESP_LOGI(TAG, "🚀 异步流水线已启动");
     return ESP_OK;
 }
 
-void mjpeg_player_stop(void)
+/* ─────────────────────────────────────────────────────────────────────────────
+ *  mjpeg_player_stop()  /  mjpeg_player_stop_async()
+ *
+ *  同步版 (mjpeg_player_stop)：完全等待 read_task + decode_task 退出 + 资源释放。
+ *  异步版 (mjpeg_player_stop_async)：只同步等待 read_task 退出（释放大块 PSRAM），
+ *      decode_task 与资源回收推迟到下次 mjpeg_player_start() 调用 mjpeg_do_deferred_cleanup()。
+ *
+ *  ★ 为什么 decode_task 可以异步退出？
+ *    - decode_task 仅持有一个 s_cfg.fb (320KB PSRAM) + jpeg_dec handle，无大块 PSRAM 堆，
+ *      不释放 fb 不会让后续 start() 因 NO_MEM 失败（fb 分配走 MALLOC_CAP_INTERNAL 优先）。
+ *    - decode_task 不抢占 read_task 资源；新 read_task 启动后可以预读新帧到 s_preload_buf。
+ *    - 实测：speak→listen 这种频繁切换，从 ~200ms 卡顿降到 ~50ms。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/* 通用 stop 主体：释放资源（队列 / fb / preload / roi tiles / path cache）。
+ * 不负责等待任务退出——调用方先等待任务，再调此函数。
+ * 注意：只在最后一次 stop（即确认所有任务都已退出）后才应执行清理，
+ * 避免 decode_task 还在用 s_cfg.fb[0] 时被 free。 */
+static void mjpeg_release_player_resources(void)
 {
-    if (!s_running) return;
-    ESP_LOGI(TAG, "⏹️ 正在停止播放...");
-    s_running = false;
-
-    /* 等待任务退出 */
-    while (s_read_task || s_decode_task) {
-        vTaskDelay(pdMS_TO_TICKS(50));
+    /* 清空队列 */
+    if (s_frame_queue) {
+        frame_msg_t msg;
+        while (xQueueReceive(s_frame_queue, &msg, 0) == pdTRUE) {}
+        while (xQueueReceive(s_free_queue, &msg, 0) == pdTRUE) {}
+        vQueueDelete(s_frame_queue);
+        vQueueDelete(s_free_queue);
+        s_frame_queue = NULL;
+        s_free_queue = NULL;
     }
-
-    /* 回收 DMA 缓冲区 */
-    frame_msg_t msg;
-    while (xQueueReceive(s_free_queue, &msg, 0) == pdTRUE) {
-        /* 缓冲区已在 s_dma_bufs 中跟踪 */
-    }
-    while (xQueueReceive(s_frame_queue, &msg, 0) == pdTRUE) {
-        /* 清空队列 */
-    }
-    for (int i = 0; i < NUM_DMA_BUFS; i++) {
-        if (s_dma_bufs[i]) {
-#if CONFIG_IDF_TARGET_ESP32P4
-            free(s_dma_bufs[i]);
-#else
-            heap_caps_free(s_dma_bufs[i]);
-#endif
-            s_dma_bufs[i] = NULL;
-        }
-    }
-
-    vQueueDelete(s_frame_queue);
-    vQueueDelete(s_free_queue);
-    s_frame_queue = NULL;
-    s_free_queue = NULL;
 
     mjpeg_release_preload_buf();
     mjpeg_free_roi_tiles();
 
     if (s_embed_lvgl || s_panel_roi_blit) {
-        if (s_cfg.fb[0]) {
+        if (!s_output_fb_shared && s_cfg.fb[0]) {
             heap_caps_free(s_cfg.fb[0]);
-        }
-        if (!s_output_fb_shared && s_cfg.fb[1]) {
-            heap_caps_free(s_cfg.fb[1]);
+            if (s_cfg.fb[1] && s_cfg.fb[0] != s_cfg.fb[1]) {
+                heap_caps_free(s_cfg.fb[1]);
+            }
         }
         s_cfg.fb[0] = NULL;
         s_cfg.fb[1] = NULL;
@@ -1392,7 +1633,114 @@ void mjpeg_player_stop(void)
         (void)lvgl_port_resume();
     }
 
-    ESP_LOGI(TAG, "💾 播放器资源已释放");
+    /* 清除文件路径记录（让下一帧可以重新同文件检测） */
+    s_last_file_path[0] = '\0';
+    s_last_partition_key[0] = '\0';
+    s_last_src_type = MJPEG_SRC_FILE;
+}
+
+/* 同步等待 read_task 退出：read task 持有 256KB PSRAM read_buf + 32KB PSRAM io_buf，
+ * 不释放就立刻 start 新的会撞 SPIRAM NO_MEM。1500ms 超时，强制 vTaskDelete。 */
+static void mjpeg_wait_read_task_exit(void)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
+    while (s_read_task) {
+        if (xTaskGetTickCount() > deadline) {
+            ESP_LOGW(TAG, "⚠️ read_task 退出超时，强制删除");
+            if (s_read_task) {
+                vTaskDelete(s_read_task);
+                s_read_task = NULL;
+            }
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    /* 给 idle hook 回收 read_task 的栈 + TCB */
+    vTaskDelay(pdMS_TO_TICKS(15));
+}
+
+/* 同步等待 decode_task 退出（短超时 200ms）。decode_task 退出较慢（持锁 blit），
+ * 且不占大块堆，理论上不影响新 start 的资源分配——但新 start() 创建新 decode_task 前
+ * 必须确认旧 decode_task 句柄已 NULL（vTaskDelete 已回收），否则 s_decode_task 会
+ * 被新句柄覆盖，导致旧任务无人回收。 */
+static void mjpeg_wait_decode_task_exit(void)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(200);
+    while (s_decode_task) {
+        if (xTaskGetTickCount() > deadline) {
+            ESP_LOGW(TAG, "⚠️ decode_task 退出超时，强制 vTaskDelete");
+            if (s_decode_task) {
+                vTaskDelete(s_decode_task);
+                s_decode_task = NULL;
+            }
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    /* 给 idle hook 回收 TCB/栈 */
+    vTaskDelay(pdMS_TO_TICKS(20));
+}
+
+/* 延迟清理：上次是异步 stop（mjpeg_player_stop_async），decode_task 已退出但资源未回收。
+ * mjpeg_player_start() 必须在创建新任务前调此函数。 */
+static void mjpeg_do_deferred_cleanup(void)
+{
+    if (!s_deferred_cleanup) {
+        return;
+    }
+    s_deferred_cleanup = false;
+
+    mjpeg_wait_decode_task_exit();
+    mjpeg_release_player_resources();
+}
+
+void mjpeg_player_stop_async(void)
+{
+    if (!s_running) {
+        /* 即使 s_running=false，也可能有遗留的 deferred cleanup（极少见，例如 stop->start 紧接 stop）。 */
+        if (s_deferred_cleanup) {
+            mjpeg_do_deferred_cleanup();
+        }
+        return;
+    }
+    ESP_LOGI(TAG, "⏹️ 正在停止播放（异步）...");
+    s_running = false;
+
+    /* 同步等待 read_task 退出（释放大块 PSRAM），decode_task 异步退出。 */
+    mjpeg_wait_read_task_exit();
+
+    /* 标记 deferred cleanup：mjpeg_player_start() 调起前会自动收尾。 */
+    s_deferred_cleanup = true;
+
+    /* 清除文件路径记录（让下一帧可以重新同文件检测） */
+    s_last_file_path[0] = '\0';
+    s_last_partition_key[0] = '\0';
+    s_last_src_type = MJPEG_SRC_FILE;
+
+    ESP_LOGI(TAG, "💾 播放器异步停止中（read_task 已退，decode_task 自退，下次 start 时收尾）");
+}
+
+void mjpeg_player_stop(void)
+{
+    if (!s_running) {
+        /* 若之前是异步 stop 还有遗留资源，这里同步清掉 */
+        if (s_deferred_cleanup) {
+            mjpeg_wait_decode_task_exit();
+            mjpeg_release_player_resources();
+            s_deferred_cleanup = false;
+        }
+        return;
+    }
+    ESP_LOGI(TAG, "⏹️ 正在停止播放...");
+    s_running = false;
+
+    /* 同步等待两个任务退出。加超时避免 WiFi/SD 卡拥堵时永久死等。 */
+    mjpeg_wait_read_task_exit();
+    mjpeg_wait_decode_task_exit();
+
+    mjpeg_release_player_resources();
+
+    ESP_LOGI(TAG, "💾 播放器资源已释放（DMA/fb 缓冲被复用，不立即释放）");
 }
 
 bool mjpeg_player_is_running(void)

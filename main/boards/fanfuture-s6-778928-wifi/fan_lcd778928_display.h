@@ -272,7 +272,9 @@ private:
             if (clip_path == current_mjpeg_path_) {
                 return true;
             }
-            mjpeg_player_stop();
+            /* 用异步 stop：仅等 read_task 退出（释放大块 PSRAM），旧 decode_task 自行退出，
+             * 状态切换卡顿从 ~200ms 降到 ~50ms，与 P4 项目相同的处理方式。 */
+            mjpeg_player_stop_async();
         }
 
         int rx = (width_ - static_cast<int>(kMjpegVideoWidth)) / 2;
