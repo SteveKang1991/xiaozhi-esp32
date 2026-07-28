@@ -996,6 +996,11 @@ static void mjpeg_decode_task(void *arg)
 
     const int64_t frame_interval_us = s_cfg.target_fps > 0 ?
         (1000000 / s_cfg.target_fps) : 0;
+    /* 严格不超速：维护绝对墙钟节拍 next_frame_deadline_us。
+     * 每帧到达时若比 deadline 早则 sleep 至 deadline；否则落后时立即放行并把
+     * deadline 推进一格，保证长期平均 fps <= target_fps。 */
+    int64_t next_frame_deadline_us = (frame_interval_us > 0) ?
+        esp_timer_get_time() + frame_interval_us : 0;
 
     while (s_running) {
         frame_msg_t msg;
@@ -1020,6 +1025,10 @@ static void mjpeg_decode_task(void *arg)
             decode_errors = 0;
             consecutive_errors = 0;
             start_time = esp_timer_get_time();
+            /* 文件结束重置后，重新对齐 deadline 到下一格，避免回到 0 立刻放行造成超速 */
+            if (frame_interval_us > 0) {
+                next_frame_deadline_us = esp_timer_get_time() + frame_interval_us;
+            }
             continue;
         }
 
@@ -1217,8 +1226,22 @@ sw_decode_done:
                       (unsigned long)decode_errors);
         }
 
-        /* 帧率控制 */
-        mjpeg_apply_frame_pacing(t_start, frame_interval_us);
+        /* 帧率控制（严格不超速）：
+         *  - 若当前时间早于 next_frame_deadline_us，补 sleep 至 deadline
+         *  - 否则落后于节奏，立即放行本帧并把 deadline 推进一格（不再叠加延时）
+         *  这样长期平均 fps == target_fps，且绝不会因单帧耗时 < interval 而累加超速 */
+        if (frame_interval_us > 0) {
+            const int64_t now_us = esp_timer_get_time();
+            int64_t delay_us = next_frame_deadline_us - now_us;
+            if (delay_us > 0) {
+                vTaskDelay(pdMS_TO_TICKS((delay_us + 999) / 1000));
+            }
+            next_frame_deadline_us += frame_interval_us;
+            /* 如果落后太多（>2 帧），把 deadline 拨到现在，避免下一次又立刻放行造成追赶超速 */
+            if (next_frame_deadline_us < now_us - frame_interval_us) {
+                next_frame_deadline_us = now_us + frame_interval_us;
+            }
+        }
 
         /* 慢帧诊断：单帧 > 80ms 时单独打，定位卡顿来源（decode 慢 / blit 慢 / lock 等待） */
         int64_t t_end = esp_timer_get_time();

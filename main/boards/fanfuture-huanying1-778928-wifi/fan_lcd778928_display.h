@@ -588,7 +588,7 @@ private:
         lv_obj_set_style_layout(status_bar_, LV_LAYOUT_FLEX, 0);
         lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(status_bar_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_align(status_bar_, LV_ALIGN_BOTTOM_LEFT, lvgl_theme->spacing(2), -ui_bottom_inset);
+        lv_obj_align(status_bar_, LV_ALIGN_BOTTOM_LEFT, lvgl_theme->spacing(1), -ui_bottom_inset);
 
         notification_label_ = lv_label_create(status_bar_);
         lv_obj_set_width(notification_label_, LV_SIZE_CONTENT);
@@ -615,7 +615,7 @@ private:
         lv_obj_set_style_bg_color(chat_message_label_, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(chat_message_label_, LV_OPA_COVER, 0);
         lv_label_set_text(chat_message_label_, "");
-        lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_LEFT, lvgl_theme->spacing(2), -ui_bottom_inset);
+        lv_obj_align(chat_message_label_, LV_ALIGN_BOTTOM_LEFT, lvgl_theme->spacing(1), -ui_bottom_inset);
         lv_obj_add_flag(chat_message_label_, LV_OBJ_FLAG_HIDDEN);
 
         // Right icons（网络 | 静音 | 电量，屏幕右下角）
@@ -626,13 +626,13 @@ private:
         lv_obj_set_style_pad_all(right_icons, 0, 0);
         lv_obj_set_flex_flow(right_icons, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(right_icons, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_align(right_icons, LV_ALIGN_BOTTOM_RIGHT, -lvgl_theme->spacing(2), -ui_bottom_inset);
+        lv_obj_align(right_icons, LV_ALIGN_BOTTOM_RIGHT, -lvgl_theme->spacing(1), -ui_bottom_inset);
 
         mute_label_ = lv_label_create(right_icons);
         lv_label_set_text(mute_label_, "");
         lv_obj_set_style_text_font(mute_label_, icon_font, 0);
         lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
-        lv_obj_set_style_margin_left(mute_label_, lvgl_theme->spacing(2), 0);
+        lv_obj_set_style_margin_left(mute_label_, lvgl_theme->spacing(1), 0);
 
         network_label_ = lv_label_create(right_icons);
         lv_label_set_text(network_label_, "");
