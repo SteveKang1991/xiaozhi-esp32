@@ -243,6 +243,21 @@ public:
         }
     }
 
+    void SetMusicInfo(const char* song_name) override {
+        // 默认实现：对于非微信模式，将歌名显示在聊天消息标签中
+        DisplayLockGuard lock(this);
+        if (chat_message_label_ == nullptr) {
+            return;
+        }
+        if (song_name != nullptr && strlen(song_name) > 0) {
+            std::string music_text = "";
+            music_text += song_name;
+            lv_label_set_text(chat_message_label_, music_text.c_str());
+        } else {
+            lv_label_set_text(chat_message_label_, "");
+        }
+    }
+
 private:
     inline static bool s_system_ready_ = false;
 

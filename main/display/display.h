@@ -52,6 +52,7 @@ public:
         setup_ui_called_ = true;
     }
     virtual void SetSystemReady();
+    virtual void SetMusicInfo(const char* song_name);
 
     inline int width() const { return width_; }
     inline int height() const { return height_; }

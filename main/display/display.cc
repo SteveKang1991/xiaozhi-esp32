@@ -62,3 +62,7 @@ void Display::SetPowerSaveMode(bool on) {
 void Display::SetSystemReady() {
     ESP_LOGI(TAG, "System ready");
 }
+
+void Display::SetMusicInfo(const char* song_name) {
+    ESP_LOGI(TAG, "SetMusicInfo");
+}
