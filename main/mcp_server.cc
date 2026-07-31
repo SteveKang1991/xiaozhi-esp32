@@ -123,7 +123,7 @@ void McpServer::AddCommonTools() {
 
     auto music = board.GetMusic();
     if (music) {
-         AddTool("self.music.play_song",
+             AddTool("self.music.play_song",
              "播放指定的歌曲。当用户要求播放音乐时使用此工具，会自动获取歌曲详情并开始流式播放。\n"
              "参数:\n"
              "  `song_name`: 要播放的歌曲名称（必需）。\n"
@@ -134,13 +134,25 @@ void McpServer::AddCommonTools() {
                  Property("song_name", kPropertyTypeString),//歌曲名称（必需）
                  Property("artist_name", kPropertyTypeString, "")//艺术家名称（可选，默认为空字符串）
              }),
-             [music](const PropertyList& properties) -> ReturnValue {
-                 auto song_name = properties["song_name"].value<std::string>();
-                 auto artist_name = properties["artist_name"].value<std::string>();
-                 
-                 if (!music->Download(song_name, artist_name)) {
-                     return "{\"success\": false, \"message\": \"获取音乐资源失败\"}";
-                 }
+            [music](const PropertyList& properties) -> ReturnValue {
+                auto song_name = properties["song_name"].value<std::string>();
+                auto artist_name = properties["artist_name"].value<std::string>();
+
+                // 获取当前状态
+                auto& app = Application::GetInstance();
+                DeviceState current_state = app.GetDeviceState();
+
+                // 如果当前在 speaking/listening，先切换到 idle 让音乐可以播放
+                if (current_state == kDeviceStateSpeaking ||
+                    current_state == kDeviceStateListening) {
+                    app.SetDeviceState(kDeviceStateIdle);
+                }
+
+                if (!music->Download(song_name, artist_name)) {
+                    // 下载失败
+                    app.SetDeviceState(kDeviceStateIdle);
+                    return "{\"success\": false, \"message\": \"获取音乐资源失败\"}";
+                }
                  auto download_result = music->GetDownloadResult();
                  //ESP_LOGI(TAG, "Music details result: %s", download_result.c_str());
                  return "{\"success\": true, \"message\": \"音乐开始播放\"}";

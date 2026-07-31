@@ -58,6 +58,7 @@
         "BLUFI_CINFIG": "Logging in and scanning:",
         "DOWNLOADING_EMOTIONS": "Downloading animation resources...",
         "DOWNLOADING_EMOTION_PROGRESS": "Downloading:%d/%d",
-        "EMOTION_SYNC_COMPLETE": "Animation sync complete"
+        "EMOTION_SYNC_COMPLETE": "Animation sync complete",
+        "MUSIC_PLAYING": "Music Playing..."
     }
 }

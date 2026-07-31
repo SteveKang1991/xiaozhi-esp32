@@ -10,6 +10,7 @@
 #include "assets.h"
 #include "settings.h"
 #include "utils/md5.h"
+#include "boards/common/mjpeg_player.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -824,9 +825,10 @@ void Application::InitializeProtocol() {
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
+                Schedule([this, display]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
+                            display->SetChatMessage("system", "");
                             SetDeviceState(kDeviceStateIdle);
                         } else {
                             SetDeviceState(kDeviceStateListening);
@@ -974,7 +976,7 @@ void Application::StopListening() {
 
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
-    
+
     if (state == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
         return;
@@ -994,6 +996,17 @@ void Application::HandleToggleChatEvent() {
     }
 
     if (state == kDeviceStateIdle) {
+        // 进入 listening 前必须彻底停止音乐播放（包括释放内存、flush codec output）。
+        // 否则 play_thread 会持续往 codec 写音频，导致：
+        // 1. TTS 输出与音乐重叠
+        // 2. 麦克风拾取残余音乐被 STT 误识别
+        // 3. 关闭音频通道回到 idle 后，play_thread 检测到 state==idle 又继续播放
+        auto& board = Board::GetInstance();
+        auto music = board.GetMusic();
+        if (music && music->IsPlaying()) {
+            music->StopStreaming();
+        }
+
         ListeningMode mode = GetDefaultListeningMode();
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
@@ -1044,6 +1057,13 @@ void Application::HandleStartListeningEvent() {
     }
     
     if (state == kDeviceStateIdle) {
+        // 进入 listening 前必须彻底停止音乐播放（参见 HandleToggleChatEvent 注释）
+        auto& board = Board::GetInstance();
+        auto music = board.GetMusic();
+        if (music && music->IsPlaying()) {
+            music->StopStreaming();
+        }
+
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
@@ -1084,6 +1104,13 @@ void Application::HandleWakeWordDetectedEvent() {
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
     if (state == kDeviceStateIdle) {
+        // 先同步停止音乐播放（唤醒词打断）
+        auto& board = Board::GetInstance();
+        auto music = board.GetMusic();
+        if (music) {
+            music->StopStreaming();
+        }
+
         audio_service_.EncodeWakeWord();
         auto wake_word = audio_service_.GetLastWakeWord();
 
@@ -1097,6 +1124,7 @@ void Application::HandleWakeWordDetectedEvent() {
             return;
         }
         // Channel already opened, continue directly
+        SetDeviceState(kDeviceStateConnecting);
         ContinueWakeWordInvoke(wake_word);
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
         AbortSpeaking(kAbortReasonWakeWordDetected);
@@ -1159,27 +1187,40 @@ void Application::HandleStateChangedEvent() {
     auto led = board.GetLed();
     led->OnStateChanged();
 
-    // 新增--- 当从idle状态变成其他任何状态时，停止音乐播放
-    if (new_state != kDeviceStateIdle)
-    {
-        auto music = board.GetMusic();
-        if (music)
-        {
-            ESP_LOGI(TAG, "Stopping music streaming due to state change");
-            music->StopStreaming();
-        }
-    }
-    
+    // 检查当前是否在播放音乐
+    auto music = board.GetMusic();
+    bool is_music_playing = music && music->IsPlaying();
+
     switch (new_state) {
         case kDeviceStateUnknown:
             /* 系统启动阶段，不走角色动画——开机/下载/告警仍由 SetEmotion 走主题 GIF / 内置图标 */
             break;
         case kDeviceStateIdle:
-            display->SetStatus(Lang::Strings::STANDBY);
-            display->ClearChatMessages();  // Clear messages first
-            display->SetRoleAnimation("idle"); // Then play idle MJPEG
+            if (is_music_playing) {
+                // 音乐播放中：显示音乐封面（黑色背景 + 专辑图），停止 MJPEG 动画
+                display->SetStatus(Lang::Strings::MUSIC_PLAYING);
+                std::string pic_url;
+                if (music) {
+                    pic_url = music->GetPictureUrl();
+                }
+                display->ShowMusicCover(true, pic_url);
+            } else {
+                // 非音乐播放：隐藏音乐封面，恢复 idle 角色动画
+                display->ShowMusicCover(false, "");
+                display->SetStatus(Lang::Strings::STANDBY);
+                display->ClearChatMessages();
+                display->SetRoleAnimation("idle");
+            }
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
+            // 主动确保 codec input 已启用（唤醒词检测需要录音）
+            // 这对于音乐播放中尤其重要，避免 wake word 收不到数据
+            {
+                auto codec = Board::GetInstance().GetAudioCodec();
+                if (codec && !codec->input_enabled()) {
+                    codec->EnableInput(true);
+                }
+            }
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);
@@ -1433,8 +1474,12 @@ void Application::ResetProtocol() {
 void Application::AddAudioData(AudioStreamPacket &&packet)
 {
     auto codec = Board::GetInstance().GetAudioCodec();
-    DeviceState device_state_ = state_machine_.GetState();
-    if (device_state_ == kDeviceStateIdle && codec->output_enabled())
+    DeviceState current_state = state_machine_.GetState();
+    // 仅在 idle 状态 + 音乐正在播放时输出音频
+    auto& board = Board::GetInstance();
+    auto music = board.GetMusic();
+    bool is_music_playing = music && music->IsPlaying();
+    if (is_music_playing && current_state == kDeviceStateIdle && codec->output_enabled())
     {
         // packet.payload包含的是原始PCM数据（int16_t）
         if (packet.payload.size() >= 2)
@@ -1446,9 +1491,6 @@ void Application::AddAudioData(AudioStreamPacket &&packet)
             // 检查采样率是否匹配，如果不匹配则进行简单重采样
             if (packet.sample_rate != codec->output_sample_rate())
             {
-                // ESP_LOGI(TAG, "Resampling music audio from %d to %d Hz",
-                //         packet.sample_rate, codec->output_sample_rate());
-
                 // 验证采样率参数
                 if (packet.sample_rate <= 0 || codec->output_sample_rate() <= 0)
                 {
@@ -1459,84 +1501,71 @@ void Application::AddAudioData(AudioStreamPacket &&packet)
 
                 std::vector<int16_t> resampled;
 
+                ESP_LOGD(TAG, "Music Player: Resample from %d Hz to %d Hz (avoid I2S reconfig)",
+                         packet.sample_rate, codec->output_sample_rate());
+
+                // 关键修复：不要调用 SetOutputSampleRate 切换采样率，
+                // 因为会 disable+reconfig I2S TX，影响共享 I2S bus 的 RX（麦克风），
+                // 导致语音唤醒失效。改为在软件层做重采样。
                 if (packet.sample_rate > codec->output_sample_rate())
                 {
-                    ESP_LOGI(TAG, "Music Player: Adjust the sampling rate from %d Hz to %d Hz",
-                             codec->output_sample_rate(), packet.sample_rate);
+                    // 下采样到 codec 当前采样率
+                    float downsample_ratio = static_cast<float>(packet.sample_rate) / codec->output_sample_rate();
+                    size_t expected_size = static_cast<size_t>(pcm_data.size() / downsample_ratio + 0.5f);
+                    resampled.resize(expected_size);
 
-                    // 尝试动态切换采样率
-                    if (codec->SetOutputSampleRate(packet.sample_rate))
+                    size_t resampled_index = 0;
+                    float source_index = 0.0f;
+                    for (size_t i = 0; i < pcm_data.size() && resampled_index < expected_size; i++)
                     {
-                        ESP_LOGI(TAG, "Successfully switched to music playback sampling rate: %d Hz", packet.sample_rate);
+                        size_t idx = static_cast<size_t>(source_index);
+                        if (idx < pcm_data.size())
+                        {
+                            resampled[resampled_index++] = pcm_data[idx];
+                        }
+                        source_index += downsample_ratio;
                     }
-                    else
-                    {
-                        ESP_LOGW(TAG, "Unable to switch sampling rate, continue using current sampling rate: %d Hz", codec->output_sample_rate());
-                    }
+
+                    pcm_data = std::move(resampled);
+                    ESP_LOGD(TAG, "Downsampled music audio from %d to %d Hz",
+                             packet.sample_rate, codec->output_sample_rate());
                 }
                 else
                 {
-                    if (packet.sample_rate > codec->output_sample_rate())
-                    {
-                        // 下采样：简单丢弃部分样本
-                        float downsample_ratio = static_cast<float>(packet.sample_rate) / codec->output_sample_rate();
-                        size_t expected_size = static_cast<size_t>(pcm_data.size() / downsample_ratio + 0.5f);
-                        std::vector<int16_t> resampled(expected_size);
-                        size_t resampled_index = 0;
+                    // 上采样到 codec 当前采样率
+                    float upsample_ratio = codec->output_sample_rate() / static_cast<float>(packet.sample_rate);
+                    size_t expected_size = static_cast<size_t>(pcm_data.size() * upsample_ratio + 0.5f);
+                    resampled.reserve(expected_size);
 
-                        for (size_t i = 0; i < pcm_data.size(); ++i)
+                    for (size_t i = 0; i < pcm_data.size(); ++i)
+                    {
+                        resampled.push_back(pcm_data[i]);
+
+                        int interpolation_count = static_cast<int>(upsample_ratio) - 1;
+                        if (interpolation_count > 0 && i + 1 < pcm_data.size())
                         {
-                            if (i % static_cast<size_t>(downsample_ratio) == 0)
+                            int16_t current = pcm_data[i];
+                            int16_t next = pcm_data[i + 1];
+                            for (int j = 1; j <= interpolation_count; ++j)
                             {
-                                resampled[resampled_index++] = pcm_data[i];
+                                float t = static_cast<float>(j) / (interpolation_count + 1);
+                                int16_t interpolated = static_cast<int16_t>(current + (next - current) * t);
+                                resampled.push_back(interpolated);
                             }
                         }
-
-                        pcm_data = std::move(resampled);
-                        ESP_LOGI(TAG, "Downsampled %d -> %d samples (ratio: %.2f)",
-                                 pcm_data.size(), resampled.size(), downsample_ratio);
-                    }
-                    else if (packet.sample_rate < codec->output_sample_rate())
-                    {
-                        // 上采样：线性插值
-                        float upsample_ratio = codec->output_sample_rate() / static_cast<float>(packet.sample_rate);
-                        size_t expected_size = static_cast<size_t>(pcm_data.size() * upsample_ratio + 0.5f);
-                        resampled.reserve(expected_size);
-
-                        for (size_t i = 0; i < pcm_data.size(); ++i)
+                        else if (interpolation_count > 0)
                         {
-                            // 添加原始样本
-                            resampled.push_back(pcm_data[i]);
-
-                            // 计算需要插值的样本数
-                            int interpolation_count = static_cast<int>(upsample_ratio) - 1;
-                            if (interpolation_count > 0 && i + 1 < pcm_data.size())
+                            for (int j = 1; j <= interpolation_count; ++j)
                             {
-                                int16_t current = pcm_data[i];
-                                int16_t next = pcm_data[i + 1];
-                                for (int j = 1; j <= interpolation_count; ++j)
-                                {
-                                    float t = static_cast<float>(j) / (interpolation_count + 1);
-                                    int16_t interpolated = static_cast<int16_t>(current + (next - current) * t);
-                                    resampled.push_back(interpolated);
-                                }
-                            }
-                            else if (interpolation_count > 0)
-                            {
-                                // 最后一个样本，直接重复
-                                for (int j = 1; j <= interpolation_count; ++j)
-                                {
-                                    resampled.push_back(pcm_data[i]);
-                                }
+                                resampled.push_back(pcm_data[i]);
                             }
                         }
-
-                        ESP_LOGI(TAG, "Upsampled %d -> %d samples (ratio: %.2f)",
-                                 pcm_data.size(), resampled.size(), upsample_ratio);
                     }
+
+                    pcm_data = std::move(resampled);
+                    ESP_LOGD(TAG, "Upsampled music audio from %d to %d Hz",
+                             packet.sample_rate, codec->output_sample_rate());
                 }
-
-                pcm_data = std::move(resampled);
             }
 
             // 确保音频输出已启用

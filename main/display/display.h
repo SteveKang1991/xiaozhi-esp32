@@ -53,6 +53,11 @@ public:
     }
     virtual void SetSystemReady();
     virtual void SetMusicInfo(const char* song_name);
+    /**
+     * 音乐封面显示：进入 music_playing 状态时调用 ShowMusicCover(true, picture_url) 弹出封面；
+     * 退出音乐播放时调用 ShowMusicCover(false, "") 隐藏并回到 MJPEG 角色动画。
+     * 默认实现为空，由具体 display 子类重写。 */
+    virtual void ShowMusicCover(bool show, const std::string& picture_url = "") {}
 
     inline int width() const { return width_; }
     inline int height() const { return height_; }

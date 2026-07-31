@@ -3,6 +3,7 @@
 
 #include "lcd_display.h"
 #include "gif/lvgl_gif.h"
+#include "lvgl_display/lvgl_image.h"
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "assets/lang_config.h"
@@ -26,21 +27,12 @@
 extern "C" {
 #include "mjpeg_player.h"
 #include "sd_scanner.h"
+#include "jpg/jpeg_to_image.h"
 }
 
 // FAN MIPI 5.0寸显示器
 class FanMIPI50Display : public LcdDisplay {
 public:
-    /* 重写 SetChatMessage：纵向字幕要求文本按字符换行（每字符一行），
-     * 而基类 SetChatMessage 直接把 content 写入 chat_message_label_。
-     * LVGL label 在 LONG_WRAP 模式下：英文按词 wrap（一词装不下就换行，导致一行只显示 2-3 个字母），
-     * 中文按字符 wrap（因为中文没有空格 word boundary，所以反而一字一行正好）。
-     * 这里在写入 label 之前把 UTF-8 字符串按字符插入 '\n'，强制每字符一行，
-     * 无论中英文/标点都整齐竖排。 */
-    void SetChatMessage(const char* role, const char* content) override;
-    /* 重写 ClearChatMessages：基类会调 lv_label_set_text(chat_message_label_, "")，
-     * 但 chat_message_label_ 现在是 container obj，重写后清掉 inner label 文本即可。 */
-    void ClearChatMessages() override;
 
     FanMIPI50Display(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
                            int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool swap_xy)
@@ -109,6 +101,15 @@ public:
 
     ~FanMIPI50Display() override {
         StopMjpegIfRunning();
+        if (music_cover_download_thread_.joinable()) {
+            music_cover_download_thread_.join();
+        }
+        music_cover_image_data_.reset();
+        DisplayLockGuard lock(this);
+        if (music_cover_container_) {
+            lv_obj_del(music_cover_container_);
+            music_cover_container_ = nullptr;
+        }
     }
 
     virtual void SetEmotion(const char* emotion) override {
@@ -232,6 +233,19 @@ public:
         StartMjpegEmotion(clip_path.c_str());
     }
 
+    /* 重写 SetChatMessage：纵向字幕要求文本按字符换行（每字符一行），
+     * 而基类 SetChatMessage 直接把 content 写入 chat_message_label_。
+     * LVGL label 在 LONG_WRAP 模式下：英文按词 wrap（一词装不下就换行，导致一行只显示 2-3 个字母），
+     * 中文按字符 wrap（因为中文没有空格 word boundary，所以反而一字一行正好）。
+     * 这里在写入 label 之前把 UTF-8 字符串按字符插入 '\n'，强制每字符一行，
+     * 无论中英文/标点都整齐竖排。 */
+    void SetChatMessage(const char* role, const char* content) override;
+
+    /* 重写 ClearChatMessages：基类会调 lv_label_set_text(chat_message_label_, "")，
+     * 但 chat_message_label_ 现在是 container obj，重写后清掉 inner label 文本即可。 */
+    void ClearChatMessages() override;
+
+    /** 进入待命状态 系统就绪 */
     void SetSystemReady() override {
         s_system_ready_ = true;
         ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "MJPEG ready: system is ready, SD card operations permitted");
@@ -258,6 +272,8 @@ public:
         }
     }
 
+    void ShowMusicCover(bool show, const std::string& picture_url = "") override;
+
 private:
     inline static bool s_system_ready_ = false;
 
@@ -265,6 +281,16 @@ private:
     static constexpr uint16_t kMjpegVideoHeight = 816;
     static constexpr uint8_t kMjpegTargetFps = 24;
     std::string current_mjpeg_path_;
+
+    /* 音乐封面相关：音乐播放时覆盖 MJPEG ROI 区域，背景黑色，内部容器放专辑图及后续扩展。 */
+    lv_obj_t* music_cover_container_ = nullptr;     // 音乐封面容器（后续可扩展歌名/歌手/歌词/进度）
+    lv_obj_t* music_cover_img_ = nullptr;            // 专辑图
+    std::unique_ptr<LvglAllocatedImage> music_cover_image_data_;
+    std::string current_music_picture_url_;
+    std::thread music_cover_download_thread_;
+    int32_t music_cover_scale_ = 256;               // 缩放因子 (256 = 1.0x)
+    int roi_x_ = 0;                                 // MJPEG ROI x 偏移
+    int roi_y_ = 0;                                 // MJPEG ROI y 偏移
 
     static bool FileExists(const std::string& path) {
         struct stat st = {};
@@ -374,6 +400,8 @@ private:
         if (ry < 0) {
             ry = 0;
         }
+        roi_x_ = rx;
+        roi_y_ = ry;
 
         current_mjpeg_path_ = full_path;
         mjpeg_player_cfg_t cfg = {};
@@ -631,6 +659,8 @@ inline void FanMIPI50Display::SetChatMessage(const char* role, const char* conte
         lv_label_set_text(chat_message_inner_label_, "");
         last_chat_content_.clear();
         /* 立即停止任何进行中的滚动动画（防止 SetChatMessage("") 后还在继续滚动） */
+        static lv_anim_t s_scroll_anim;
+        lv_anim_delete(&s_scroll_anim, nullptr);
         lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
         if (bottom_bar_ != nullptr) {
             lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
@@ -645,6 +675,18 @@ inline void FanMIPI50Display::SetChatMessage(const char* role, const char* conte
         return;
     }
     last_chat_content_ = content;
+
+    /* 关键：先强制删除旧滚动动画 + scroll_y 归零。
+     * 上一句若有滚动动画停在 scroll_y=N，短文本的 content_h 远小于 container_h，
+     * 若不归零，inner label 会被向下推到不可见区域，留下"上半部分第2句、下半部分第1句"的残影。 */
+    {
+        static lv_anim_t s_scroll_anim;
+        lv_anim_delete(&s_scroll_anim, nullptr);
+        lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
+    }
+
+    /* 先清空旧文本，避免短文本接长文本时残留上半部分 */
+    lv_label_set_text(chat_message_inner_label_, "");
 
     /* 按 UTF-8 字符拆分：每个字符后插一个 '\n'。 */
     std::string in(content);
@@ -684,6 +726,9 @@ inline void FanMIPI50Display::SetChatMessage(const char* role, const char* conte
     if (content_h <= container_h) {
         /* 文本短，不滚动，定位到顶（content 顶部对齐 container 顶部）。 */
         lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
+        /* 再次强制 layout：inner label 高度已经从长文本（如 800）收缩到短文本（20），
+         * 但 container 的 scroll_y 可能仍停留在旧动画末帧；若不再次刷新，残影会停留。 */
+        lv_obj_update_layout(chat_message_label_);
         if (bottom_bar_ != nullptr && !hide_subtitle_) {
             lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
         }
@@ -739,6 +784,142 @@ inline void FanMIPI50Display::ClearChatMessages() {
     last_chat_content_.clear();
     if (bottom_bar_ != nullptr) {
         lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* 音乐封面：音乐播放时覆盖 MJPEG ROI 区域，黑色背景 + 专辑图。
+ * 退出时隐藏封面并恢复 MJPEG 角色动画。 */
+void FanMIPI50Display::ShowMusicCover(bool show, const std::string& picture_url) {
+    DisplayLockGuard lock(this);
+
+    if (show) {
+        if (music_cover_container_ == nullptr) {
+            auto screen = lv_screen_active();
+            
+            /* 只覆盖 MJPEG ROI 区域的黑色背景 */
+            music_cover_container_ = lv_obj_create(screen);
+            lv_obj_set_pos(music_cover_container_, roi_x_, roi_y_);
+            lv_obj_set_size(music_cover_container_, (lv_coord_t)kMjpegVideoWidth, (lv_coord_t)kMjpegVideoHeight);
+            lv_obj_set_style_radius(music_cover_container_, 0, 0);
+            lv_obj_set_style_bg_color(music_cover_container_, lv_color_black(), 0);
+            lv_obj_set_style_bg_opa(music_cover_container_, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(music_cover_container_, 0, 0);
+            lv_obj_set_style_pad_all(music_cover_container_, 0, 0);
+            lv_obj_move_foreground(music_cover_container_);
+            lv_obj_add_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
+
+            /* 专辑图：与容器同大，自动缩放适应，保持比例居中 */
+            music_cover_img_ = lv_img_create(music_cover_container_);
+            lv_obj_set_pos(music_cover_img_, 0, 0);
+            lv_obj_set_size(music_cover_img_, (lv_coord_t)kMjpegVideoWidth, (lv_coord_t)kMjpegVideoHeight);
+            lv_obj_add_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
+            music_cover_scale_ = 256;  /* 1.0x 初始缩放 */
+        }
+
+        /* 停止 MJPEG 播放 */
+        if (mjpeg_player_is_running()) {
+            mjpeg_player_stop();
+        }
+        
+        /* 先不显示容器，保持 MJPEG，直到图片下载完成 */
+        lv_obj_add_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
+        
+        if (!picture_url.empty() && picture_url != current_music_picture_url_) {
+            current_music_picture_url_ = picture_url;
+            std::string url_copy = picture_url;
+
+            if (music_cover_download_thread_.joinable()) {
+                music_cover_download_thread_.join();
+            }
+            music_cover_download_thread_ = std::thread([this, url_copy]() {
+                auto network = Board::GetInstance().GetNetwork();
+                auto http = network->CreateHttp(5);
+                if (!http->Open("GET", url_copy)) {
+                    ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "Failed to open picture URL for music cover");
+                    return;
+                }
+                int status = http->GetStatusCode();
+                if (status != 200) {
+                    ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "Music cover picture HTTP status: %d", status);
+                    http->Close();
+                    return;
+                }
+                size_t len = http->GetBodyLength();
+                char* data = (char*)heap_caps_malloc(len, MALLOC_CAP_8BIT);
+                if (!data) {
+                    ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "OOM for music cover picture (%d bytes)", len);
+                    http->Close();
+                    return;
+                }
+                size_t total = 0;
+                while (total < len) {
+                    int r = http->Read(data + total, len - total);
+                    if (r <= 0) break;
+                    total += r;
+                }
+                http->Close();
+
+                ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "Music cover downloaded: %d bytes, decoding...", len);
+                
+                /* 在下载线程里解码，不阻塞主线程 */
+                uint8_t* decoded = nullptr;
+                size_t decoded_len = 0, img_w = 0, img_h = 0, stride = 0;
+                esp_err_t ret = jpeg_to_image((const uint8_t*)data, len, &decoded, &decoded_len, &img_w, &img_h, &stride);
+                heap_caps_free(data);  /* 释放原始 JPEG 数据 */
+                
+                if (ret == ESP_OK && decoded && img_w > 0 && img_h > 0) {
+                    ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "JPEG decoded: %ux%u", img_w, img_h);
+                    
+                    /* 短暂获取锁，只更新显示 */
+                    DisplayLockGuard lock_inner(this);
+                    
+                    /* 释放旧图片内存 */
+                    music_cover_image_data_.reset();
+                    
+                    /* 创建新图片对象 */
+                    try {
+                        music_cover_image_data_ = std::make_unique<LvglAllocatedImage>(
+                            decoded, decoded_len, img_w, img_h, stride, LV_COLOR_FORMAT_RGB565);
+                        
+                        if (music_cover_img_ && music_cover_container_) {
+                            lv_img_set_src(music_cover_img_, music_cover_image_data_->image_dsc());
+                            /* 计算缩放因子，让图片完整显示在 ROI 区域内 */
+                            int32_t scale_w = 256 * kMjpegVideoWidth / img_w;
+                            int32_t scale_h = 256 * kMjpegVideoHeight / img_h;
+                            music_cover_scale_ = (scale_w < scale_h) ? scale_w : scale_h;
+                            if (music_cover_scale_ > 256) music_cover_scale_ = 256;
+                            lv_image_set_scale(music_cover_img_, music_cover_scale_);
+                            lv_obj_remove_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
+                            lv_obj_remove_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
+                        }
+                    } catch (const std::exception& e) {
+                        ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "Music cover decode failed: %s", e.what());
+                        heap_caps_free(decoded);
+                    }
+                } else {
+                    ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "JPEG decode failed: %s", esp_err_to_name(ret));
+                }
+            });
+        } else if (!picture_url.empty() && music_cover_image_data_) {
+            if (music_cover_img_) {
+                lv_img_set_src(music_cover_img_, music_cover_image_data_->image_dsc());
+                lv_obj_remove_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    } else {
+        if (music_cover_container_ != nullptr) {
+            lv_obj_add_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (music_cover_download_thread_.joinable()) {
+            music_cover_download_thread_.join();
+        }
+        current_music_picture_url_.clear();
+        music_cover_image_data_.reset();
+        if (music_cover_img_) {
+            lv_img_set_src(music_cover_img_, (const void*)nullptr);
+            lv_obj_add_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 

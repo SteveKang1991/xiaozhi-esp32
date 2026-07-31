@@ -9,13 +9,13 @@ public:
     
     virtual bool Download(const std::string& song_name, const std::string& artist_name = "") = 0;
     virtual std::string GetDownloadResult() = 0;
-    
-    // 新增流式播放相关方法
+    virtual std::string GetPictureUrl() const { return ""; }  // 获取专辑封面 URL
     virtual bool StartStreaming(const std::string& music_url) = 0;
     virtual bool StopStreaming() = 0;  // 停止流式播放
     virtual size_t GetBufferSize() const = 0;
     virtual bool IsDownloading() const = 0;
     virtual int16_t* GetAudioData() = 0;
+    virtual bool IsPlaying() const = 0;  // 是否正在播放音乐
 };
 
 #endif // MUSIC_H 

@@ -41,11 +41,15 @@ private:
     
     // 歌词相关
     std::string current_lyric_url_;
+    std::string current_lyric_text_;  // 首次 getMusicDetails 返回的 lrctxt（避免重复下载）
     std::vector<std::pair<int, std::string>> lyrics_;  // 时间戳和歌词文本
     std::mutex lyrics_mutex_;  // 保护lyrics_数组的互斥锁
     std::atomic<int> current_lyric_index_;
     std::thread lyric_thread_;
     std::atomic<bool> is_lyric_running_;
+
+    // 专辑封面相关
+    std::string current_picture_url_;  // 专辑封面 URL
     
     std::atomic<DisplayMode> display_mode_;
     std::atomic<bool> is_playing_;
@@ -102,6 +106,10 @@ public:
     virtual size_t GetBufferSize() const override { return buffer_size_; }
     virtual bool IsDownloading() const override { return is_downloading_; }
     virtual int16_t* GetAudioData() override { return final_pcm_data_fft; }
+    virtual bool IsPlaying() const override { return is_playing_; }
+    
+    // 专辑封面相关
+    std::string GetPictureUrl() const override { return current_picture_url_; }
     
     // 显示模式控制方法
     void SetDisplayMode(DisplayMode mode);
