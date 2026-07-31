@@ -263,56 +263,100 @@ def process_emoji_collection(emoji_collection_dir, assets_dir):
     return emoji_list
 
 
-def process_extra_files(extra_files_dir, assets_dir):
-    """Process default_assets_extra_files parameter"""
-    if not extra_files_dir:
-        return []
-    
-    if not os.path.exists(extra_files_dir):
-        print(f"Warning: Extra files directory not found: {extra_files_dir}")
-        return []
-    
-    extra_files_list = []
-    
-    # Copy each file from input directory to build/assets directory
-    for root, dirs, files in os.walk(extra_files_dir):
-        for file in files:
-            # Skip hidden files and directories
-            if file.startswith('.'):
-                continue
-                
-            # Copy file
-            src_file = os.path.join(root, file)
-            dst_file = os.path.join(assets_dir, file)
-            if copy_file(src_file, dst_file):
-                extra_files_list.append(file)
-    
-    if extra_files_list:
-        print(f"Processed {len(extra_files_list)} extra files from: {extra_files_dir}")
-    
-    return extra_files_list
+def process_music_bg(music_bg_file, assets_dir):
+    """Process the music background image (music_bg.bin).
+
+    The source file is expected to already be in LVGL CBin format (28-byte
+    lv_image_dsc_t struct + raw RGB565 pixel data), produced by
+    scripts/build_music_bg.py from the board-specific musicbg-*.png.
+
+    Returns the asset name (e.g. "music_bg.bin") when the file is present,
+    or None when it is missing (so other boards' builds stay unaffected).
+    """
+    if not music_bg_file:
+        return None
+    if not os.path.exists(music_bg_file):
+        print(f"[build_default_assets] music_bg file not found: "
+              f"{music_bg_file}; music_bg_image will be omitted.")
+        return None
+
+    bin_filename = os.path.basename(music_bg_file)
+    dst_file = os.path.join(assets_dir, bin_filename)
+    if copy_file(music_bg_file, dst_file):
+        return bin_filename
+    return None
 
 
-def generate_index_json(assets_dir, srmodels, text_font, emoji_collection, extra_files=None, multinet_model_info=None):
+def process_extra_files(extra_files_dirs, assets_dir):
+    """Process default_assets_extra_files parameter(s).
+
+    Accepts a single dir or a list of dirs. Each dir's files are walked
+    and copied into assets_dir; the resulting list is merged.
+    """
+    if not extra_files_dirs:
+        return []
+    if isinstance(extra_files_dirs, str):
+        extra_files_dirs = [extra_files_dirs]
+
+    merged = []
+    seen_names = set()
+    for extra_files_dir in extra_files_dirs:
+        if not extra_files_dir:
+            continue
+        if not os.path.exists(extra_files_dir):
+            print(f"Warning: Extra files directory not found: {extra_files_dir}")
+            continue
+
+        for root, dirs, files in os.walk(extra_files_dir):
+            for file in files:
+                # Skip hidden files and directories
+                if file.startswith('.'):
+                    continue
+                # If two source dirs happen to provide a file with the
+                # same name, keep the first copy (don't overwrite).
+                if file in seen_names:
+                    continue
+                src_file = os.path.join(root, file)
+                dst_file = os.path.join(assets_dir, file)
+                if copy_file(src_file, dst_file):
+                    merged.append(file)
+                    seen_names.add(file)
+
+    if merged:
+        print(f"Processed {len(merged)} extra files from: "
+              f"{', '.join(d for d in extra_files_dirs if d)}")
+    return merged
+
+
+def generate_index_json(assets_dir, srmodels, text_font, emoji_collection,
+                       extra_files=None, multinet_model_info=None,
+                       music_bg_image=None):
     """Generate index.json file"""
     index_data = {
         "version": 1
     }
-    
+
     if srmodels:
         index_data["srmodels"] = srmodels
-    
+
     if text_font:
         index_data["text_font"] = text_font
-    
+
     if emoji_collection:
         index_data["emoji_collection"] = emoji_collection
-    
+
     if extra_files:
         index_data["extra_files"] = extra_files
-    
+
     if multinet_model_info:
         index_data["multinet_model"] = multinet_model_info
+
+    # music_bg_image, when set, is just the basename of the CBin-format
+    # music_bg.bin file staged alongside the other assets. The C side
+    # reads it via Assets::GetAssetData("music_bg.bin", ...) and wraps it
+    # in an LvglCBinImage for direct LVGL rendering.
+    if music_bg_image:
+        index_data["music_bg_image"] = music_bg_image
     
     # Write index.json
     index_path = os.path.join(assets_dir, "index.json")
@@ -747,7 +791,7 @@ def get_emoji_collection_path(default_emoji_collection, xiaozhi_fonts_path, proj
     return None
 
 
-def build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font_path, emoji_collection_path, extra_files_path, output_path, multinet_model_info=None):
+def build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font_path, emoji_collection_path, extra_files_path, output_path, multinet_model_info=None, music_bg_path=None):
     """
     Build assets using integrated functions (no external dependencies)
     """
@@ -769,9 +813,10 @@ def build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font
         text_font = process_text_font(text_font_path, assets_dir) if text_font_path else None
         emoji_collection = process_emoji_collection(emoji_collection_path, assets_dir) if emoji_collection_path else None
         extra_files = process_extra_files(extra_files_path, assets_dir) if extra_files_path else None
+        music_bg_image = process_music_bg(music_bg_path, assets_dir) if music_bg_path else None
         
         # Generate index.json
-        generate_index_json(assets_dir, srmodels, text_font, emoji_collection, extra_files, multinet_model_info)
+        generate_index_json(assets_dir, srmodels, text_font, emoji_collection, extra_files, multinet_model_info, music_bg_image)
         
         # Generate config.json for packing
         config_path = generate_config_json(temp_build_dir, assets_dir)
@@ -816,7 +861,16 @@ def main():
     parser.add_argument('--output', required=True, help='Output path for assets.bin')
     parser.add_argument('--esp_sr_model_path', help='Path to ESP-SR model directory')
     parser.add_argument('--xiaozhi_fonts_path', help='Path to xiaozhi-fonts component directory')
-    parser.add_argument('--extra_files', help='Path to extra files directory to be included in assets')
+    parser.add_argument('--extra_files', action='append', default=[],
+                        help='Path to extra files directory to be included in assets. '
+                             'Can be specified multiple times to merge multiple sources.')
+    parser.add_argument('--music_bg', default=None,
+                        help='Path to a pre-converted music_bg.bin (LVGL CBin '
+                             'format) generated by scripts/build_music_bg.py. '
+                             'When provided, it is added to the assets '
+                             'partition and indexed under "music_bg_image" '
+                             'in index.json so the display can fetch it '
+                             'like an emoji.')
     
     args = parser.parse_args()
     
@@ -837,6 +891,8 @@ def main():
     print(f"  builtin_text_font: {args.builtin_text_font}")
     print(f"  emoji_collection: {args.emoji_collection}")
     print(f"  output: {args.output}")
+    if args.music_bg:
+        print(f"  music_bg: {args.music_bg}")
     
     # Read wake word type configuration from sdkconfig
     wake_word_config = read_wake_word_type_from_sdkconfig(args.sdkconfig)
@@ -882,8 +938,8 @@ def main():
     project_root = os.path.dirname(script_dir)
     emoji_collection_path = get_emoji_collection_path(args.emoji_collection, args.xiaozhi_fonts_path, project_root)
     
-    # Get extra files path if provided
-    extra_files_path = args.extra_files
+    # Get extra files paths (multiple allowed; merged into one set).
+    extra_files_paths = args.extra_files if args.extra_files else []
     
     # Read custom wake word configuration
     custom_wake_word_config = read_custom_wake_word_from_sdkconfig(args.sdkconfig)
@@ -911,18 +967,18 @@ def main():
         print(f"  wake word threshold: {custom_wake_word_config['threshold']}")
     
     # Check if we have anything to build
-    if not wakenet_model_paths and not multinet_model_paths and not text_font_path and not emoji_collection_path and not extra_files_path and not multinet_model_info:
-        print("Warning: No assets to build (no SR models, text font, emoji collection, extra files, or custom wake word)")
+    if not wakenet_model_paths and not multinet_model_paths and not text_font_path and not emoji_collection_path and not extra_files_paths and not multinet_model_info and not args.music_bg:
+        print("Warning: No assets to build (no SR models, text font, emoji collection, extra files, music_bg, or custom wake word)")
         # Create an empty assets.bin file
         os.makedirs(os.path.dirname(args.output), exist_ok=True)
         with open(args.output, 'wb') as f:
             pass  # Create empty file
         print(f"Created empty assets.bin: {args.output}")
         return
-    
+
     # Build the assets
-    success = build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font_path, emoji_collection_path, 
-                                     extra_files_path, args.output, multinet_model_info)
+    success = build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font_path, emoji_collection_path,
+                                     extra_files_paths, args.output, multinet_model_info, args.music_bg)
     
     if not success:
         sys.exit(1)

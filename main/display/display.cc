@@ -63,6 +63,12 @@ void Display::SetSystemReady() {
     ESP_LOGI(TAG, "System ready");
 }
 
-void Display::SetMusicInfo(const char* song_name) {
+void Display::SetMusicInfo(const char* song_name,
+                           const char* /*singer*/,
+                           int /*interval*/) {
     ESP_LOGI(TAG, "SetMusicInfo");
+}
+
+void Display::SetMusicProgress(int /*current_ms*/, const char* /*lyric*/, const char* /*lyric_next*/) {
+    /* Default no-op. */
 }

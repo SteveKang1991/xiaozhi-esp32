@@ -292,6 +292,44 @@ bool Esp32Music::Download(const std::string &song_name, const std::string &artis
 
                 ESP_LOGI(TAG, "Starting streaming playback for: %s", song_name.c_str());
                 song_name_displayed_ = false; // 重置歌名显示标志
+
+                /* 把歌名 / 歌手 / 总时长下发到 display。display 端的 music UI 收到
+                 * 后会写入各自控件；总时长若为 0（API 没返回）则传 -1，让 display 保留
+                 * 上一次的值而不是用 0 覆盖。 */
+                {
+                    auto& board = Board::GetInstance();
+                    auto display = board.GetDisplay();
+                    if (display) {
+                        const char* name_str = (cJSON_IsString(name) && name->valuestring) ? name->valuestring : "";
+                        const char* singer_str = (cJSON_IsString(singer) && singer->valuestring) ? singer->valuestring : "";
+                        int interval_sec = 0;
+                        if (cJSON_IsNumber(interval)) {
+                            interval_sec = interval->valueint;
+                        } else if (cJSON_IsString(interval) && interval->valuestring) {
+                            /* API 偶尔把 interval 写成字符串，格式可能是：
+                             *   "239"          → 直接是秒数
+                             *   "03:59"        → MM:SS
+                             *   "3:59"         → M:SS（兼容）
+                             *   "03:59.500"    → 带小数（取整秒）
+                             * atoi 只在 ":" 前停下，"03:59" 会被解析成 3，所以这里单独解析。 */
+                            const char* s = interval->valuestring;
+                            int mm = 0, ss = 0;
+                            if (sscanf(s, "%d:%d", &mm, &ss) == 2) {
+                                interval_sec = mm * 60 + ss;
+                            } else {
+                                /* fallback：尝试 "MM:SS.xxx" 或纯数字 */
+                                float fsec = 0.0f;
+                                if (sscanf(s, "%f", &fsec) == 1) {
+                                    interval_sec = (int)fsec;
+                                } else {
+                                    interval_sec = atoi(s);
+                                }
+                            }
+                        }
+                        display->SetMusicInfo(name_str, singer_str, interval_sec);
+                    }
+                }
+
                 StartStreaming(current_music_url_);
 
                 // 保存专辑封面 URL
@@ -476,13 +514,26 @@ bool Esp32Music::StopStreaming()
     is_downloading_ = false;
     is_playing_ = false;
 
-    // 清空歌名显示
+    // 清空歌名显示 + 重置 music UI 上的进度 / 歌词
     auto &board = Board::GetInstance();
     auto display = board.GetDisplay();
     if (display)
     {
-        //display->SetMusicInfo(""); // 清空歌名显示
-        ESP_LOGI(TAG, "Cleared song name display");
+        display->SetMusicInfo("", "", -1);  // interval=-1 保留总时长不刷 0
+        /* 传 "" 强制清掉当前/下一句歌词 label；display 内部对 "" 走
+         * "去抖后 != lyric" 路径立即写入空串。 */
+        display->SetMusicProgress(0, "", "");
+        /* 显式隐藏音乐封面。
+         *
+         * 之前依赖 application.cc 的 HandleStateChangedEvent 在状态切到 Idle 且
+         * !is_music_playing 时调 ShowMusicCover(false)，但播放音乐时设备本来就
+         * 处在 kDeviceStateIdle（music 在 idle 状态下后台播放），music 停止时
+         * 状态没变化，state machine 的 TransitionTo 是 no-op，
+         * HandleStateChangedEvent 不会被触发，封面就永远留在屏上了。
+         *
+         * 这里直接调一次，确保中断 / 自然结束 / 主动 stop 三种路径都能隐藏。 */
+        display->ShowMusicCover(false, "");
+        ESP_LOGI(TAG, "Cleared song name display and hid music cover");
     }
 
     // 通知所有等待的线程
@@ -1117,10 +1168,17 @@ void Esp32Music::PlayAudioStream()
         auto display = board.GetDisplay();
         if (display)
         {
-            display->SetChatMessage("lyric", "");
+            /* 清掉 music UI 上的歌词 / 进度；AI 聊天字幕保持原状。
+             * 传 "" 强制清掉当前/下一句歌词 label。 */
+            display->SetMusicProgress(0, "", "");
             display->SetStatus(Lang::Strings::STANDBY);
             display->SetRoleAnimation("idle");
-            ESP_LOGI(TAG, "Playback finished, restored idle animation and cleared lyrics");
+            /* 播放线程自然结束时也要显式隐藏封面：
+             * 状态机此时若本来就在 Idle，TransitionTo(Idle) 是 no-op，
+             * application.cc 的 HandleStateChangedEvent 不会被触发。
+             * 同 StopStreaming 里那个 fix 的原因。 */
+            display->ShowMusicCover(false, "");
+            ESP_LOGI(TAG, "Playback finished, restored idle animation and hid music cover");
         }
     }
 
@@ -1598,6 +1656,19 @@ void Esp32Music::UpdateLyricDisplay(int64_t current_time_ms)
     }
 
     // 如果歌词索引发生变化，更新显示
+    std::string lyric_text;
+    std::string lyric_next_text;
+    if (new_lyric_index >= 0 && new_lyric_index < (int)lyrics_.size())
+    {
+        lyric_text = lyrics_[new_lyric_index].second;
+        /* 下一句：给"接下来要唱"的预览行用。
+         * 索引 +1 越界或当前是最后一句时给空串，display 那边按 "" 清掉预览。 */
+        int next_idx = new_lyric_index + 1;
+        if (next_idx < (int)lyrics_.size()) {
+            lyric_next_text = lyrics_[next_idx].second;
+        }
+    }
+
     if (new_lyric_index != current_lyric_index_)
     {
         current_lyric_index_ = new_lyric_index;
@@ -1606,19 +1677,28 @@ void Esp32Music::UpdateLyricDisplay(int64_t current_time_ms)
         auto display = board.GetDisplay();
         if (display)
         {
-            std::string lyric_text;
-
-            if (current_lyric_index_ >= 0 && current_lyric_index_ < (int)lyrics_.size())
-            {
-                lyric_text = lyrics_[current_lyric_index_].second;
-            }
-
-            // 显示歌词
-            display->SetChatMessage("lyric", lyric_text.c_str());
-
-            ESP_LOGD(TAG, "Lyric update at %lldms: %s",
+            /* 把"当前播放时间 + 当前歌词 + 下一句歌词"一起发到 display：
+             *  - SetMusicProgress 内部会更新进度条与两个歌词 label
+             *  - 这里只在新一句歌词触发时才调用，避免每帧重复写 label */
+            display->SetMusicProgress(static_cast<int>(current_time_ms),
+                                      lyric_text.c_str(),
+                                      lyric_next_text.c_str());
+            ESP_LOGD(TAG, "Lyric update at %lldms: cur=%s next=%s",
                      current_time_ms,
-                     lyric_text.empty() ? "(no lyric)" : lyric_text.c_str());
+                     lyric_text.empty() ? "(none)" : lyric_text.c_str(),
+                     lyric_next_text.empty() ? "(none)" : lyric_next_text.c_str());
+        }
+    } else {
+        /* 歌词没换，但播放时间在走。每隔若干帧刷一次进度条/时间标签即可，
+         * 太频繁反而抢 LVGL。50ms 一次对用户而言刷新率足够。
+         * lyric/lyric_next 都传 nullptr，让 display 沿用上次显示。 */
+        auto &board = Board::GetInstance();
+        auto display = board.GetDisplay();
+        if (display)
+        {
+            display->SetMusicProgress(static_cast<int>(current_time_ms),
+                                      nullptr,
+                                      nullptr);
         }
     }
 }

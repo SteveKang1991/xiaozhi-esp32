@@ -332,6 +332,20 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
         }
     }
 
+    cJSON* music_bg_image = cJSON_GetObjectItem(root, "music_bg_image");
+    if (cJSON_IsString(music_bg_image)) {
+        std::string music_bg_file = music_bg_image->valuestring;
+        if (assets->GetAssetData(music_bg_file, ptr, size)) {
+            assets->music_background_image_ = std::make_shared<LvglCBinImage>(ptr);
+            ESP_LOGI(TAG, "Loaded music_bg_image from %s (%zu bytes)",
+                     music_bg_file.c_str(), size);
+        } else {
+            ESP_LOGW(TAG, "The music_bg_image file %s is not found; music "
+                          "playback will use the theme background instead.",
+                     music_bg_file.c_str());
+        }
+    }
+
     if (refresh_display_theme) {
         auto display = Board::GetInstance().GetDisplay();
         ESP_LOGI(TAG, "Refreshing display theme...");

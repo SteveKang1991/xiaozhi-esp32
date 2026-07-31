@@ -52,7 +52,37 @@ public:
         setup_ui_called_ = true;
     }
     virtual void SetSystemReady();
-    virtual void SetMusicInfo(const char* song_name);
+    /**
+     * Music playback metadata: full song metadata shown in the music UI.
+     *
+     * @param song_name   歌名 (UTF-8, may be nullptr/empty to clear).
+     * @param singer      歌手 (UTF-8, may be nullptr/empty).
+     * @param interval    Total duration in seconds (>=0). Used by the music
+     *                    UI's progress bar; pass 0 if unknown.
+     *
+     * Subclasses that have a dedicated music UI should override this. The
+     * default implementation is a thin wrapper that discards `singer` and
+     * `interval` and only forwards `song_name` to the legacy 1-arg variant
+     * so existing displays keep working.
+     */
+    virtual void SetMusicInfo(const char* song_name,
+                              const char* singer,
+                              int interval);
+    /**
+     * Music playback progress / lyric update.
+     *
+     * Called continuously from the playback thread (~every MP3 frame) while
+     * music is playing. Implementations update the progress bar position
+     * and (if non-null) the on-screen lyric text.
+     *
+     * @param current_ms   Current playback time in milliseconds.
+     * @param lyric        UTF-8 lyric line for `current_ms`, or nullptr/empty
+     *                     to clear.
+     * @param lyric_next   UTF-8 lyric line that follows the current one
+     *                     (for 2-line preview). nullptr = don't change the
+     *                     "next lyric" label. Default: nullptr.
+     */
+    virtual void SetMusicProgress(int current_ms, const char* lyric, const char* lyric_next = nullptr);
     /**
      * 音乐封面显示：进入 music_playing 状态时调用 ShowMusicCover(true, picture_url) 弹出封面；
      * 退出音乐播放时调用 ShowMusicCover(false, "") 隐藏并回到 MJPEG 角色动画。
