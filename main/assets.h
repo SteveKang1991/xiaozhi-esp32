@@ -20,11 +20,6 @@ struct Asset {
     size_t offset;
 };
 
-// Always forward-declare LvglImage so the getter signature compiles even on
-// boards where HAVE_LVGL is 0 (EmoteStrategy path). The actual member is only
-// populated on LVGL boards (see LvglStrategy::Apply()).
-class LvglImage;
-
 class Assets {
 public:
     static Assets& GetInstance() {
@@ -39,14 +34,6 @@ public:
 
     inline bool partition_valid() const { return partition_valid_; }
     inline std::string default_assets_url() const { return default_assets_url_; }
-
-// Music playback background image, populated from index.json's
-    // "music_bg_image" entry by LvglStrategy::Apply() on boards with
-    // HAVE_LVGL=1. Always available (cheap shared_ptr member); just returns
-    // nullptr on EmoteStrategy-only boards or before Apply() runs. The
-    // signature is unconditional so display code can include the getter
-    // without having to repeat the HAVE_LVGL guard at every call site.
-    inline std::shared_ptr<LvglImage> music_background_image() const { return music_background_image_; }
 
 private:
     Assets();
@@ -91,11 +78,6 @@ private:
     
     // Strategy instance
     std::unique_ptr<AssetStrategy> strategy_;
-
-// Lazily populated in LvglStrategy::Apply() from index.json. The shared_ptr
-    // is declared unconditionally (so the getter always compiles); on boards
-    // without LVGL it stays nullptr forever.
-    std::shared_ptr<LvglImage> music_background_image_ = nullptr;
 
 protected:
     const esp_partition_t* partition_ = nullptr;

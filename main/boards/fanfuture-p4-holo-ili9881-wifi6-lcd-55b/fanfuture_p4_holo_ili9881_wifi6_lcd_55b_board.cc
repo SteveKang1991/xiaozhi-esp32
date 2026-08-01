@@ -415,8 +415,8 @@ public:
         InitializeCodecI2c();
         InitializeTouchI2c();
         InitializeAXP2101();
-        InitializeIli9881cDisplay();
         InitializeSdForMjpeg();
+        InitializeIli9881cDisplay();
         //InitializeCamera();
         InitializeButtons();
         GetBacklight()->RestoreBrightness();

@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-Pick the right music background PNG for the current board and convert it
-into an LVGL CBin .bin image that the firmware can memory-map directly
-from the assets partition and feed to LvglCBinImage / cbin_img_dsc_create.
+Convert every board-specific music background PNG in main/assets/ into an
+LVGL CBin-format .bin image, dropping the resulting .bin files into
+<output-dir>. Each (png, bin-name) pair is hard-coded below so the same
+script always produces the full set of backgrounds, regardless of which
+board is currently being built.
 
-Board -> PNG mapping (width == screen width; height matches the display's
-native ROI):
-  - BOARD_TYPE_FANFUTURE_P4_HOLO_ST7701_WiFI6_LCD_5B   -> musicbg-480x816.png
-  - BOARD_TYPE_FANFUTURE_P4_HOLO_ILI9881_WiFI6_LCD_55B -> musicbg-720x1232.png
-
-The on-disk layout we produce matches what cbin_img_dsc_create expects:
+Each output bin has the layout cbin_img_dsc_create() expects:
     [ lv_image_dsc_t struct ]   <-- 28 bytes on 32-bit ESP32 (sizeof the struct)
     [ raw RGB565 pixel data ]   <-- pointed to by struct.data (relative offset)
 
@@ -17,13 +14,22 @@ Because cbin_img_dsc_create does `img_dsc->data += bin_addr`, the .data
 field of the struct must be the offset (from the start of the bin) of the
 pixel data, not an absolute address. The C side handles the relocation.
 
-The output filename is always music_bg.bin (a fixed name) so the C side
-can do Assets::GetAssetData("music_bg.bin", ...).
+PNG -> bin mapping (fixed; one bin per board):
+    main/assets/musicbg-480x816.png   -> musicbg-480x816.bin   (480 x 816)
+    main/assets/musicbg-720x1232.png  -> musicbg-720x1232.bin  (720 x 1232)
+
+Both bins are always produced in a single invocation; the script does
+not branch on BOARD_TYPE. The board that needs a particular bin will
+look it up directly on the SD card at runtime, so producing the wrong
+one for the current build is harmless.
+
+The C-side caller (display code) opens /sdcard/Music/musicbg-<w>x<h>.bin
+at runtime, so the developer copies whichever bin(s) apply to the SD
+card under /sdcard/Music/.
 
 Usage:
-  python build_music_bg.py --sdkconfig <path> \
-      --assets-source-dir <main/assets> \
-      --output-dir <build/assets>
+  python build_music_bg.py --assets-source-dir <main/assets> \
+      --output-dir <build>
 """
 
 import argparse
@@ -116,18 +122,15 @@ _ensure_python_deps()
 from LVGLImage import LVGLImage, ColorFormat, CompressMethod  # noqa: E402
 
 
-# Map sdkconfig symbol -> (png filename, output width, output height).
-# Width is the screen width (user's request: no scaling); height matches
-# the corresponding board's ROI / display height so the .bin lands flush
-# in the music_cover_container without leaving an under-filled stripe.
-_BOARD_MAP = {
-    "CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ST7701_WiFI6_LCD_5B": (
-        "musicbg-480x816.png", 480, 816),
-    "CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ILI9881_WiFI6_LCD_55B": (
-        "musicbg-720x1232.png", 720, 1232),
-}
-
-OUTPUT_BIN_NAME = "music_bg.bin"
+# Hard-coded PNG -> bin mapping (independent of which board is being built).
+# Width is the screen width (no scaling); height matches the corresponding
+# board's ROI / display height so the .bin lands flush in the
+# music_cover_container without leaving an under-filled stripe.
+_PNG_BIN_TABLE = [
+    # (png filename,        width, height, output bin name)
+    ("musicbg-480x816.png",  480,  816,  "musicbg-480x816.bin"),
+    ("musicbg-720x1232.png", 720,  1232, "musicbg-720x1232.bin"),
+]
 
 # Must match sizeof(lv_image_dsc_t) on the target (32-bit ESP32). Both
 # members after `header` are 4 bytes each (data_size, data, reserved,
@@ -135,39 +138,6 @@ OUTPUT_BIN_NAME = "music_bg.bin"
 # We hard-code 28 instead of relying on a C header so the Python pipeline
 # stays self-contained.
 LV_IMG_DSC_HEADER_SIZE = 28
-
-
-def find_board(sdkconfig_path: str):
-    """Return the first matching (png, w, h) tuple for this sdkconfig."""
-    if not os.path.exists(sdkconfig_path):
-        return None
-    # sdkconfig is normally UTF-8, but tools like PowerShell may write a
-    # copy in UTF-16 (with BOM) when redirecting. Try UTF-16 first if a
-    # BOM is present, otherwise fall back to UTF-8 with replacement.
-    # After decoding, strip any leftover BOM/ZWNBSP that some codecs keep.
-    raw = open(sdkconfig_path, "rb").read()
-    if raw.startswith(b"\xff\xfe"):
-        text = raw.decode("utf-16-le", errors="ignore")
-    elif raw.startswith(b"\xfe\xff"):
-        text = raw.decode("utf-16-be", errors="ignore")
-    elif raw.startswith(b"\xef\xbb\xbf"):
-        text = raw[3:].decode("utf-8", errors="ignore")
-    else:
-        text = raw.decode("utf-8", errors="ignore")
-    text = text.lstrip("\ufeff")
-
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        key = line.split("=", 1)[0].strip()
-        if key in _BOARD_MAP:
-            val = line.split("=", 1)[1].strip()
-            if val in ("y", "y\r"):
-                return _BOARD_MAP[key]
-    return None
 
 
 def convert_png_to_cbin_bin(png_path: str, bin_path: str,
@@ -187,9 +157,9 @@ def convert_png_to_cbin_bin(png_path: str, bin_path: str,
     if img.w != width or img.h != height:
         # Sanity: warn loudly so a wrong-dimension source PNG doesn't
         # silently produce a mismatched image.
-        print(f"[build_music_bg] WARNING: source PNG is {img.w}x{img.h}, "
-              f"expected {width}x{height}; bin will still be emitted at "
-              f"the actual source dimensions.")
+        print(f"[build_music_bg] WARNING: source PNG {png_path} is "
+              f"{img.w}x{img.h}, expected {width}x{height}; bin will still "
+              f"be emitted at the actual source dimensions.")
 
     data_size = len(img.data)
     if data_size == 0:
@@ -228,36 +198,44 @@ def convert_png_to_cbin_bin(png_path: str, bin_path: str,
     return LV_IMG_DSC_HEADER_SIZE + data_size
 
 
+def build_all(assets_source_dir: str, output_dir: str) -> int:
+    """Convert every entry in _PNG_BIN_TABLE.
+
+    Returns 0 on success, non-zero on failure. A missing source PNG for
+    any board is an error (the developer is expected to ship all of
+    them together).
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    produced = []
+    for png_name, w, h, bin_name in _PNG_BIN_TABLE:
+        png_path = os.path.join(assets_source_dir, png_name)
+        if not os.path.exists(png_path):
+            print(f"[build_music_bg] ERROR: source PNG missing: {png_path}",
+                  file=sys.stderr)
+            return 1
+        bin_path = os.path.join(output_dir, bin_name)
+        size = convert_png_to_cbin_bin(png_path, bin_path, w, h)
+        produced.append((bin_path, size))
+        print(f"[build_music_bg] OK: {bin_path} ({size} bytes)")
+    print(f"[build_music_bg] generated {len(produced)} bin file(s) in "
+          f"{output_dir}; copy the one(s) matching your board to the SD "
+          f"card under /sdcard/Music/.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Build the music_bg.bin image for the current board.")
-    parser.add_argument("--sdkconfig", required=True,
-                        help="Path to sdkconfig file.")
+        description="Build music_bg_<board>.bin images for every board.")
     parser.add_argument("--assets-source-dir", required=True,
                         help="Directory containing the musicbg-*.png files "
                              "(usually main/assets).")
     parser.add_argument("--output-dir", required=True,
-                        help="Directory to drop music_bg.bin into "
-                             "(consumed by build_default_assets.py).")
+                        help="Directory to drop the .bin files into. The "
+                             "developer copies whichever bin matches the "
+                             "current board to the SD card at "
+                             "/sdcard/Music/musicbg-<w>x<h>.bin.")
     args = parser.parse_args()
-
-    board = find_board(args.sdkconfig)
-    if board is None:
-        print("[build_music_bg] current board has no music_bg mapping, skip.")
-        return 0
-
-    png_name, w, h = board
-    png_path = os.path.join(args.assets_source_dir, png_name)
-    if not os.path.exists(png_path):
-        print(f"[build_music_bg] ERROR: source PNG missing: {png_path}",
-              file=sys.stderr)
-        return 1
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    bin_path = os.path.join(args.output_dir, OUTPUT_BIN_NAME)
-    size = convert_png_to_cbin_bin(png_path, bin_path, w, h)
-    print(f"[build_music_bg] OK: {bin_path} ({size} bytes)")
-    return 0
+    return build_all(args.assets_source_dir, args.output_dir)
 
 
 if __name__ == "__main__":

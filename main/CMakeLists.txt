@@ -1087,40 +1087,6 @@ endforeach()
 endif()
 
 
-# Function to build the music background image bin (music_bg.bin) for boards
-# that use it. The bin is produced into a staging dir; the same path is then
-# passed to build_default_assets.py via --music_bg, which copies it into the
-# assets partition and records it in index.json under "music_bg_image" so the
-# C side can fetch it via Assets::GetAssetData("music_bg.bin", ...).
-function(build_music_bg_bin)
-    set(MUSIC_BG_OUTPUT_DIR "${CMAKE_BINARY_DIR}/music_bg_staging")
-    file(REMOVE_RECURSE "${MUSIC_BG_OUTPUT_DIR}")
-    file(MAKE_DIRECTORY "${MUSIC_BG_OUTPUT_DIR}")
-
-    # Produce music_bg.bin via scripts/build_music_bg.py, which in turn
-    # picks the right PNG based on the selected board.
-    add_custom_command(
-        OUTPUT "${MUSIC_BG_OUTPUT_DIR}/music_bg.bin"
-        COMMAND python "${PROJECT_DIR}/scripts/build_music_bg.py"
-                --sdkconfig "${SDKCONFIG}"
-                --assets-source-dir "${CMAKE_CURRENT_SOURCE_DIR}/assets"
-                --output-dir "${MUSIC_BG_OUTPUT_DIR}"
-        DEPENDS
-            "${SDKCONFIG}"
-            "${PROJECT_DIR}/scripts/build_music_bg.py"
-            "${PROJECT_DIR}/scripts/Image_Converter/LVGLImage.py"
-            "${CMAKE_CURRENT_SOURCE_DIR}/assets/musicbg-480x816.png"
-            "${CMAKE_CURRENT_SOURCE_DIR}/assets/musicbg-720x1232.png"
-        COMMENT "Building music_bg.bin from board-specific musicbg PNG"
-        VERBATIM
-    )
-    add_custom_target(music_bg_bin ALL
-        DEPENDS "${MUSIC_BG_OUTPUT_DIR}/music_bg.bin"
-    )
-    set(MUSIC_BG_OUTPUT_DIR "${MUSIC_BG_OUTPUT_DIR}" PARENT_SCOPE)
-endfunction()
-
-
 # Function to build default assets based on configuration
 function(build_default_assets_bin)
     # Set output path for generated assets.bin
@@ -1146,19 +1112,24 @@ function(build_default_assets_bin)
     if(DEFAULT_ASSETS_EXTRA_FILES)
         list(APPEND BUILD_ARGS "--extra_files" "${DEFAULT_ASSETS_EXTRA_FILES}")
     endif()
-
-    # Build the music background bin first, then pass it directly to
-    # build_default_assets.py via --music_bg. On boards without a music_bg
-    # PNG mapping, build_music_bg_bin() is a no-op and produces no file;
-    # process_music_bg() then simply skips and omits music_bg_image from
-    # index.json, leaving every other board's assets.bin unchanged.
-    build_music_bg_bin()
-    list(APPEND BUILD_ARGS
-        "--music_bg" "${MUSIC_BG_OUTPUT_DIR}/music_bg.bin")
-
+    
     list(APPEND BUILD_ARGS "--esp_sr_model_path" "${ESP_SR_MODEL_PATH}")
     list(APPEND BUILD_ARGS "--xiaozhi_fonts_path" "${XIAOZHI_FONTS_PATH}")
-    
+
+    # Feed musicbg-*.png → music_bg_<board>.bin pipeline. Source PNGs live
+    # under main/assets; output bin files go into <build>/music_bg_bins/
+    # so the developer can copy them to the SD card after the build.
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/musicbg-480x816.png"
+            OR EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/musicbg-720x1232.png")
+        list(APPEND BUILD_ARGS
+            "--music_bg_assets_dir" "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+            "--project_root" "${PROJECT_DIR}")
+        list(APPEND MUSIC_BG_BIN_DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/musicbg-480x816.png"
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/musicbg-720x1232.png"
+            "${PROJECT_DIR}/scripts/build_music_bg.py")
+    endif()
+
     # Create custom command to build assets
     add_custom_command(
         OUTPUT ${GENERATED_ASSETS_BIN}
@@ -1166,9 +1137,8 @@ function(build_default_assets_bin)
         DEPENDS
             ${SDKCONFIG}
             ${PROJECT_DIR}/scripts/build_default_assets.py
-            ${PROJECT_DIR}/scripts/build_music_bg.py
-            "${MUSIC_BG_OUTPUT_DIR}/music_bg.bin"
-        COMMENT "Building default assets.bin based on configuration"
+            ${MUSIC_BG_BIN_DEPENDS}
+        COMMENT "Building default assets.bin (and music_bg_<board>.bin side-products) based on configuration"
         VERBATIM
     )
     

@@ -420,8 +420,8 @@ public:
         InitializeCodecI2c();
         InitializeTouchI2c();
         InitializeAXP2101();
-        InitializeLCD();
         InitializeSdForMjpeg();
+        InitializeLCD();
         //InitializeCamera();
         InitializeButtons();
         GetBacklight()->RestoreBrightness();

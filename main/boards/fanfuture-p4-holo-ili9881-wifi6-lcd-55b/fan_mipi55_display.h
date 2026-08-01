@@ -17,7 +17,9 @@
 #include <esp_lvgl_port.h>
 #include <lvgl.h>
 #include <esp_psram.h>
+#include <esp_heap_caps.h>
 #include <cstring>
+#include <cstdio>
 #include <sys/stat.h>
 
 #include "board.h"
@@ -295,13 +297,13 @@ private:
     std::string last_chat_content_;
 
     /* 音乐封面相关：音乐播放时覆盖屏幕除状态栏外的整片区域，背景使用编译期内置的
-     * music_bg.bin 图片，专辑图叠加在背景上方 1/4 附近；下方依次显示歌词 / 歌名 /
+     * musicbg-720x1232.bin 图片，专辑图叠加在背景上方 1/4 附近；下方依次显示歌词 / 歌名 /
      * 歌手 / 进度条 / 当前时间 / 总时间。
      *
      * 容器尺寸 = 音乐背景图尺寸 = 屏幕宽度 × (屏幕高度 - 状态栏高度)，
      * 水平填满整个屏幕，垂直 bottom=0 紧贴屏底（顶部留给状态栏）。 */
     lv_obj_t* music_cover_container_ = nullptr;        // 音乐封面容器（720x1232）
-    lv_obj_t* music_cover_bg_img_ = nullptr;           // 背景图（music_bg.bin）
+    lv_obj_t* music_cover_bg_img_ = nullptr;           // 背景图（musicbg-720x1232.bin）
     lv_obj_t* music_cover_img_ = nullptr;              // 专辑图（HTTP 下载）
     lv_obj_t* music_lyric_label_ = nullptr;            // 当前歌词（第 1 行）
     lv_obj_t* music_lyric_next_label_ = nullptr;       // 下一句歌词（第 2 行，#9d9183）
@@ -310,8 +312,9 @@ private:
     lv_obj_t* music_progress_bar_ = nullptr;           // 进度条
     lv_obj_t* music_cur_time_label_ = nullptr;         // 当前时间 / 剩余时间（左对齐）
     lv_obj_t* music_total_time_label_ = nullptr;       // 总时长（右对齐）
-    /* music_bg.bin 持有者。Fast path 来自 Assets 单例（shared_ptr，原指针指向
-     * mmapped flash，由 LvglCBinImage 持有；底层 image_dsc_ 是同一个，访问安全）。 */
+    /* musicbg-720x1232.bin 持有者。背景图 bin 由 LoadMusicBackgroundImage() 从 SD 卡
+     * /sdcard/Music/musicbg-720x1232.bin 加载到 PSRAM heap，包成 LvglCBinImage。
+     * shared_ptr 的自定义删除器在销毁时同时 free 像素 buffer。 */
     std::shared_ptr<LvglCBinImage> music_bg_image_;
     std::unique_ptr<LvglAllocatedImage> music_cover_image_data_;
     std::string current_music_picture_url_;
@@ -325,15 +328,16 @@ private:
     int roi_x_ = 0;                                 // MJPEG ROI x 偏移（保留备用）
     int roi_y_ = 0;                                 // MJPEG ROI y 偏移（保留备用）
 
-    /** 容器尺寸：宽 = 屏宽，高 = music_bg.bin 高度，bottom=0。 */
+    /** 容器尺寸：宽 = 屏宽，高 = musicbg-720x1232.bin 高度，bottom=0。 */
     static constexpr uint16_t kMusicCoverWidth  = 720;    // 55B：屏宽 720
     static constexpr uint16_t kMusicCoverHeight = 1232;   // 55B：music_bg-720x1232
     /** 音乐封面容器的顶部 y 偏移：留给状态栏。
      * 55B 屏高 1280 - bg 高 1232 = 48。 */
     static constexpr uint16_t kMusicCoverTopOffset = 48;
 
-    /** 加载 music_bg.bin（编译期打进 assets.bin 的背景图）到 music_bg_image_。
-     * 必须在 SetupUI() 之后、ShowMusicCover(true) 调用前调用一次。 */
+    /** 加载 /sdcard/Music/musicbg-720x1232.bin（开发者手动放到 SD 卡的 /Music 目录）到 music_bg_image_。
+     * 必须在 SetupUI() 之后、ShowMusicCover(true) 调用前调用一次。
+     * 失败则保持黑色背景。 */
     void LoadMusicBackgroundImage();
 
     /** 在 SetupUI() 中创建 music_cover_container_ 与所有子控件（歌名/歌手/歌词/
@@ -671,7 +675,7 @@ private:
          * music_cover_container_ 下，初始化时容器隐藏，由 ShowMusicCover 控制显隐。 */
         SetupMusicCoverUI();
 
-        /* 加载编译期内置的音乐背景图（music_bg.bin）。失败也不致命：容器仍能
+        /* 加载 /sdcard/Music/musicbg-720x1232.bin 的默认音乐背景图。失败也不致命：容器仍能
          * 显示纯黑背景 + 专辑图。 */
         LoadMusicBackgroundImage();
     }
@@ -821,10 +825,10 @@ inline void FanMIPI55Display::ClearChatMessages() {
 /* 音乐封面：音乐播放时覆盖 MJPEG ROI 区域。
  *
  * 容器内部布局（在 SetupMusicCoverUI 中创建）：
- *   - music_cover_bg_img_ : 编译期内置的默认背景图（music_bg.bin）
- *   - music_cover_img_    : 运行时下载的专辑图 645x645，叠在背景上、距顶 140 居中
- *   - music_lyric_label_  : 歌词第 1 行（距底 380，1.1x，左对齐）
- *   - music_lyric_next_label_ : 歌词第 2 行（距底 340，1x，左对齐，淡灰 #9d9183）
+ *   - music_cover_bg_img_ : 从 SD 卡 /sdcard/Music/musicbg-720x1232.bin 加载的默认背景图
+ *   - music_cover_img_    : 运行时下载的专辑图 486x486，叠在背景上、距顶 224 居中
+ *   - music_lyric_label_  : 歌词第 1 行（离左 80、距底 380，1.1x，左对齐）
+ *   - music_lyric_next_label_ : 歌词第 2 行（离左 80、距底 355，1x，左对齐，淡灰 #9d9183）
  *   - music_song_name_label_ / music_singer_label_ : 歌名（距底 250，1.2x）/ 歌手（距底 210，淡米白 #dfd8d0，左对齐）
  *   - music_progress_bar_ : 进度条（左右各 80，距底 140）
  *   - music_cur_time_label_ / music_total_time_label_ : 剩余时间（左对齐）/ 总时间（右对齐，距底 100）
@@ -904,8 +908,8 @@ void FanMIPI55Display::ShowMusicCover(bool show, const std::string& picture_url)
 
                         if (music_cover_img_ && music_cover_container_) {
                             lv_img_set_src(music_cover_img_, music_cover_image_data_->image_dsc());
-                            /* 计算缩放因子，让图片等比填满 645x645 框。 */
-                            const int32_t cover_box = 645;
+                            /* 计算缩放因子，让图片等比填满 420x420 框。 */
+                            const int32_t cover_box = 420;
                             int32_t scale_w = 256 * cover_box / (int32_t)img_w;
                             int32_t scale_h = 256 * cover_box / (int32_t)img_h;
                             music_cover_scale_ = (scale_w < scale_h) ? scale_w : scale_h;
@@ -1000,25 +1004,33 @@ void FanMIPI55Display::SetupMusicCoverUI() {
     lv_obj_set_style_bg_opa(music_cover_bg_img_, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(music_cover_bg_img_, LV_OBJ_FLAG_HIDDEN);
 
-    /* 专辑图：固定 645x645，水平居中（(720-645)/2 = 37），距容器顶 142。
+    /* 专辑图：486x486，水平居中（(720-486)/2 = 117），距容器顶 224。
      * 项目使用 LVGL 9，lv_image_set_inner_align 让源图在 obj 内居中显示。 */
     {
-        const lv_coord_t cover_w = 645;
-        const lv_coord_t cover_h = 645;
-        const lv_coord_t cover_x = ((lv_coord_t)kMusicCoverWidth - cover_w) / 2;   // 37
-        const lv_coord_t cover_y = 142;
+        const lv_coord_t cover_w = 486;
+        const lv_coord_t cover_h = 486;
+        const lv_coord_t cover_x = ((lv_coord_t)kMusicCoverWidth - cover_w) / 2;   // 117
+        const lv_coord_t cover_y = 224;
         music_cover_img_ = lv_img_create(music_cover_container_);
         lv_obj_set_pos(music_cover_img_, cover_x, cover_y);
         lv_obj_set_size(music_cover_img_, cover_w, cover_h);
-        lv_image_set_inner_align(music_cover_img_, LV_IMAGE_ALIGN_CENTER);
+        lv_image_set_inner_align(music_cover_img_, LV_IMAGE_ALIGN_COVER);
+        /* 圆角封面：radius=40 + clip_corner 让 obj 把超出圆角的像素裁掉。
+         * LVGL 9 要求被裁的 obj 必须有非透明 bg（否则没有绘制矩形，
+         * clip_corner 无可裁的边界），用黑色填充即可，COVER 模式下图填满
+         * 整个 obj 实际看不到这块 bg。 */
+        lv_obj_set_style_bg_color(music_cover_img_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(music_cover_img_, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(music_cover_img_, 40, 0);
+        lv_obj_set_style_clip_corner(music_cover_img_, true, 0);
     }
     lv_obj_add_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
     music_cover_scale_ = 256;
 
-    /* 通用 label 创建工具：宽 = 容器宽 - 左右 80*2 = 560。
+    /* 通用 label 创建工具：宽 = 容器宽 - 左右 110*2 = 500。
      * 歌词允许 2 行换行；歌名 / 歌手 / 时间固定单行高度。 */
-    const lv_coord_t side_pad = 80;
-    const lv_coord_t inner_w = (lv_coord_t)kMusicCoverWidth - side_pad * 2;  // 720 - 160 = 560
+    const lv_coord_t side_pad = 110;
+    const lv_coord_t inner_w = (lv_coord_t)kMusicCoverWidth - side_pad * 2;  // 720 - 220 = 500
 
     auto make_text_label = [&](lv_obj_t* parent, lv_coord_t width, lv_coord_t height) -> lv_obj_t* {
         lv_obj_t* lbl = lv_label_create(parent);
@@ -1031,11 +1043,11 @@ void FanMIPI55Display::SetupMusicCoverUI() {
         return lbl;
     };
 
-    /* 歌词（第 1 行，当前唱的）：左对齐，距底 380，文字 1.1x（box=509x50, scale_x/y=282, pivot 0,50）。
-     * 视觉框 = 560x55，视觉底 = box 底 = 852；视觉顶 = 797。 */
+    /* 歌词（第 1 行，当前唱的）：左对齐，离左 110、距底 380，文字 1.1x（box≈455x50, scale_x/y=281, pivot 0,50）。
+     * 视觉框 = 500x55，视觉底 = box 底 = 852；视觉顶 = 797。 */
     {
-        const int scale_num = 282;  // 1.1x = 256 * 1.1 (四舍五入)
-        const lv_coord_t box_w = inner_w * 256 / scale_num;     // 560 * 256 / 282 ≈ 508
+        const int scale_num = 281;  // 1.1x = 256 * 1.1 (四舍五入)
+        const lv_coord_t box_w = inner_w * 256 / scale_num;     // 500 * 256 / 281 ≈ 455
         const lv_coord_t box_h = 50;
         music_lyric_label_ = make_text_label(music_cover_container_, box_w, box_h);
         lv_obj_set_style_text_align(music_lyric_label_, LV_TEXT_ALIGN_LEFT, 0);
@@ -1043,21 +1055,21 @@ void FanMIPI55Display::SetupMusicCoverUI() {
         lv_obj_set_style_transform_scale_y(music_lyric_label_, scale_num, 0);
         lv_obj_set_style_transform_pivot_x(music_lyric_label_, 0, 0);     // 左边缘
         lv_obj_set_style_transform_pivot_y(music_lyric_label_, box_h, 0); // 下边缘
-        lv_obj_align(music_lyric_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -365);
+        lv_obj_align(music_lyric_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -380);
     }
 
-    /* 歌词下一行（第 2 行）：左对齐，距底 340，1x。文字色 #9d9183（淡灰）。
+    /* 歌词下一行（第 2 行）：左对齐，离左 110、距底 355，1x。文字色 #9d9183（淡灰）。
      * 放在 lyric（第 1 行）下面，预先占位；新一句歌词触发时才由 SetMusicProgress 写入。 */
      music_lyric_next_label_ = make_text_label(music_cover_container_, inner_w, 30);
      lv_obj_set_style_text_align(music_lyric_next_label_, LV_TEXT_ALIGN_LEFT, 0);
      lv_obj_set_style_text_color(music_lyric_next_label_, lv_color_hex(0x9d9183), 0);
-     lv_obj_align(music_lyric_next_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -340);
+     lv_obj_align(music_lyric_next_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -355);
 
-    /* 歌名：左对齐，距底 250，文字 1.2x（box=467x32, scale_x/y=307, pivot 0,32）。
-     * 视觉框 = 560x38.4，视觉底 = box 底 = 950；视觉顶 = 911.6。 */
+    /* 歌名：左对齐，距底 250，文字 1.2x（box≈417x32, scale_x/y=307, pivot 0,32）。
+     * 视觉框 = 500x38.4，视觉底 = box 底 = 950；视觉顶 = 911.6。 */
     {
         const int scale_num = 307;  // 1.2x = 256 * 1.2 (四舍五入)
-        const lv_coord_t box_w = inner_w * 256 / scale_num;     // 560 * 256 / 307 ≈ 467
+        const lv_coord_t box_w = inner_w * 256 / scale_num;     // 500 * 256 / 307 ≈ 417
         const lv_coord_t box_h = 32;
         music_song_name_label_ = make_text_label(music_cover_container_, box_w, box_h);
         lv_obj_set_size(music_song_name_label_, box_w, box_h);
@@ -1075,13 +1087,13 @@ void FanMIPI55Display::SetupMusicCoverUI() {
     lv_obj_set_style_text_color(music_singer_label_, lv_color_hex(0xdfd8d0), 0);
     lv_obj_align(music_singer_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -210);
 
-    /* 进度条：左右各 80，距底 145，高 6。 */
+    /* 进度条：左右各 110，距底 145，高 6。 */
     music_progress_bar_ = lv_bar_create(music_cover_container_);
     lv_obj_set_size(music_progress_bar_, inner_w, 6);
     lv_obj_align(music_progress_bar_, LV_ALIGN_BOTTOM_LEFT, side_pad, -145);
     lv_bar_set_range(music_progress_bar_, 0, 100);
     lv_bar_set_value(music_progress_bar_, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(music_progress_bar_, lv_color_make(0x40, 0x40, 0x40), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(music_progress_bar_, lv_color_hex(0x9d9183), LV_PART_MAIN);
     lv_obj_set_style_bg_color(music_progress_bar_, lv_color_white(), LV_PART_INDICATOR);
 
     /* 当前时间：左对齐，距底 100，高度 30（避开进度条；22 太小时单行字下半被 obj mask 裁切）。 */
@@ -1090,7 +1102,7 @@ void FanMIPI55Display::SetupMusicCoverUI() {
     lv_obj_align(music_cur_time_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -100);
     lv_label_set_text(music_cur_time_label_, "00:00");
 
-    /* 总时间：右对齐，距右 80 / 距底 100。高度 30 避免行高大于 box 时半截显示。 */
+    /* 总时间：右对齐，距右 110 / 距底 100。高度 30 避免行高大于 box 时半截显示。 */
     music_total_time_label_ = lv_label_create(music_cover_container_);
     lv_obj_set_size(music_total_time_label_, inner_w / 2 + 1, 30);
     lv_obj_set_style_bg_opa(music_total_time_label_, LV_OPA_TRANSP, 0);
@@ -1101,51 +1113,113 @@ void FanMIPI55Display::SetupMusicCoverUI() {
     lv_label_set_text(music_total_time_label_, "00:00");
 }
 
-/* 从 assets.bin 分区加载编译期打进 music_bg.bin 的默认背景图。
+/* 从 SD 卡加载默认音乐背景图（/sdcard/Music/musicbg-720x1232.bin，由
+ * scripts/build_music_bg.py 离线生成，开发者手动拷贝到 SD 卡的 /Music/ 子目录）。
  *
- * 优先使用 Assets::GetInstance().music_background_image() —— 由 assets.cc 在
- * Apply() 阶段从 index.json 的 "music_bg_image" 字段里读出，已经把 mmapped
- * flash 指针包成 LvglCBinImage，比直接 GetAssetData("music_bg.bin") 节省
- * 一次构造 LvglCBinImage 的开销，且未来如果 assets.bin 改用别的文件名
- * （比如 music_bg_5b.bin / music_bg_55b.bin），只需要改 index.json + Python
- * 流水线，display 端不用动。
+ * 为什么不放进 assets.bin：
+ * 1. assets.bin 走 spi_flash_mmap，把整张图 mmapped 到地址空间，720x1232x2 ≈ 1.77MB
+ *    内存在 PSRAM 紧张时容易爆破；mp3 解码 + 屏幕帧缓冲 + lvgl 缓存已经把 PSRAM 啃
+ *    大半，再多 1.7MB 静态映射几乎一定会触发 OOM。
+ * 2. 音乐背景是装饰性资源，不需要长期驻留，按需 fopen/fread 到内部 SRAM / PSRAM
+ *    heap（即用即释放），用完 ~3 秒后 LVGL 解码缓存占的内存可被回收。
  *
- * 回退路径：若 Assets 单例里没拿到（分区未就绪 / 旧的 assets.bin 没有这个字段），
- * 退回去按硬编码名字 "music_bg.bin" 直接拉一次，保证已有固件不会突然黑屏。 */
+ * 加载流程：
+ *   fopen("/sdcard/Music/musicbg-720x1232.bin") → fseek 到末尾取 size → malloc(PSRAM) →
+ *   fread 完整 bin → fclose → LvglCBinImage(ptr) 顶层负责 free。 */
 #if HAVE_LVGL
 void FanMIPI55Display::LoadMusicBackgroundImage() {
-    auto& assets = Assets::GetInstance();
-
-    /* Fast path: Assets::Apply() 已经把 index.json 里的 music_bg_image 包好了。 */
-    music_bg_image_ = std::dynamic_pointer_cast<LvglCBinImage>(
-        assets.music_background_image());
-    if (music_bg_image_ != nullptr) {
-        if (music_cover_bg_img_) {
-            lv_img_set_src(music_cover_bg_img_, music_bg_image_->image_dsc());
-            lv_obj_remove_flag(music_cover_bg_img_, LV_OBJ_FLAG_HIDDEN);
-        }
+    if (music_cover_bg_img_ == nullptr) {
         return;
     }
-
-    /* Fallback: 老的 assets.bin 没有这个字段时，按硬编码名拉一次。 */
-    void* ptr = nullptr;
-    size_t size = 0;
-    if (!assets.GetAssetData("music_bg.bin", ptr, size)) {
+    if (!sd_scanner_is_mounted()) {
         ESP_LOGW(FAN_MIPI55_DISPLAY_TAG,
-                 "music_bg.bin not found in assets partition; "
-                 "music cover will use plain black background");
+                 "SD card not mounted; music cover will use plain black background");
         return;
     }
-    music_bg_image_ = std::make_shared<LvglCBinImage>(ptr);
-    if (music_bg_image_->image_dsc() == nullptr) {
-        ESP_LOGE(FAN_MIPI55_DISPLAY_TAG, "Failed to construct LvglCBinImage for music_bg.bin");
-        music_bg_image_.reset();
+
+    const char* path = "/sdcard/Music/musicbg-720x1232.bin";
+    FILE* f = fopen(path, "rb");
+    if (f == nullptr) {
+        ESP_LOGW(FAN_MIPI55_DISPLAY_TAG,
+                 "musicbg-720x1232.bin not found on SD card (%s); "
+                 "music cover will use plain black background", path);
         return;
     }
-    if (music_cover_bg_img_) {
-        lv_img_set_src(music_cover_bg_img_, music_bg_image_->image_dsc());
-        lv_obj_remove_flag(music_cover_bg_img_, LV_OBJ_FLAG_HIDDEN);
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        ESP_LOGE(FAN_MIPI55_DISPLAY_TAG, "fseek(end) failed on %s", path);
+        fclose(f);
+        return;
     }
+    long size = ftell(f);
+    if (size <= 0 || size > (long)(1024 * 1024 * 2)) {
+        ESP_LOGE(FAN_MIPI55_DISPLAY_TAG,
+                 "musicbg-720x1232.bin size %ld looks invalid (must be 0 < size <= 2MB)", size);
+        fclose(f);
+        return;
+    }
+    rewind(f);
+
+    /* 优先放 PSRAM（720x1232 RGB565 ≈ 1.77MB）。fallback 到内部 SRAM。 */
+    uint8_t* buf = (uint8_t*)heap_caps_malloc((size_t)size, MALLOC_CAP_SPIRAM);
+    if (buf == nullptr) {
+        buf = (uint8_t*)heap_caps_malloc((size_t)size, MALLOC_CAP_INTERNAL);
+    }
+    if (buf == nullptr) {
+        ESP_LOGE(FAN_MIPI55_DISPLAY_TAG,
+                 "Failed to allocate %ld bytes for musicbg-720x1232.bin", size);
+        fclose(f);
+        return;
+    }
+
+    size_t read_bytes = fread(buf, 1, (size_t)size, f);
+    fclose(f);
+    if (read_bytes != (size_t)size) {
+        ESP_LOGE(FAN_MIPI55_DISPLAY_TAG,
+                 "Short read on musicbg-720x1232.bin: got %u of %ld bytes",
+                 read_bytes, size);
+        heap_caps_free(buf);
+        return;
+    }
+
+    /* 把 buf 交给 LvglCBinImage。注意：cbin_img_dsc_create 内部只是把
+     * img_dsc->data 重新指向像素起始点（不分配新内存），析构时 free 的是
+     * 它自己 heap-alloc 的 dsc，外层 buf 由 LvglCBinImage 的析构外
+     * 由我们自己管理 —— 这里我们直接转交 buf 的所有权给 LvglCBinImage。 */
+    struct CbinWithBuffer {
+        uint8_t* buf;
+        size_t size;
+    };
+    auto wrapper = std::make_shared<CbinWithBuffer>();
+    wrapper->buf = buf;
+    wrapper->size = (size_t)size;
+
+    auto* cbin_image = new LvglCBinImage(buf);
+    if (cbin_image->image_dsc() == nullptr) {
+        ESP_LOGE(FAN_MIPI55_DISPLAY_TAG,
+                 "Failed to construct LvglCBinImage from musicbg-720x1232.bin");
+        delete cbin_image;
+        heap_caps_free(buf);
+        return;
+    }
+
+    /* 用 shared_ptr 的自定义删除器，让 LvglCBinImage 析构完后 free buf。 */
+    music_bg_image_ = std::shared_ptr<LvglCBinImage>(
+        cbin_image,
+        [wrapper](LvglCBinImage* p) {
+            if (p) {
+                delete p;
+            }
+            if (wrapper->buf) {
+                heap_caps_free(wrapper->buf);
+                wrapper->buf = nullptr;
+            }
+        });
+
+    lv_img_set_src(music_cover_bg_img_, music_bg_image_->image_dsc());
+    lv_obj_remove_flag(music_cover_bg_img_, LV_OBJ_FLAG_HIDDEN);
+    ESP_LOGI(FAN_MIPI55_DISPLAY_TAG,
+             "Loaded musicbg-720x1232.bin from SD card (%zu bytes)", wrapper->size);
 }
 #endif  // HAVE_LVGL
 
