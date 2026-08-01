@@ -90,7 +90,7 @@ private:
     // ID3标签处理
     size_t SkipId3Tag(uint8_t* data, size_t size);
 
-    int16_t* final_pcm_data_fft = nullptr;
+    std::vector<int16_t> mono_buffer_;  // 双→单声道转换复用 buffer，构造函数预分配
 
 public:
     Esp32Music();
@@ -105,7 +105,7 @@ public:
     virtual bool StopStreaming() override;  // 停止流式播放
     virtual size_t GetBufferSize() const override { return buffer_size_; }
     virtual bool IsDownloading() const override { return is_downloading_; }
-    virtual int16_t* GetAudioData() override { return final_pcm_data_fft; }
+    virtual int16_t* GetAudioData() override { return nullptr; }  // 不再使用 FFT，保留接口满足 music.h 抽象
     virtual bool IsPlaying() const override { return is_playing_; }
     
     // 专辑封面相关

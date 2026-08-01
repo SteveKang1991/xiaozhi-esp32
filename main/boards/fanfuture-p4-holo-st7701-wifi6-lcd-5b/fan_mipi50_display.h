@@ -312,9 +312,19 @@ private:
     std::unique_ptr<LvglAllocatedImage> music_cover_image_data_;
     std::string current_music_picture_url_;
     std::thread music_cover_download_thread_;
+    /* 下载线程只负责 HTTP → raw JPEG buffer，解码线程负责 jpeg_to_image。
+     * raw_jpeg_cover_data_ 保护 download 和 decode 之间的交接：download 持有 unique_ptr，
+     * decode thread 取走所有权后 unique_ptr 置空、decode 线程自己负责 free。 */
+    std::unique_ptr<uint8_t[]> raw_jpeg_cover_data_;
+    size_t raw_jpeg_cover_size_ = 0;
+    std::mutex raw_jpeg_cover_mutex_;
     int32_t music_cover_scale_ = 256;               // 缩放因子 (256 = 1.0x)
-    /* SetMusicProgress 去抖：避免每帧重复 lv_label_set_text / lv_bar_set_value */
+    /* SetMusicProgress 去抖：避免每帧重复 lv_label_set_text / lv_bar_set_value。
+     * last_progress_bar_update_ms_ 用于节流：进度条每 500ms 才刷一次。
+     * last_progress_sec_ 用于时间标签：同一秒内不重复刷新。 */
     int last_progress_ms_ = -1;
+    int last_progress_sec_ = -1;
+    int64_t last_progress_bar_update_ms_ = -1;
     std::string last_lyric_;
     std::string last_lyric_next_;
     int music_total_interval_sec_ = 0;              // 当前歌曲总时长（秒）
@@ -844,7 +854,7 @@ inline void FanMIPI50Display::ClearChatMessages() {
  *
  * 容器内部布局（在 SetupMusicCoverUI 中创建）：
  *   - music_cover_bg_img_ : 从 SD 卡 /sdcard/Music/musicbg-480x816.bin 加载的默认背景图
- *   - music_cover_img_    : 运行时下载的专辑图，叠在背景上、距顶 140 居中（326x326）
+ *   - music_cover_img_    : 运行时下载的专辑图，叠在背景上、距顶 142 居中（326x326）
  *   - music_lyric_label_  : 当前歌词（第 1 行，离左 45、距底 230，1.1x，白）
  *   - music_lyric_next_label_ : 下一句歌词（第 2 行，离左 45、距底 220，1x，#9d9183）
  *   - music_song_name_label_ / music_singer_label_ : 歌名 / 歌手（距底 155 / 120，左对齐）
@@ -893,7 +903,7 @@ void FanMIPI50Display::ShowMusicCover(bool show, const std::string& picture_url)
                     return;
                 }
                 size_t len = http->GetBodyLength();
-                char* data = (char*)heap_caps_malloc(len, MALLOC_CAP_8BIT);
+                uint8_t* data = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_8BIT);
                 if (!data) {
                     ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "OOM for music cover picture (%d bytes)", len);
                     http->Close();
@@ -901,51 +911,79 @@ void FanMIPI50Display::ShowMusicCover(bool show, const std::string& picture_url)
                 }
                 size_t total = 0;
                 while (total < len) {
-                    int r = http->Read(data + total, len - total);
+                    int r = http->Read((char*)data + total, len - total);
                     if (r <= 0) break;
                     total += r;
                 }
                 http->Close();
 
-                ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "Music cover downloaded: %d bytes, decoding...", len);
+                ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "Music cover downloaded: %d bytes, spawning decode thread...", len);
 
-                uint8_t* decoded = nullptr;
-                size_t decoded_len = 0, img_w = 0, img_h = 0, stride = 0;
-                esp_err_t ret = jpeg_to_image((const uint8_t*)data, len, &decoded, &decoded_len, &img_w, &img_h, &stride);
-                heap_caps_free(data);
-
-                if (ret == ESP_OK && decoded && img_w > 0 && img_h > 0) {
-                    ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "JPEG decoded: %ux%u", img_w, img_h);
-
-                    DisplayLockGuard lock_inner(this);
-
-                    music_cover_image_data_.reset();
-
-                    try {
-                        music_cover_image_data_ = std::make_unique<LvglAllocatedImage>(
-                            decoded, decoded_len, img_w, img_h, stride, LV_COLOR_FORMAT_RGB565);
-
-                        if (music_cover_img_ && music_cover_container_) {
-                            lv_img_set_src(music_cover_img_, music_cover_image_data_->image_dsc());
-                            /* 计算缩放因子，让图片等比填满 280x280 框。
-                             * 取 width/height 缩放比的较小者（contain），保证图片完全可见，
-                             * lv_image_set_inner_align(LV_IMAGE_ALIGN_CENTER) 让其居中。 */
-                            const int32_t cover_box = 280;
-                            int32_t scale_w = 256 * cover_box / (int32_t)img_w;
-                            int32_t scale_h = 256 * cover_box / (int32_t)img_h;
-                            music_cover_scale_ = (scale_w < scale_h) ? scale_w : scale_h;
-                            if (music_cover_scale_ < 32) music_cover_scale_ = 32;  // 下限：避免过小
-                            if (music_cover_scale_ > 256) music_cover_scale_ = 256;
-                            lv_image_set_scale(music_cover_img_, music_cover_scale_);
-                            lv_obj_remove_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
-                        }
-                    } catch (const std::exception& e) {
-                        ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "Music cover decode failed: %s", e.what());
-                        heap_caps_free(decoded);
-                    }
-                } else {
-                    ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "JPEG decode failed: %s", esp_err_to_name(ret));
+                /* 把 raw JPEG 移交给 decode 线程，然后立即退出本线程。
+                 * download 线程不再阻塞在 decode 上，play 线程 / AFE 不会被打断。 */
+                {
+                    std::lock_guard<std::mutex> lock(raw_jpeg_cover_mutex_);
+                    raw_jpeg_cover_data_.reset(data);
+                    raw_jpeg_cover_size_ = len;
                 }
+
+                std::thread decode_thread([this]() {
+                    uint8_t* data_to_decode = nullptr;
+                    size_t data_len = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(raw_jpeg_cover_mutex_);
+                        if (raw_jpeg_cover_data_) {
+                            data_to_decode = raw_jpeg_cover_data_.release();
+                            data_len = raw_jpeg_cover_size_;
+                            raw_jpeg_cover_size_ = 0;
+                        }
+                    }
+
+                    if (!data_to_decode) {
+                        ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "No JPEG data to decode");
+                        return;
+                    }
+
+                    uint8_t* decoded = nullptr;
+                    size_t decoded_len = 0, img_w = 0, img_h = 0, stride = 0;
+                    esp_err_t ret = jpeg_to_image(data_to_decode, data_len, &decoded, &decoded_len, &img_w, &img_h, &stride);
+                    heap_caps_free(data_to_decode);
+
+                    if (ret == ESP_OK && decoded && img_w > 0 && img_h > 0) {
+                        ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "JPEG decoded: %ux%u", img_w, img_h);
+
+                        DisplayLockGuard lock_inner(this);
+
+                        music_cover_image_data_.reset();
+
+                        try {
+                            music_cover_image_data_ = std::make_unique<LvglAllocatedImage>(
+                                decoded, decoded_len, img_w, img_h, stride, LV_COLOR_FORMAT_RGB565);
+
+                            if (music_cover_img_ && music_cover_container_) {
+                                lv_img_set_src(music_cover_img_, music_cover_image_data_->image_dsc());
+                                /* 计算缩放因子，让图片等比填满 326x326 框（5B 实际显示尺寸）。
+                                 * 取 width/height 缩放比的较小者（contain），保证图片完全可见，
+                                 * lv_image_set_inner_align(LV_IMAGE_ALIGN_COVER) 让其填满并裁剪超出。 */
+                                const int32_t cover_box = 330;
+                                int32_t scale_w = 256 * cover_box / (int32_t)img_w;
+                                int32_t scale_h = 256 * cover_box / (int32_t)img_h;
+                                music_cover_scale_ = (scale_w < scale_h) ? scale_w : scale_h;
+                                if (music_cover_scale_ < 32) music_cover_scale_ = 32;  // 下限：避免过小
+                                if (music_cover_scale_ > 256) music_cover_scale_ = 256;
+                                lv_image_set_scale(music_cover_img_, music_cover_scale_);
+                                lv_obj_remove_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
+                            }
+                        } catch (const std::exception& e) {
+                            ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "Music cover decode failed: %s", e.what());
+                            heap_caps_free(decoded);
+                        }
+                    } else {
+                        ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "JPEG decode failed: %s", esp_err_to_name(ret));
+                        heap_caps_free(decoded);  // 释放 jpeg_to_image 分配的缓冲区
+                    }
+                });
+                decode_thread.detach();
             });
         } else if (!picture_url.empty() && music_cover_image_data_) {
             if (music_cover_img_) {
@@ -967,6 +1005,8 @@ void FanMIPI50Display::ShowMusicCover(bool show, const std::string& picture_url)
         }
         /* 重置进度去抖与缓存歌词，避免下次播放时残留旧值 */
         last_progress_ms_ = -1;
+        last_progress_sec_ = -1;
+        last_progress_bar_update_ms_ = -1;
         last_lyric_.clear();
         last_lyric_next_.clear();
         /* 不主动重置 music_total_interval_sec_ —— 下一首开始播放时
@@ -1032,26 +1072,18 @@ void FanMIPI50Display::SetupMusicCoverUI() {
     lv_obj_set_style_bg_opa(music_cover_bg_img_, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(music_cover_bg_img_, LV_OBJ_FLAG_HIDDEN);
 
-    /* 专辑图：326x326，水平居中（(480-326)/2 = 77），距容器顶 140。
+    /* 专辑图：330x330，水平居中（(480-330)/2 = 75），距容器顶 140。
      * 即使原图不是 1:1，也由 lv_image_set_scale 做等比缩放。
      * 项目使用 LVGL 9，lv_image_set_inner_align 让源图在 obj 内居中显示。 */
     {
-        const lv_coord_t cover_w = 326;
-        const lv_coord_t cover_h = 326;
-        const lv_coord_t cover_x = ((lv_coord_t)kMusicCoverWidth - cover_w) / 2;   // 77
+        const lv_coord_t cover_w = 330;
+        const lv_coord_t cover_h = 330;
+        const lv_coord_t cover_x = ((lv_coord_t)kMusicCoverWidth - cover_w) / 2;   // 75
         const lv_coord_t cover_y = 140;
         music_cover_img_ = lv_img_create(music_cover_container_);
         lv_obj_set_pos(music_cover_img_, cover_x, cover_y);
         lv_obj_set_size(music_cover_img_, cover_w, cover_h);
         lv_image_set_inner_align(music_cover_img_, LV_IMAGE_ALIGN_COVER);
-        /* 圆角封面：radius=40 + clip_corner 让 obj 把超出圆角的像素裁掉。
-         * LVGL 9 要求被裁的 obj 必须有非透明 bg（否则没有绘制矩形，
-         * clip_corner 无可裁的边界），用黑色填充即可，COVER 模式下图填满
-         * 整个 obj 实际看不到这块 bg。 */
-        lv_obj_set_style_bg_color(music_cover_img_, lv_color_black(), 0);
-        lv_obj_set_style_bg_opa(music_cover_img_, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(music_cover_img_, 40, 0);
-        lv_obj_set_style_clip_corner(music_cover_img_, true, 0);
     }
     lv_obj_add_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
     music_cover_scale_ = 256;
@@ -1328,6 +1360,14 @@ void FanMIPI50Display::SetMusicInfo(const char* song_name,
  * lyric_next 语义：
  *   - non-null：写入第 2 行（接下来一句）；去抖避免无意义重绘
  *   - null    ：不要动第 2 行（保持当前显示） */
+/* 播放进度 + 当前/下一句歌词。
+ *
+ * 节流策略（避免每帧都抢 LVGL display lock）：
+ * - 时间标签：每 500ms 刷新一次（"02:34" 这种格式，同一秒内重复刷没意义）
+ * - 进度条：每 500ms 刷新一次（歌词没变时不需要更频繁）
+ * - 歌词（第 1 行）：仅当 lyric 非空且文字变化时更新
+ * - 歌词（第 2 行）：仅当 lyric_next 非空且文字变化时更新
+ */
 void FanMIPI50Display::SetMusicProgress(int current_ms, const char* lyric, const char* lyric_next) {
     DisplayLockGuard lock(this);
     if (music_cover_container_ == nullptr) {
@@ -1335,17 +1375,23 @@ void FanMIPI50Display::SetMusicProgress(int current_ms, const char* lyric, const
     }
     if (current_ms < 0) current_ms = 0;
 
-    /* 当前时间标签 */
-    if (music_cur_time_label_) {
-        char buf[16];
-        int cur_sec = current_ms / 1000;
-        snprintf(buf, sizeof(buf), "%02d:%02d", cur_sec / 60, cur_sec % 60);
-        lv_label_set_text(music_cur_time_label_, buf);
+    int64_t now_ms = esp_log_timestamp();
+    int cur_sec = current_ms / 1000;
+
+    /* 时间标签：同一秒内不重复刷新 */
+    if (cur_sec != last_progress_sec_) {
+        last_progress_sec_ = cur_sec;
+        if (music_cur_time_label_) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%02d:%02d", cur_sec / 60, cur_sec % 60);
+            lv_label_set_text(music_cur_time_label_, buf);
+        }
     }
 
-    /* 进度条：去抖 + 限制范围 */
-    if (music_progress_bar_ && current_ms != last_progress_ms_) {
+    /* 进度条：每 500ms 刷新一次（歌词没变时不需要更频繁） */
+    if (music_progress_bar_ && now_ms - last_progress_bar_update_ms_ > 500) {
         last_progress_ms_ = current_ms;
+        last_progress_bar_update_ms_ = now_ms;
         int total_sec = music_total_interval_sec_;
         int pct = 0;
         if (total_sec > 0) {
@@ -1355,8 +1401,7 @@ void FanMIPI50Display::SetMusicProgress(int current_ms, const char* lyric, const
         lv_bar_set_value(music_progress_bar_, pct, LV_ANIM_OFF);
     }
 
-    /* 歌词（第 1 行，当前）：仅当 lyric 非空时更新；lyric == nullptr 表示"歌词没换"，保持现状。
-     * empty string ("") 表示"清空歌词"，仅在调用方显式传入时生效。 */
+    /* 歌词（第 1 行，当前）：仅当 lyric 非空且文字变化时更新 */
     if (music_lyric_label_ && lyric != nullptr) {
         if (last_lyric_ != lyric) {
             last_lyric_ = lyric;
@@ -1364,8 +1409,7 @@ void FanMIPI50Display::SetMusicProgress(int current_ms, const char* lyric, const
         }
     }
 
-    /* 歌词（第 2 行，接下来）：仅当 lyric_next 非空时更新；nullptr 表示保持现状。
-     * empty string ("") 表示"清空下一句"。去抖同样适用。 */
+    /* 歌词（第 2 行，接下来）：仅当 lyric_next 非空且文字变化时更新 */
     if (music_lyric_next_label_ && lyric_next != nullptr) {
         if (last_lyric_next_ != lyric_next) {
             last_lyric_next_ = lyric_next;

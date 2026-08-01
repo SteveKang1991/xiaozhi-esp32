@@ -89,6 +89,9 @@ Esp32Music::Esp32Music() : last_downloaded_data_(), current_music_url_(), curren
                            mp3_decoder_initialized_(false)
 {
     ESP_LOGI(TAG, "Music player initialized with default spectrum display mode");
+    /* 预分配 mono buffer，避免每帧 resize 导致 PSRAM 碎片化。
+     * MP3 输出最大 2304 samples（双声道），转单声道最多 1152。 */
+    mono_buffer_.reserve(1152);
     InitializeMp3Decoder();
 }
 
@@ -219,8 +222,10 @@ bool Esp32Music::Download(const std::string &song_name, const std::string &artis
 {
     ESP_LOGI(TAG, "Starting to get music details for: %s", song_name.c_str());
 
-    // 清空之前的下载数据
+    // 清空之前的数据，避免上一首歌的残留泄露或干扰
     last_downloaded_data_.clear();
+    current_lyric_text_.clear();
+    current_lyric_url_.clear();
 
     // 保存歌名用于后续显示
     current_song_name_ = song_name;
@@ -578,6 +583,15 @@ bool Esp32Music::StopStreaming()
     // 确保音频缓冲区和MP3解码器被清理（播放线程可能提前退出）
     ClearAudioBuffer();
     CleanupMp3Decoder();
+
+    /* 清理播放状态相关的 string，避免换歌时残留 1~3KB 歌词/URL/歌名在 heap
+     * 上累积导致 minimal sram 持续下降。lyrics_ 也需要清（63 行歌词≈2.5KB）。 */
+    current_song_name_.clear();
+    current_picture_url_.clear();
+    {
+        std::lock_guard<std::mutex> lock(lyrics_mutex_);
+        lyrics_.clear();
+    }
 
     // 在线程完全结束后，只在频谱模式下停止FFT显示
     if (display && display_mode_ == DISPLAY_MODE_SPECTRUM)
@@ -1028,7 +1042,6 @@ void Esp32Music::PlayAudioStream()
             {
                 int16_t *final_pcm_data = pcm_buffer;
                 int final_sample_count = mp3_frame_info_.outputSamps;
-                std::vector<int16_t> mono_buffer;
 
                 // 如果是双通道，转换为单通道混合
                 if (mp3_frame_info_.nChans == 2)
@@ -1037,17 +1050,17 @@ void Esp32Music::PlayAudioStream()
                     int stereo_samples = mp3_frame_info_.outputSamps; // 包含左右声道的总样本数
                     int mono_samples = stereo_samples / 2;            // 实际的单声道样本数
 
-                    mono_buffer.resize(mono_samples);
+                    mono_buffer_.resize(mono_samples);
 
                     for (int i = 0; i < mono_samples; ++i)
                     {
                         // 混合左右声道 (L + R) / 2
                         int left = pcm_buffer[i * 2];      // 左声道
                         int right = pcm_buffer[i * 2 + 1]; // 右声道
-                        mono_buffer[i] = (int16_t)((left + right) / 2);
+                        mono_buffer_[i] = (int16_t)((left + right) / 2);
                     }
 
-                    final_pcm_data = mono_buffer.data();
+                    final_pcm_data = mono_buffer_.data();
                     final_sample_count = mono_samples;
 
                     ESP_LOGD(TAG, "Converted stereo to mono: %d -> %d samples",
@@ -1074,18 +1087,6 @@ void Esp32Music::PlayAudioStream()
                 size_t pcm_size_bytes = final_sample_count * sizeof(int16_t);
                 packet.payload.resize(pcm_size_bytes);
                 memcpy(packet.payload.data(), final_pcm_data, pcm_size_bytes);
-
-                if (final_pcm_data_fft == nullptr)
-                {
-                    final_pcm_data_fft = (int16_t *)heap_caps_malloc(
-                        final_sample_count * sizeof(int16_t),
-                        MALLOC_CAP_SPIRAM);
-                }
-
-                memcpy(
-                    final_pcm_data_fft,
-                    final_pcm_data,
-                    final_sample_count * sizeof(int16_t));
 
                 ESP_LOGD(TAG, "Sending %d PCM samples (%d bytes, rate=%d, channels=%d->1) to Application",
                          final_sample_count, pcm_size_bytes, mp3_frame_info_.samprate, mp3_frame_info_.nChans);
@@ -1130,13 +1131,6 @@ void Esp32Music::PlayAudioStream()
     {
         heap_caps_free(pcm_buffer);
         pcm_buffer = nullptr;
-    }
-
-    // 释放 final_pcm_data_fft，避免 class 成员指针残留指向已 free / 重复分配
-    if (final_pcm_data_fft)
-    {
-        heap_caps_free(final_pcm_data_fft);
-        final_pcm_data_fft = nullptr;
     }
 
     // 播放结束时进行基本清理，但不调用StopStreaming避免线程自我等待
