@@ -385,7 +385,20 @@ bool Esp32Music::Download(const std::string &song_name, const std::string &artis
                         current_lyric_index_ = -1;
                         lyrics_.clear();
 
-                        lyric_thread_ = std::thread(&Esp32Music::LyricDisplayThread, this);
+                        // 在创建歌词线程前先配置 esp_pthread，确保栈大小足够
+                        // LyricDisplayThread 主要做解析和等待，4KB 栈足够
+                        esp_pthread_cfg_t lyric_cfg = esp_pthread_get_default_config();
+                        lyric_cfg.stack_size = 4096;
+                        lyric_cfg.prio = 3;  // 低优先级，不阻塞音频线程
+                        lyric_cfg.thread_name = "lyric_disp";
+                        esp_pthread_set_cfg(&lyric_cfg);
+
+                        try {
+                            lyric_thread_ = std::thread(&Esp32Music::LyricDisplayThread, this);
+                        } catch (const std::exception& e) {
+                            ESP_LOGE(TAG, "Failed to create lyric thread: %s, continuing without lyrics", e.what());
+                            is_lyric_running_ = false;
+                        }
                     } else {
                         ESP_LOGI(TAG, "Lyrics available but spectrum display mode is active, skipping lyrics");
                     }
@@ -488,11 +501,27 @@ bool Esp32Music::StartStreaming(const std::string &music_url)
 
     // 开始下载线程
     is_downloading_ = true;
-    download_thread_ = std::thread(&Esp32Music::DownloadAudioStream, this, music_url);
+    try {
+        download_thread_ = std::thread(&Esp32Music::DownloadAudioStream, this, music_url);
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Failed to create download thread: %s", e.what());
+        is_downloading_ = false;
+        return false;
+    }
 
     // 开始播放线程（会等待缓冲区有足够数据）
     is_playing_ = true;
-    play_thread_ = std::thread(&Esp32Music::PlayAudioStream, this);
+    try {
+        play_thread_ = std::thread(&Esp32Music::PlayAudioStream, this);
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Failed to create play thread: %s", e.what());
+        is_playing_ = false;
+        // 等待下载线程结束
+        if (download_thread_.joinable()) {
+            download_thread_.join();
+        }
+        return false;
+    }
 
     ESP_LOGI(TAG, "Streaming threads started successfully");
 

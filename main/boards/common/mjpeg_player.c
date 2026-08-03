@@ -1221,6 +1221,30 @@ void mjpeg_player_stop(void)
     /* 给 idle hook 回收 read_task 的栈 + TCB */
     vTaskDelay(pdMS_TO_TICKS(15));
 
+    /* 立即释放 DMA 输入缓冲区和 ROI frame buffers：
+     * - DMA buffers (2×64KB) 在 stop 时应立即归还 heap，不等下次 start 才做延迟清理。
+     * - ROI fb buffers (video_w×video_h×2×2) 也同样及时释放，避免 1.6MB IRAM 碎片化。
+     *   它们只在 need_alloc_fb/need_alloc_dma 路径下自申请，在 stop 时主动清零 s_cfg.fb[]/s_dma_bufs[]，
+     *   让下次 start 的分配路径重新走分配分支。 */
+    for (int i = 0; i < NUM_DMA_BUFS; i++) {
+        if (s_dma_bufs[i]) {
+            heap_caps_free(s_dma_bufs[i]);
+            s_dma_bufs[i] = NULL;
+        }
+    }
+    /* ROI / LVGL 路径下自申请 frame buffers：panel fb 路径此时已是 panel fb 指针，
+     * s_output_fb_shared=true 时不能 free。 */
+    if (!s_output_fb_shared) {
+        if (s_cfg.fb[0] && s_cfg.fb[0] != s_cfg.fb[1]) {
+            heap_caps_free(s_cfg.fb[0]);
+            s_cfg.fb[0] = NULL;
+        }
+        if (s_cfg.fb[1]) {
+            heap_caps_free(s_cfg.fb[1]);
+            s_cfg.fb[1] = NULL;
+        }
+    }
+
     /* decode_task 退出较慢（持锁 blit），且不占大块堆，异步退出即可 */
     s_deferred_cleanup = true;
 }
