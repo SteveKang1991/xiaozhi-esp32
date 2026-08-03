@@ -21,6 +21,7 @@ public:
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
     EmotionFetchResult FetchDeviceEmotions() override;
+    SDAssetsFetchResult FetchDeviceSDAssetsFiles() override;
 
 private:
     EventGroupHandle_t event_group_handle_;

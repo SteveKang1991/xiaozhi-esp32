@@ -460,3 +460,72 @@ EmotionFetchResult MqttProtocol::FetchDeviceEmotions() {
     cJSON_Delete(root);
     return result;
 }
+
+SDAssetsFetchResult MqttProtocol::FetchDeviceSDAssetsFiles() {
+    SDAssetsFetchResult result;
+
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    auto http = network->CreateHttp(0);
+
+    // 固件端同时传 MAC 和板子型号：
+    //   - hardware_id : 设备 MAC（保留字段，后端当前不用，便于以后做按设备差异化）
+    //   - boardAgent  : 编译期板子型号，后端真正按它返回文件列表
+    std::string board_agent = std::string(BOARD_TYPE);
+    std::string mac = SystemInfo::GetMacAddress();
+    std::string url = "https://ai.fanfuture.cn/api/device/sd_assets?boardAgent=" + board_agent
+                    + "&hardware_id=" + mac;
+
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(TAG, "Failed to open HTTP for SD assets list");
+        return result;
+    }
+
+    if (http->GetStatusCode() != 200) {
+        ESP_LOGE(TAG, "HTTP status %d for SD assets list", http->GetStatusCode());
+        http->Close();
+        return result;
+    }
+
+    std::string response;
+    char buffer[1024];
+    int read;
+    while ((read = http->Read(buffer, sizeof(buffer))) > 0) {
+        response.append(buffer, read);
+    }
+    http->Close();
+
+    cJSON* root = cJSON_Parse(response.c_str());
+    if (!root) {
+        ESP_LOGE(TAG, "Failed to parse SD assets JSON");
+        return result;
+    }
+
+    cJSON* data = cJSON_GetObjectItem(root, "data");
+    cJSON* arr = data ? cJSON_GetObjectItem(data, "files") : nullptr;
+    if (!cJSON_IsArray(arr)) {
+        cJSON_Delete(root);
+        result.success = true;  // 请求成功，但列表为空
+        return result;
+    }
+
+    result.success = true;
+
+    int count = cJSON_GetArraySize(arr);
+    for (int i = 0; i < count; i++) {
+        cJSON* item = cJSON_GetArrayItem(arr, i);
+        SDAssetsFileInfo info;
+        cJSON* p = cJSON_GetObjectItem(item, "path");
+        cJSON* u = cJSON_GetObjectItem(item, "url");
+        cJSON* s = cJSON_GetObjectItem(item, "size");
+        if (cJSON_IsString(p)) info.path = p->valuestring;
+        if (cJSON_IsString(u)) info.url = u->valuestring;
+        if (cJSON_IsNumber(s)) info.size = (size_t)s->valuedouble;
+        if (!info.path.empty() && !info.url.empty()) {
+            result.files.push_back(std::move(info));
+        }
+    }
+
+    cJSON_Delete(root);
+    return result;
+}

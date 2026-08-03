@@ -59,6 +59,9 @@
         "DOWNLOADING_EMOTIONS": "Downloading animation resources...",
         "DOWNLOADING_EMOTION_PROGRESS": "Downloading:%d/%d",
         "EMOTION_SYNC_COMPLETE": "Animation sync complete",
+        "DOWNLOADING_SD_ASSETS": "Downloading SD assets...",
+        "DOWNLOADING_SD_ASSETS_PROGRESS": "Downloading assets: %d/%d",
+        "SD_ASSETS_SYNC_COMPLETE": "SD assets sync complete",
         "MUSIC_PLAYING": "Music Playing..."
     }
 }

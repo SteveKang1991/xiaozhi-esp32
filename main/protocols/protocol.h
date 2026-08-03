@@ -53,6 +53,25 @@ struct EmotionFetchResult {
     std::vector<EmotionInfo> emotions;  // 表情列表（可能为空）
 };
 
+/**
+ * 设备 SD 卡资源文件信息（音乐背景图 .bin 等）
+ * 由 Protocol::FetchDeviceSDAssetsFiles() 返回
+ * 设备端只按 local_path 文件名比对，本地没有就下载，不做 MD5 校验。
+ */
+struct SDAssetsFileInfo {
+    std::string path;        // SD 卡上的绝对路径，例如 /sdcard/Music/musicbg-480x816.bin
+    std::string url;         // 下载地址
+    size_t size = 0;        // 服务端的文件大小（用于显示/参考，不做强校验）
+};
+
+/**
+ * 获取 SD 资源文件列表的结果
+ */
+struct SDAssetsFetchResult {
+    bool success = false;   // HTTP 请求是否成功
+    std::vector<SDAssetsFileInfo> files;
+};
+
 enum AbortReason {
     kAbortReasonNone,
     kAbortReasonWakeWordDetected
@@ -103,6 +122,13 @@ public:
      * @return EmotionFetchResult 包含 success 标记和表情列表
      */
     virtual EmotionFetchResult FetchDeviceEmotions() = 0;
+
+    /**
+     * 从服务器拉取本机型需要补齐的 SD 卡资源文件列表（音乐背景图 .bin 等）
+     * 通过 HTTP GET 调用 /api/device/sd_assets?hardware_id={mac}
+     * @return SDAssetsFetchResult 包含 success 标记和文件列表
+     */
+    virtual SDAssetsFetchResult FetchDeviceSDAssetsFiles() = 0;
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;

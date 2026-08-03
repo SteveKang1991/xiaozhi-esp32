@@ -337,6 +337,9 @@ void Application::ActivationTask() {
     // Check for new firmware version
     CheckNewVersion();
 
+    // Sync SD-asset files (music background .bin, etc.) from server to SD card
+    CheckSDAssetsFiles();
+
     // Sync emotion files (idle/listen/speak MJPEG) from server to SD card
     CheckEmotionFiles();
 
@@ -726,6 +729,207 @@ bool Application::DownloadEmotionFile(const std::string& url, const std::string&
     }
 
     ESP_LOGI(kEmotionTag, "Downloaded %s: %u bytes", local_path.c_str(), (unsigned)total);
+    return true;
+}
+
+// =====================================================
+// SD 资源文件同步（音乐背景图 .bin 等）
+// 与 CheckEmotionFiles 的区别：
+//   - 不做 MD5 校验，不做大小的严格校验
+//   - 不删除本地文件，只做新增
+//   - UI 复用下载表情的提示语
+// =====================================================
+
+static const char* kSDAssetsTag = "SDAssetsSync";
+
+/**
+ * 同步 SD 卡资源文件（音乐背景图 .bin 等）
+ * 流程：
+ *   1. 从服务器拉取本机型需要的文件列表（{path, url}）
+ *   2. 检查本地 path 是否存在
+ *      - 已存在：跳过
+ *      - 不存在：下载到对应 path
+ *   3. 不会删除本地任何文件
+ */
+void Application::CheckSDAssetsFiles() {
+    if (ota_ == nullptr) {
+        return;
+    }
+
+    // 通过 HTTP probe MqttProtocol/WebsocketProtocol 拉取 SD 资源列表
+    SDAssetsFetchResult fetch_result;
+    if (ota_->HasMqttConfig()) {
+        MqttProtocol probe;
+        fetch_result = probe.FetchDeviceSDAssetsFiles();
+    } else if (ota_->HasWebsocketConfig()) {
+        WebsocketProtocol probe;
+        fetch_result = probe.FetchDeviceSDAssetsFiles();
+    } else {
+        MqttProtocol probe;
+        fetch_result = probe.FetchDeviceSDAssetsFiles();
+    }
+
+    if (!fetch_result.success) {
+        ESP_LOGW(kSDAssetsTag, "Failed to fetch SD assets list from server, skip sync");
+        return;
+    }
+
+    if (fetch_result.files.empty()) {
+        ESP_LOGI(kSDAssetsTag, "Server returned empty SD assets list, nothing to sync");
+        return;
+    }
+
+    ESP_LOGI(kSDAssetsTag, "Fetched %d SD asset file(s) from server", (int)fetch_result.files.size());
+
+    // 检查每个文件，本地缺失的下载
+    int download_count = 0;
+    int total_count = 0;
+    auto display = Board::GetInstance().GetDisplay();
+
+    for (const auto& info : fetch_result.files) {
+        if (info.path.empty() || info.url.empty()) {
+            continue;
+        }
+
+        std::string local_path = info.path;
+        struct stat st = {};
+        if (stat(local_path.c_str(), &st) == 0 && st.st_size > 0) {
+            ESP_LOGI(kSDAssetsTag, "SD asset %s already exists (%ld bytes), skip",
+                     local_path.c_str(), (long)st.st_size);
+            continue;
+        }
+
+        total_count++;
+    }
+
+    if (total_count == 0) {
+        ESP_LOGI(kSDAssetsTag, "All SD assets already present");
+        return;
+    }
+
+    // 确有需要下载的，显示下载提示
+    if (display) {
+        display->SetStatus(Lang::Strings::DOWNLOADING_SD_ASSETS);
+        vTaskDelay(pdMS_TO_TICKS(1500));
+    }
+
+    // 实际下载
+    download_count = 0;
+    for (const auto& info : fetch_result.files) {
+        if (info.path.empty() || info.url.empty()) {
+            continue;
+        }
+
+        std::string local_path = info.path;
+        struct stat st = {};
+        if (stat(local_path.c_str(), &st) == 0 && st.st_size > 0) {
+            continue;  // 已存在
+        }
+
+        download_count++;
+        if (display) {
+            char progress_msg[64];
+            snprintf(progress_msg, sizeof(progress_msg), Lang::Strings::DOWNLOADING_SD_ASSETS_PROGRESS,
+                     download_count, total_count);
+            display->SetChatMessage("system", progress_msg);
+        }
+
+        if (DownloadSDAssetsFile(info.url, local_path)) {
+            ESP_LOGI(kSDAssetsTag, "SD asset ready: %s", local_path.c_str());
+        } else {
+            ESP_LOGE(kSDAssetsTag, "Failed to download SD asset: %s -> %s",
+                     info.url.c_str(), local_path.c_str());
+        }
+    }
+
+    if (display) {
+        display->SetStatus(Lang::Strings::SD_ASSETS_SYNC_COMPLETE);
+        display->SetChatMessage("system", Lang::Strings::SD_ASSETS_SYNC_COMPLETE);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+/**
+ * 下载 SD 资源文件到本地路径
+ * - 先写到 .tmp 再 rename，保证断电不会损坏
+ * - 失败时清理 .tmp
+ * - 不做 MD5 校验（按需求保持简单）
+ */
+bool Application::DownloadSDAssetsFile(const std::string& url, const std::string& local_path) {
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    auto http = network->CreateHttp(0);
+
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(kSDAssetsTag, "Failed to open HTTP: %s", url.c_str());
+        return false;
+    }
+
+    int status = http->GetStatusCode();
+    if (status != 200) {
+        ESP_LOGE(kSDAssetsTag, "HTTP status %d for %s", status, url.c_str());
+        http->Close();
+        return false;
+    }
+
+    // 确保目标目录存在
+    auto pos = local_path.find_last_of('/');
+    if (pos != std::string::npos && pos > 0) {
+        std::string parent_dir = local_path.substr(0, pos);
+        struct stat st = {};
+        if (stat(parent_dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+            // 递归创建父目录
+            std::string accum;
+            for (size_t i = 1; i < parent_dir.size(); ++i) {
+                if (parent_dir[i] == '/' || i == parent_dir.size() - 1) {
+                    accum = parent_dir.substr(0, i + 1);
+                    struct stat sub_st = {};
+                    if (stat(accum.c_str(), &sub_st) != 0) {
+                        mkdir(accum.c_str(), 0755);
+                    }
+                }
+            }
+        }
+    }
+
+    // 先写到 .tmp 再 rename
+    std::string tmp_path = local_path + ".tmp";
+    FILE* fp = fopen(tmp_path.c_str(), "wb");
+    if (!fp) {
+        ESP_LOGE(kSDAssetsTag, "Failed to open file: %s", tmp_path.c_str());
+        http->Close();
+        return false;
+    }
+
+    char buffer[4096];
+    int read;
+    size_t total = 0;
+    while ((read = http->Read(buffer, sizeof(buffer))) > 0) {
+        if (fwrite(buffer, 1, read, fp) != (size_t)read) {
+            ESP_LOGE(kSDAssetsTag, "Write failed for %s", tmp_path.c_str());
+            fclose(fp);
+            unlink(tmp_path.c_str());
+            http->Close();
+            return false;
+        }
+        total += read;
+    }
+    fclose(fp);
+    http->Close();
+
+    if (total == 0) {
+        ESP_LOGE(kSDAssetsTag, "Downloaded 0 bytes for %s", url.c_str());
+        unlink(tmp_path.c_str());
+        return false;
+    }
+
+    if (rename(tmp_path.c_str(), local_path.c_str()) != 0) {
+        ESP_LOGE(kSDAssetsTag, "Rename failed: %s -> %s", tmp_path.c_str(), local_path.c_str());
+        unlink(tmp_path.c_str());
+        return false;
+    }
+
+    ESP_LOGI(kSDAssetsTag, "Downloaded %s: %u bytes", local_path.c_str(), (unsigned)total);
     return true;
 }
 

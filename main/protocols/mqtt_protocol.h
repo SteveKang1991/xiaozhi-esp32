@@ -34,6 +34,7 @@ public:
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
     EmotionFetchResult FetchDeviceEmotions() override;
+    SDAssetsFetchResult FetchDeviceSDAssetsFiles() override;
 
 private:
     // Alive flag for safe scheduled callbacks - set to false in destructor

@@ -175,6 +175,10 @@ private:
     void ProcessEmotionFile(const EmotionInfo& info);
     void CleanOrphanEmotionFiles(const std::vector<std::string>& valid_names);
     bool DownloadEmotionFile(const std::string& url, const std::string& local_path, size_t expected_size);
+
+    // SD 资源文件同步（音乐背景图 .bin 等），不做 MD5 校验、按文件名比对缺失即下载
+    void CheckSDAssetsFiles();
+    bool DownloadSDAssetsFile(const std::string& url, const std::string& local_path);
     
     // State change handler called by state machine
     void OnStateChanged(DeviceState old_state, DeviceState new_state);
