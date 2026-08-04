@@ -57,10 +57,11 @@ typedef struct {
 esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg);
 void mjpeg_player_stop(void);
 /**
- * 异步停止：仅同步等待 read_task 退出（释放 256KB PSRAM read_buf + 32KB io_buf），
- * 旧 decode_task 由它在 s_running=false 后自行退出，资源回收推迟到下次 start。
- * 用于频繁 state-switch 场景（idle/listen/speak 间切换），可大幅缩短状态切换
- * 卡顿窗口（典型从 ~200ms 降到 ~50ms）。同步释放路径见 mjpeg_player_stop。
+ * 异步停止：等待 read_task 退出（释放 256KB PSRAM read_buf + 32KB io_buf），
+ * 之后也同步等待 decode_task 退出，再完成 deferred cleanup。
+ * stop 后立即 start 的调用模式需要 decode_task 同步退出，否则 deferred cleanup
+ * 的 20ms 窗口会导致新 start 创建的 queue 被旧 decode_task 清空，造成新 decode_task 卡死。
+ * 同步释放路径见 mjpeg_player_stop。
  */
 void mjpeg_player_stop_async(void);
 bool mjpeg_player_is_running(void);

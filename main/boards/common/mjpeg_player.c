@@ -121,16 +121,18 @@ static bool s_output_fb_shared;
 #define MJPEG_READ_TASK_PRIORITY   2
 #define MJPEG_DECODE_TASK_PRIORITY 4
 /*
- * S3 软解 240x290 耗时 ~30ms/帧（解+blit）。Audio_input 优先级 8 占 CPU0 约 50%，mjpeg_decode 必须搬出 CPU0，
- * 否则帧间隔从 50ms 拉到 500ms+。read_task 优先级低，与 decode 同核 CPU1 不互相抢占。
- * 解码 task CPU1 + LVGL 跨核短互斥（draw_bitmap），与 LVGL tick 不同核即可。
+ * S3 软解 240x290 耗时 ~30ms/帧（解+blit）。
+ * - decode_task 跑 CPU0，与 audio_input (P8) 同核，让出 CPU1 给 IDLE 喂 WDT。
+ * - read_task 跑 CPU1（避开 decode 的 SPI flash 互斥），优先级低（2），
+ *   不会霸占 CPU1，IDLE1 在 read 阻塞/空闲时能跑起来喂 WDT。
+ * - decode 优先级高（4）保证队列不会爆满堆积旧帧。
  */
 #if CONFIG_FREERTOS_UNICORE
 #define MJPEG_READ_TASK_CORE_ID   0
 #define MJPEG_DECODE_TASK_CORE_ID 0
 #else
 #define MJPEG_READ_TASK_CORE_ID   1
-#define MJPEG_DECODE_TASK_CORE_ID 1
+#define MJPEG_DECODE_TASK_CORE_ID 0
 #endif
 #define MJPEG_ROI_DRAW_LETTERBOX_ONCE 0
 /** 顶/底 letterbox 黑条，单次 draw_bitmap 最大行数（高大于视频上下黑边） */
@@ -399,6 +401,92 @@ static bool s_deferred_cleanup = false;
 /* 前向声明：mjpeg_do_deferred_cleanup() 在文件后部定义；mjpeg_player_start() 需要先调它。 */
 static void mjpeg_do_deferred_cleanup(void);
 
+/** 模块级 JPEG 解码器：decoder 跨文件复用，避免每次文件切换都 close+open。
+ *  ESP-IDF esp_jpeg 组件的 jpeg_dec_close() 有 bug，关闭后不释放内部 PSRAM 缓冲，
+ *  导致频繁切换时 PSRAM 累积泄漏（~250KB/次）。通过复用 decoder，仅在 stop 时销毁，
+ *  大幅减少 close 调用次数，从根本上消除泄漏。 */
+#if CONFIG_IDF_TARGET_ESP32P4
+static bool s_decoder_open = false;
+static jpeg_decoder_handle_t s_decoder = NULL;
+static jpeg_decode_engine_cfg_t s_engine_cfg;
+static jpeg_decode_cfg_t s_decode_cfg;
+#else
+static bool s_decoder_open = false;
+static jpeg_dec_handle_t s_sw_dec = NULL;
+static jpeg_dec_config_t s_sw_dec_cfg;
+#endif
+static void mjpeg_close_decoder_unsafe(void);  /* 前向声明 */
+static void mjpeg_wait_read_task_exit(void);   /* 前向声明 */
+static void mjpeg_wait_decode_task_exit(void); /* 前向声明 */
+
+/* ═══════════════════════════════════════════════════════════
+ *  模块级 JPEG 解码器管理（跨文件复用）
+ * ═══════════════════════════════════════════════════════════ */
+
+/** 仅释放 decoder 本身，不修改 s_decoder_open 标志。
+ *  由调用方在 destroy 场景中负责重置 s_decoder_open=false。 */
+static void mjpeg_close_decoder_unsafe(void)
+{
+#if CONFIG_IDF_TARGET_ESP32P4
+    if (s_decoder) {
+        jpeg_del_decoder_engine(s_decoder);
+        s_decoder = NULL;
+    }
+#else
+    if (s_sw_dec) {
+        jpeg_dec_close(s_sw_dec);
+        s_sw_dec = NULL;
+    }
+#endif
+}
+
+/** 模块级 decoder 统一销毁：仅在真正的 stop 时调用 */
+static void mjpeg_close_decoder(void)
+{
+    if (!s_decoder_open) {
+        return;
+    }
+    mjpeg_close_decoder_unsafe();
+    s_decoder_open = false;
+}
+
+/** 模块级 decoder 统一创建：仅在 stop 后首次 start 时新建，后续直接返回 */
+static esp_err_t mjpeg_open_decoder(void)
+{
+    if (s_decoder_open) {
+        return ESP_OK;
+    }
+#if CONFIG_IDF_TARGET_ESP32P4
+    s_engine_cfg = (jpeg_decode_engine_cfg_t){
+        .intr_priority = 0,
+        .timeout_ms = 5000,
+    };
+    esp_err_t ret = jpeg_new_decoder_engine(&s_engine_cfg, &s_decoder);
+    if (ret != ESP_OK || s_decoder == NULL) {
+        s_decoder = NULL;
+        return ret;
+    }
+    s_decode_cfg = (jpeg_decode_cfg_t){
+        .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
+        .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
+    };
+#else
+    s_sw_dec_cfg = (jpeg_dec_config_t)DEFAULT_JPEG_DEC_CONFIG();
+#if defined(JPEG_PIXEL_FORMAT_RGB565_BE)
+    s_sw_dec_cfg.output_type = s_mjpeg_sw_decode_rgb565_be ? JPEG_PIXEL_FORMAT_RGB565_BE : JPEG_PIXEL_FORMAT_RGB565_LE;
+#else
+    s_sw_dec_cfg.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+#endif
+    s_sw_dec_cfg.rotate = JPEG_ROTATE_0D;
+    if (jpeg_dec_open(&s_sw_dec_cfg, &s_sw_dec) != JPEG_ERR_OK || s_sw_dec == NULL) {
+        s_sw_dec = NULL;
+        return ESP_FAIL;
+    }
+#endif
+    s_decoder_open = true;
+    return ESP_OK;
+}
+
 /** mjpeg_player_start 预加载整文件；stop 释放 */
 static uint8_t *s_preload_buf = NULL;
 static size_t s_preload_size = 0;
@@ -514,6 +602,7 @@ static bool ctx_fill(read_ctx_t *ctx)
  */
 static bool extract_frame(read_ctx_t *ctx, const uint8_t **out_data, int *out_len)
 {
+    uint32_t iter = 0;
     while (s_running) {
         int avail = ctx_avail(ctx);
         if (avail < 4) {
@@ -630,6 +719,10 @@ static bool extract_frame(read_ctx_t *ctx, const uint8_t **out_data, int *out_le
             continue;
         }
         ctx_fill(ctx);
+        /* 每 64 次循环 yield 一次，避免 read_task 长时占 CPU1 触发 IDLE1 WDT */
+        if ((++iter & 0x3F) == 0) {
+            taskYIELD();
+        }
     }
     return false;
 }
@@ -712,8 +805,6 @@ static bool validate_frame(const uint8_t *data, int len,
 
 static void mjpeg_read_task(void *arg)
 {
-    // ESP_LOGI(TAG, "📜 读取任务启动");
-
     uint32_t skip_count = 0;
     FILE *opened_fp = NULL;
     uint8_t *read_buf = NULL;
@@ -869,7 +960,11 @@ static void mjpeg_read_task(void *arg)
             memcpy(msg.buf, frame_data, frame_len);
             msg.len = frame_len;
 
-            xQueueSend(s_frame_queue, &msg, pdMS_TO_TICKS(100));
+            /* 非阻塞发送：队列满时 yield 让 decode_task（CPU0 被 audio_input 抢占）有机会消费帧。
+             * 避免 read_task 占 CPU 死锁 100ms 导致动画卡死。帧丢失也好过系统冻结。 */
+            while (xQueueSend(s_frame_queue, &msg, 0) != pdTRUE) {
+                taskYIELD();
+            }
 
             /* 每送一帧主动 yield，避免 read_task 长时间占 CPU1 触发 IDLE1 WDT。
              * taskYIELD() 不会延迟任何时间，但让 decode 任务（优先级 4 > read 0）抢到 CPU，
@@ -880,11 +975,17 @@ static void mjpeg_read_task(void *arg)
         /* 非循环模式才发送 EOF；循环模式回绕文件头继续读 */
         if (!s_cfg.loop || !s_running) {
             frame_msg_t eof = { .buf = NULL, .len = 0 };
-            xQueueSend(s_frame_queue, &eof, pdMS_TO_TICKS(100));
+            /* 非阻塞发送，避免死锁 */
+            while (xQueueSend(s_frame_queue, &eof, 0) != pdTRUE) {
+                taskYIELD();
+            }
             break;
         }
         if (ctx.from_preload) {
-            /* 已在 RAM 中，仅重置游标 */
+            /* 已在 RAM 中，重置游标和 EOF 标志，让 extract_frame 能重新扫描缓冲 */
+            ctx.start = 0;
+            ctx.end = (int)s_preload_size;
+            ctx.eof = false;
             continue;
         }
         /* PARTITION 源：文件游标在 ctx 上，重置所有游标回到开头 */
@@ -938,43 +1039,8 @@ exit:
 
 static void mjpeg_decode_task(void *arg)
 {
-    // ESP_LOGI(TAG, "decode task start");
-
-#if CONFIG_IDF_TARGET_ESP32P4
-    jpeg_decode_engine_cfg_t engine_cfg = {
-        .intr_priority = 0,
-        .timeout_ms = 5000,
-    };
-    jpeg_decoder_handle_t decoder = NULL;
-    esp_err_t ret = jpeg_new_decoder_engine(&engine_cfg, &decoder);
-    if (ret != ESP_OK) {
-        // ESP_LOGE(TAG, "HW jpeg engine failed: %s", esp_err_to_name(ret));
-        s_running = false;
-        goto exit;
-    }
-    // ESP_LOGI(TAG, "HW JPEG ready (timeout=%dms)", engine_cfg.timeout_ms);
-
-    jpeg_decode_cfg_t decode_cfg = {
-        .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
-        .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
-    };
-#else
-    jpeg_dec_config_t sw_dec_cfg = DEFAULT_JPEG_DEC_CONFIG();
-#if defined(JPEG_PIXEL_FORMAT_RGB565_BE)
-    sw_dec_cfg.output_type = s_mjpeg_sw_decode_rgb565_be ? JPEG_PIXEL_FORMAT_RGB565_BE : JPEG_PIXEL_FORMAT_RGB565_LE;
-#else
-    sw_dec_cfg.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
-#endif
-    sw_dec_cfg.rotate = JPEG_ROTATE_0D;
-    jpeg_dec_handle_t sw_dec = NULL;
-    if (jpeg_dec_open(&sw_dec_cfg, &sw_dec) != JPEG_ERR_OK || sw_dec == NULL) {
-        // ESP_LOGE(TAG, "esp_new_jpeg jpeg_dec_open failed");
-        s_running = false;
-        goto exit;
-    }
-    // ESP_LOGI(TAG, "SW JPEG (esp_new_jpeg) ready");
-    esp_err_t ret = ESP_OK;
-#endif
+    /* decoder 已由 mjpeg_open_decoder() 在 mjpeg_player_start() 中创建并存储在模块级变量中，
+     * decode_task 复用 s_decoder/s_sw_dec，不在这里 open/close。 */
 
     /* 全屏 DPI：面板全尺寸；画布 / ROI：仅视频区域 */
     const uint32_t fb_size = (s_embed_lvgl || s_panel_roi_blit)
@@ -1003,6 +1069,10 @@ static void mjpeg_decode_task(void *arg)
         esp_timer_get_time() + frame_interval_us : 0;
 
     while (s_running) {
+        if (!s_frame_queue || (uintptr_t)s_frame_queue < 0x1000) {
+            break;
+        }
+
         frame_msg_t msg;
         if (xQueueReceive(s_frame_queue, &msg, pdMS_TO_TICKS(200)) != pdTRUE) {
             continue;
@@ -1035,8 +1105,9 @@ static void mjpeg_decode_task(void *arg)
         int64_t t_start = esp_timer_get_time();
 
         uint32_t decoded_size = 0;
+        esp_err_t ret = ESP_OK;
 #if CONFIG_IDF_TARGET_ESP32P4
-        ret = jpeg_decoder_process(decoder, &decode_cfg,
+        ret = jpeg_decoder_process(s_decoder, &s_decode_cfg,
                                     msg.buf, (uint32_t)msg.len,
                                     (uint8_t *)s_cfg.fb[fb_idx], jpeg_out_buf_size,
                                     &decoded_size);
@@ -1045,7 +1116,7 @@ static void mjpeg_decode_task(void *arg)
         jpeg_dec_header_info_t hdr = {0};
         jpeg_io.inbuf = msg.buf;
         jpeg_io.inbuf_len = msg.len;
-        jpeg_error_t jer = jpeg_dec_parse_header(sw_dec, &jpeg_io, &hdr);
+        jpeg_error_t jer = jpeg_dec_parse_header(s_sw_dec, &jpeg_io, &hdr);
         if (jer != JPEG_ERR_OK) {
             ret = ESP_FAIL;
         } else if ((uint32_t)hdr.width != (uint32_t)s_cfg.screen_width
@@ -1064,7 +1135,7 @@ static void mjpeg_decode_task(void *arg)
             jpeg_io.inbuf = msg.buf + inbuf_consumed;
             jpeg_io.inbuf_len = jpeg_io.inbuf_remain;
             jpeg_io.outbuf = (uint8_t *)s_cfg.fb[fb_idx];
-            jer = jpeg_dec_process(sw_dec, &jpeg_io);
+            jer = jpeg_dec_process(s_sw_dec, &jpeg_io);
             if (jer == JPEG_ERR_OK) {
                 decoded_size = expect_decoded;
                 ret = ESP_OK;
@@ -1092,29 +1163,13 @@ sw_decode_done:
                 //          (unsigned long)decode_errors, esp_err_to_name(ret),
                 //          (unsigned long)decoded_size, (unsigned long)expect_decoded, msg.len);
             }
-#if CONFIG_IDF_TARGET_ESP32P4
-            jpeg_del_decoder_engine(decoder);
-            decoder = NULL;
-            vTaskDelay(pdMS_TO_TICKS(5));
-            ret = jpeg_new_decoder_engine(&engine_cfg, &decoder);
-            if (ret != ESP_OK) {
-                // ESP_LOGE(TAG, "reopen HW jpeg failed");
-                break;
-            }
-#else
-            if (sw_dec) {
-                jpeg_dec_close(sw_dec);
-                sw_dec = NULL;
-            }
-            vTaskDelay(pdMS_TO_TICKS(5));
-            if (jpeg_dec_open(&sw_dec_cfg, &sw_dec) != JPEG_ERR_OK || sw_dec == NULL) {
-                // ESP_LOGE(TAG, "reopen SW jpeg failed");
-                break;
-            }
-#endif
+            /* decoder 是模块级变量，由 mjpeg_close_decoder() 统一管理，
+             * 不在 decode_task 内重建。连续错误时只 break 让 task 继续尝试解码。
+             * ★ 不要改 s_running！s_running 是模块级状态总开关，由 stop/stop_async 统一管理。
+             *   decode_task 内部清 s_running 会让外部 mjpeg_player_is_running() 误判，
+             *   下次 start 时跳过 stop_async，撞上旧 read_task 死锁。 */
             if (consecutive_errors >= 20) {
                 // ESP_LOGE(TAG, "too many decode errors, stop");
-                s_running = false;
                 break;
             }
             continue;
@@ -1251,16 +1306,6 @@ sw_decode_done:
         }
     }
 
-exit:
-#if CONFIG_IDF_TARGET_ESP32P4
-    if (decoder) {
-        jpeg_del_decoder_engine(decoder);
-    }
-#else
-    if (sw_dec) {
-        jpeg_dec_close(sw_dec);
-    }
-#endif
     // ESP_LOGI(TAG, "decode task exit");
     s_decode_task = NULL;
     vTaskDelete(NULL);
@@ -1302,11 +1347,9 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     /* 若 stop 已调用但任务还在退出（s_running=false 但任务句柄仍非空），
      * 同步等待任务完全退出后再判断，避免 start 撞到半退出的任务。 */
     if (!s_running && (s_read_task || s_decode_task)) {
-        // ESP_LOGI(TAG, "等待上一轮任务退出...");
         TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
         while (s_read_task || s_decode_task) {
             if (xTaskGetTickCount() > deadline) {
-                // ESP_LOGW(TAG, "⚠️ 等待任务退出超时，强制清理");
                 if (s_read_task) { vTaskDelete(s_read_task); s_read_task = NULL; }
                 if (s_decode_task) { vTaskDelete(s_decode_task); s_decode_task = NULL; }
                 break;
@@ -1332,14 +1375,20 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
             same = (strncmp(s_last_partition_key, key, sizeof(s_last_partition_key)) == 0);
         }
         if (same) {
-            // ESP_LOGI(TAG, "🔄 同一文件已播放中，跳过重启");
             return ESP_OK;
         }
-        // ESP_LOGW(TAG, "⚠️ 播放器已在运行（不同文件）");
         return ESP_ERR_INVALID_STATE;
     }
-
+    uint8_t *old_fb0 = s_cfg.fb[0];
+    uint8_t *old_fb1 = s_cfg.fb[1];
     s_cfg = *cfg;
+    if (old_fb0) {
+        s_cfg.fb[0] = old_fb0;
+    }
+    if (old_fb1) {
+        s_cfg.fb[1] = old_fb1;
+    }
+
     s_embed_lvgl = (s_cfg.lv_video_canvas != NULL);
     s_panel_roi_blit = s_cfg.panel_blit_roi;
     s_roi_letterbox_drawn = false;
@@ -1383,12 +1432,13 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
                     return ESP_ERR_NO_MEM;
                 }
             }
-        }
-        if (s_panel_roi_blit) {
-            s_cfg.fb[1] = s_cfg.fb[0];
-            s_output_fb_shared = true;
-        } else {
-            s_output_fb_shared = false;
+            /* 仅在分配了新 fb 时才设置共享标志；fb[1]=fb[0] 也只在分配后设置 */
+            if (s_panel_roi_blit) {
+                s_cfg.fb[1] = s_cfg.fb[0];
+                s_output_fb_shared = true;
+            } else {
+                s_output_fb_shared = false;
+            }
         }
         if (s_cfg.fb[0] && need_fb_alloc) {
 #if MJPEG_HAVE_ESP_PTR_EXTERNAL_RAM
@@ -1430,7 +1480,6 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
             return gf != ESP_OK ? gf : ESP_ERR_INVALID_STATE;
         }
     }
-    s_running = true;
 
     s_preload_buf = NULL;
     s_preload_size = 0;
@@ -1512,9 +1561,13 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     }
 #endif
 
-    /* 创建队列 */
-    s_frame_queue = xQueueCreate(NUM_DMA_BUFS + 2, sizeof(frame_msg_t));
-    s_free_queue = xQueueCreate(NUM_DMA_BUFS, sizeof(frame_msg_t));
+    /* 创建队列（跨文件复用：已存在则跳过） */
+    if (!s_frame_queue) {
+        s_frame_queue = xQueueCreate(NUM_DMA_BUFS + 2, sizeof(frame_msg_t));
+    }
+    if (!s_free_queue) {
+        s_free_queue = xQueueCreate(NUM_DMA_BUFS, sizeof(frame_msg_t));
+    }
 
     /* 分配 JPEG 帧输入缓冲（P4 用硬件分配器；S3 等用 DMA 能力堆）
      * 复用 s_dma_bufs[]：仅当全部为 NULL 时才分配，多次 start 不重复分配。 */
@@ -1562,20 +1615,26 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
 
     /* 创建双任务 */
     BaseType_t ret;
-    /* 读=CPU1（避 WDT），解码=CPU0；优先级读>解码以喂满队列 */
-    ret = xTaskCreatePinnedToCore(mjpeg_read_task, "mjpeg_read", 8192, NULL, MJPEG_READ_TASK_PRIORITY, &s_read_task,
+    /* 打开 decoder（模块级复用：仅在 stop 后首次 start 时新建，后续直接返回） */
+    esp_err_t open_ret = mjpeg_open_decoder();
+    if (open_ret != ESP_OK) {
+        mjpeg_release_preload_buf();
+        s_running = false;
+        return open_ret;
+    }
+    s_running = true;
+    /* read=CPU1(避 WDT+避开 decode SPI flash 互斥), decode=CPU0; 优先级读低解码高 */
+    ret = xTaskCreatePinnedToCore(mjpeg_read_task, "mjpeg_read", 12288, NULL, MJPEG_READ_TASK_PRIORITY, &s_read_task,
                                   MJPEG_READ_TASK_CORE_ID);
     if (ret != pdPASS) {
-        // ESP_LOGE(TAG, "❌ 创建读取任务失败");
         mjpeg_release_preload_buf();
         s_running = false;
         return ESP_ERR_NO_MEM;
     }
 
-    ret = xTaskCreatePinnedToCore(mjpeg_decode_task, "mjpeg_dec", 8192, NULL, MJPEG_DECODE_TASK_PRIORITY,
+    ret = xTaskCreatePinnedToCore(mjpeg_decode_task, "mjpeg_dec", 12288, NULL, MJPEG_DECODE_TASK_PRIORITY,
                                   &s_decode_task, MJPEG_DECODE_TASK_CORE_ID);
     if (ret != pdPASS) {
-        // ESP_LOGE(TAG, "❌ 创建解码任务失败");
         mjpeg_release_preload_buf();
         s_running = false;
         return ESP_ERR_NO_MEM;
@@ -1599,7 +1658,6 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
         s_last_partition_key[0] = '\0';
     }
 
-    // ESP_LOGI(TAG, "🚀 异步流水线已启动");
     return ESP_OK;
 }
 
@@ -1623,7 +1681,10 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
  * 避免 decode_task 还在用 s_cfg.fb[0] 时被 free。 */
 static void mjpeg_release_player_resources(void)
 {
-    /* 清空队列 */
+    /* 先销毁 decoder（真正的 stop 时才调用，切换文件时走 deferred 路径不调此函数） */
+    mjpeg_close_decoder();
+
+    /* 清空并删除队列 */
     if (s_frame_queue) {
         frame_msg_t msg;
         while (xQueueReceive(s_frame_queue, &msg, 0) == pdTRUE) {}
@@ -1634,26 +1695,24 @@ static void mjpeg_release_player_resources(void)
         s_free_queue = NULL;
     }
 
+    /* 释放模块级缓冲区 */
     mjpeg_release_preload_buf();
     mjpeg_free_roi_tiles();
 
-    if (s_embed_lvgl || s_panel_roi_blit) {
-        if (!s_output_fb_shared && s_cfg.fb[0]) {
-            heap_caps_free(s_cfg.fb[0]);
-            if (s_cfg.fb[1] && s_cfg.fb[0] != s_cfg.fb[1]) {
-                heap_caps_free(s_cfg.fb[1]);
-            }
-        }
-        s_cfg.fb[0] = NULL;
-        s_cfg.fb[1] = NULL;
-        s_embed_lvgl = false;
-        s_output_fb_shared = false;
-        if (s_panel_roi_blit) {
-            (void)lvgl_port_resume();
-            s_panel_roi_blit = false;
-        }
-    } else {
+    /* 释放 frame buffer（无论哪种模式） */
+    if (s_cfg.fb[0]) {
+        heap_caps_free(s_cfg.fb[0]);
+    }
+    if (s_cfg.fb[1] && s_cfg.fb[0] != s_cfg.fb[1]) {
+        heap_caps_free(s_cfg.fb[1]);
+    }
+    s_cfg.fb[0] = NULL;
+    s_cfg.fb[1] = NULL;
+    s_embed_lvgl = false;
+    s_output_fb_shared = false;
+    if (s_panel_roi_blit) {
         (void)lvgl_port_resume();
+        s_panel_roi_blit = false;
     }
 
     /* 清除文件路径记录（让下一帧可以重新同文件检测） */
@@ -1704,43 +1763,84 @@ static void mjpeg_wait_decode_task_exit(void)
     vTaskDelay(pdMS_TO_TICKS(20));
 }
 
-/* 延迟清理：上次是异步 stop（mjpeg_player_stop_async），decode_task 已退出但资源未回收。
- * mjpeg_player_start() 必须在创建新任务前调此函数。 */
+/* 延迟清理：上次是异步 stop（mjpeg_player_stop_async），两个任务已退出，decoder 已关闭。
+ * mjpeg_do_deferred_cleanup() 只清空两个队列（frame_queue + free_queue）。
+ *
+ * 注意：decoder 关闭和 task 退出等待由 mjpeg_player_stop_async() 完成，
+ * 因为必须先等任务退出再关闭 decoder（避免任务还在运行时撞上已释放的句柄）。
+ * mjpeg_player_stop() 走完整的同步路径，自己等任务并释放资源。 */
 static void mjpeg_do_deferred_cleanup(void)
 {
     if (!s_deferred_cleanup) {
         return;
     }
+    /* 重置标志（在 stop_async 中已关闭 decoder 和等待任务，这里只清 queue） */
     s_deferred_cleanup = false;
 
-    mjpeg_wait_decode_task_exit();
-    mjpeg_release_player_resources();
+    /* 释放预加载缓冲区（旧 pipeline 的预加载数据不能再用）。
+     * s_preload_buf 在 start() 中重新分配（根据新文件）。 */
+    mjpeg_release_preload_buf();
+
+    /* 清空两个队列：frame_queue（残留帧）和 free_queue（旧 DMA 缓冲指针）。
+     * 此时两个任务都已退出，队列不会被并发访问，清空是安全的。
+     * start() 会用 s_dma_bufs[] 重新填充 free_queue。 */
+    if (s_frame_queue) {
+        frame_msg_t msg;
+        while (xQueueReceive(s_frame_queue, &msg, 0) == pdTRUE) {}
+    }
+    if (s_free_queue) {
+        frame_msg_t msg;
+        while (xQueueReceive(s_free_queue, &msg, 0) == pdTRUE) {}
+    }
+
+    /* 注意：不释放 s_dma_bufs / s_cfg.fb / roi_tiles，
+     * 它们都是模块级变量，跨文件复用。下次 start 时直接使用已有缓冲区。 */
 }
 
+/**
+ * 异步停止：通过设置 s_running=false 让 read_task 自然退出，
+ * 向队列发送停止信号让 decode_task 自然退出，
+ * 然后同步等待两个任务都退出，再完成 deferred cleanup。
+ *
+ * 关键：必须先让任务自然退出，再关闭 decoder。
+ * 如果先关闭 decoder 再等任务退出，decode_task 会撞上已释放的 decoder 句柄
+ *（竞态：任务可能还在运行 while(s_running) 循环并持有旧的 decoder 指针）。
+ */
 void mjpeg_player_stop_async(void)
 {
     if (!s_running) {
-        /* 即使 s_running=false，也可能有遗留的 deferred cleanup（极少见，例如 stop->start 紧接 stop）。 */
         if (s_deferred_cleanup) {
             mjpeg_do_deferred_cleanup();
         }
         return;
     }
-    // ESP_LOGI(TAG, "⏹️ 正在停止播放（异步）...");
     s_running = false;
 
-    /* 同步等待 read_task 退出（释放大块 PSRAM），decode_task 异步退出。 */
-    mjpeg_wait_read_task_exit();
-
-    /* 标记 deferred cleanup：mjpeg_player_start() 调起前会自动收尾。 */
+    /* 标记 deferred cleanup 状态，让 start() 进来时先等 cleanup 完成 */
     s_deferred_cleanup = true;
 
-    /* 清除文件路径记录（让下一帧可以重新同文件检测） */
+    /* 发送停止信号到 frame_queue，让 decode_task 退出自然退出 */
+    frame_msg_t stop_msg = { .buf = NULL, .len = -1 };
+    if (s_frame_queue) {
+        xQueueSend(s_frame_queue, &stop_msg, 0);
+    }
+
+    /* 等待 read_task 退出（释放大块 PSRAM） */
+    mjpeg_wait_read_task_exit();
+
+    /* 等待 decode_task 退出（收到停止信号后自然退出，不撞已关闭的 decoder） */
+    mjpeg_wait_decode_task_exit();
+
+    /* 任务都退出了，现在关闭 decoder（安全，不会与任务冲突） */
+    mjpeg_close_decoder();
+
+    /* 完成 deferred cleanup（此时没有任务在运行，清 queue 很安全） */
+    mjpeg_do_deferred_cleanup();
+
+    /* 清除文件路径记录 */
     s_last_file_path[0] = '\0';
     s_last_partition_key[0] = '\0';
     s_last_src_type = MJPEG_SRC_FILE;
-
-    // ESP_LOGI(TAG, "💾 播放器异步停止中（read_task 已退，decode_task 自退，下次 start 时收尾）");
 }
 
 void mjpeg_player_stop(void)
@@ -1754,7 +1854,6 @@ void mjpeg_player_stop(void)
         }
         return;
     }
-    // ESP_LOGI(TAG, "⏹️ 正在停止播放...");
     s_running = false;
 
     /* 同步等待两个任务退出。加超时避免 WiFi/SD 卡拥堵时永久死等。 */
@@ -1762,11 +1861,15 @@ void mjpeg_player_stop(void)
     mjpeg_wait_decode_task_exit();
 
     mjpeg_release_player_resources();
-
-    // ESP_LOGI(TAG, "💾 播放器资源已释放（DMA/fb 缓冲被复用，不立即释放）");
 }
 
 bool mjpeg_player_is_running(void)
 {
-    return s_running;
+    /* ★ 用 s_read_task 句柄判断，而不是 s_running。
+     * 旧代码用 s_running，但 decode_task 报错 20 次时也会把 s_running 设 false，
+     * 导致 mjpeg_player_is_running() 误判为未运行，调用方跳过 stop_async，
+     * 下次 start 时撞上旧 read_task 死锁。
+     * s_read_task 是 xTaskCreate 返回的句柄，stop_async 唯一会设为 NULL 的地方，
+     * 是 mjpeg_wait_read_task_exit() 内部通过 task 自退出（设 NULL）。 */
+    return s_read_task != NULL;
 }

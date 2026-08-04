@@ -492,7 +492,7 @@ void Application::Initialize() {
             case NetworkEvent::Connected: {
                 std::string msg = Lang::Strings::CONNECTED_TO;
                 //msg += data;
-                display->ShowNotification(msg.c_str(), 30000);
+                //display->ShowNotification(msg.c_str(), 30000);
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_CONNECTED);
                 break;
             }
