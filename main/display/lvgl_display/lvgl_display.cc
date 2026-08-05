@@ -176,7 +176,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
 
         // Check low battery popup only when clock tick event is triggered
         // Because when initializing, the battery level is not ready yet.
-        /**if (low_battery_popup_ != nullptr && !update_all) {
+        if (low_battery_popup_ != nullptr && !update_all) {
             if (strcmp(icon, FONT_AWESOME_BATTERY_EMPTY) == 0 && discharging) {
                 if (lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) { // Show if low battery popup is hidden
                     lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
@@ -190,7 +190,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
                     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
                 }
             }
-        }**/
+        }
     }
 
     // Update network icon every 10 seconds

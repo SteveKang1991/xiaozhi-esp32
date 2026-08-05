@@ -670,8 +670,8 @@ private:
 
         low_battery_popup_ = lv_obj_create(screen);
         lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
-        lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, text_font->line_height * 2);
-        lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, -lvgl_theme->spacing(4));
+        lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.5, text_font->line_height * 2);
+        lv_obj_align(low_battery_popup_, LV_ALIGN_TOP_MID, 0, -lvgl_theme->spacing(4));
         lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
         lv_obj_set_style_radius(low_battery_popup_, lvgl_theme->spacing(4), 0);
         
