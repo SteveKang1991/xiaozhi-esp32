@@ -102,21 +102,21 @@ private:
 
         if (pre_bat_mv < BAT_PRESENT_MV) {
             // 电池未接或严重过放，禁止启动大电流充电，否则 PMIC 会剧烈发烫
-            ESP_LOGW(TAG, "⚠️  电池电压异常低 (%u mV) —— 疑似未接电池，禁止开启充电",
-                        pre_bat_mv);
+            //ESP_LOGW(TAG, "⚠️  电池电压异常低 (%u mV) —— 疑似未接电池，禁止开启充电",
+                        //pre_bat_mv);
             ESP_ERROR_CHECK(pmic_->EnableCharging(false));
             ESP_ERROR_CHECK(pmic_->SetChargeCurrent(Axp2101ChgCurr::CUR_0MA));
-            ESP_LOGW(TAG, "     已禁用充电以保护 PMIC。请检查电池连接 / 是否为真实电池。");
+            //ESP_LOGW(TAG, "     已禁用充电以保护 PMIC。请检查电池连接 / 是否为真实电池。");
         } else if (pre_bat_mv >= BAT_FULL_MV) {
             // 已接近满电，开小电流涓流即可
             ESP_ERROR_CHECK(pmic_->SetChargeCurrent(Axp2101ChgCurr::CUR_500MA));
             ESP_ERROR_CHECK(pmic_->EnableCharging(true));
-            ESP_LOGI(TAG, "⚡ 充电配置: 500mA @ 4.2V (电池接近满电)");
+            //ESP_LOGI(TAG, "⚡ 充电配置: 500mA @ 4.2V (电池接近满电)");
         } else {
             // 正常电池范围
             ESP_ERROR_CHECK(pmic_->SetChargeCurrent(Axp2101ChgCurr::CUR_3000MA));
             ESP_ERROR_CHECK(pmic_->EnableCharging(true));
-            ESP_LOGI(TAG, "⚡ 充电配置: 3000mA @ 4.2V");
+            //ESP_LOGI(TAG, "⚡ 充电配置: 3000mA @ 4.2V");
         }
     }
 
