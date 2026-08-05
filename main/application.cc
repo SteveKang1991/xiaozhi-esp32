@@ -1207,12 +1207,13 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
 #if CONFIG_SEND_WAKE_WORD_DATA
-    // Encode and send the wake word data to the server
+    // 先发送唤醒词元数据，让服务器知道接下来是唤醒词音频
+    // 否则服务器可能先把音频发给ASR识别，导致误识别
+    protocol_->SendWakeWordDetected(wake_word);
+    // 然后发送唤醒词音频数据
     while (auto packet = audio_service_.PopWakeWordPacket()) {
         protocol_->SendAudio(std::move(packet));
     }
-    // Set the chat state to wake word detected
-    protocol_->SendWakeWordDetected(wake_word);
     SetListeningMode(GetDefaultListeningMode());
 #else
     // Set flag to play popup sound after state changes to listening
