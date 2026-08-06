@@ -189,7 +189,10 @@ private:
             ESP_ERROR_CHECK(pmic_->EnableSystemVoltageAdc(true));
             ESP_ERROR_CHECK(pmic_->EnableTemperatureAdc(true));
 
-            InitUpdateBatteryCharge();
+            ESP_ERROR_CHECK(pmic_->SetChargeCurrent(Axp2101ChgCurr::CUR_3000MA));
+            ESP_ERROR_CHECK(pmic_->SetChargeTargetVoltage(Axp2101ChgVol::VOL_4V2));
+            ESP_ERROR_CHECK(pmic_->EnableCharging(true));
+            ESP_LOGI(TAG, "⚡ 充电配置: 3000mA @ 4.2V");
 
             ESP_LOGI(TAG, "✅ AXP2101初始化完成");
 
@@ -493,9 +496,6 @@ public:
             last_discharging = discharging;
         }
         level = pmic_->GetBatteryPercent();
-
-        // 更新电池充电电压
-        InitUpdateBatteryCharge();
 
         return true;
     }
