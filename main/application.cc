@@ -337,14 +337,14 @@ void Application::ActivationTask() {
     // Check for new firmware version
     CheckNewVersion();
 
+    // Initialize the protocol
+    InitializeProtocol();
+
     // Sync SD-asset files (music background .bin, etc.) from server to SD card
     CheckSDAssetsFiles();
 
     // Sync emotion files (idle/listen/speak MJPEG) from server to SD card
     CheckEmotionFiles();
-
-    // Initialize the protocol
-    InitializeProtocol();
 
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
