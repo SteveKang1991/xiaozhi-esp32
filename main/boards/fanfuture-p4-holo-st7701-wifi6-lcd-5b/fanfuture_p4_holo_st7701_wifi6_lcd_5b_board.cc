@@ -34,7 +34,7 @@ private:
     LcdDisplay *display_;
     Axp2101* pmic_ = nullptr;
     EspVideo* camera_ = nullptr;
-    bool aec_device = false;
+    bool aec_device = true;
 
     esp_err_t i2c_device_probe(uint8_t addr) {
         return i2c_master_probe(i2c_bus_touch_, addr, 100);
@@ -345,6 +345,10 @@ private:
                 bool aec_device = app.GetAecMode() == kAecOnDeviceSide ? true : false;
                 Settings settings("aecMode", true);
                 settings.SetBool("aec_device", aec_device);
+
+                auto codec = GetAudioCodec();
+                auto volume = codec->output_volume();
+                codec->SetOutputVolume(volume);
             }
             #endif
         });
@@ -433,12 +437,12 @@ public:
         InitializeButtons();
         GetBacklight()->RestoreBrightness();
 
-        #if CONFIG_USE_DEVICE_AEC
+        /**#if CONFIG_USE_DEVICE_AEC
         Settings settings("aecMode", false);
         aec_device = settings.GetBool("aec_device", aec_device);
         auto& app = Application::GetInstance();
         app.SetAecMode(aec_device ? kAecOnDeviceSide : kAecOff);
-        #endif
+        #endif**/
     }
 
     ~FanFutureP4HoloST7701WiFi6Lcd5BBoard() {
@@ -461,7 +465,10 @@ public:
             AUDIO_CODEC_PA_PIN,
             AUDIO_CODEC_ES8311_ADDR,
             AUDIO_CODEC_ES7210_ADDR,
-            AUDIO_INPUT_REFERENCE);
+            AUDIO_INPUT_REFERENCE,
+            28.0f,  // Physical MIC1 gain
+            2,      // Physical MIC3 is the playback reference input
+            0.0f);  // reference_gain
         return &audio_codec;
     }
 
