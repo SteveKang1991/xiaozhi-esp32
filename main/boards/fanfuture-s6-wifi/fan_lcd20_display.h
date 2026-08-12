@@ -6,6 +6,7 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "assets/lang_config.h"
+#include "assets.h"
 
 #include <vector>
 #include <algorithm>
@@ -116,6 +117,16 @@ public:
         }
 
         SetupUI();
+    }
+
+    ~FanLcd20Display() override {
+        //StopMjpegIfRunning();
+
+        DisplayLockGuard lock(this);
+        if (music_cover_container_) {
+            lv_obj_del(music_cover_container_);
+            music_cover_container_ = nullptr;
+        }
     }
 
     virtual void SetEmotion(const char* emotion) override {
@@ -260,6 +271,23 @@ public:
         }
     }
 
+    /* 完整歌名 / 歌手 / 总时长 元数据，子控件显示在 music_cover_container_ 内，
+     * 不写到 chat_message_label_（那是 AI 聊天字幕专用）。
+     * song_name/singer 为 nullptr/empty 表示对应字段清空；interval < 0 表示
+     * 不更新总时长（保留上次值）。 */
+    void SetMusicInfo(const char* song_name,
+                      const char* singer,
+                      int interval) override;
+
+    /* 播放进度 + 歌词同步：
+     *  - current_ms 推进进度条与 time_label
+     *  - lyric    写到 lyric_label_；nullptr/empty 清空
+     * 播放线程高频调用；这里只做 lv_label_set_text / lv_bar_set_value，
+     * 实现内部有"相同值不重写"的去抖逻辑以避免无谓的 lvgl 重绘。 */
+    void SetMusicProgress(int current_ms, const char* lyric, const char* lyric_next = nullptr) override;
+
+    void ShowMusicCover(bool show, const std::string& picture_url = "") override;
+
 private:
     inline static bool s_system_ready_ = false;
 
@@ -269,6 +297,9 @@ private:
 
     /* 当前播放的 clip 名，用于去重判断。 */
     std::string current_clip_name_;
+
+    /* 音乐封面相关：音乐播放时覆盖 MJPEG ROI 区域，背景黑色，内部容器放专辑图及后续扩展。 */
+    lv_obj_t* music_cover_container_ = nullptr;     // 音乐封面容器（后续可扩展歌名/歌手/歌词/进度）
 
     /* ── ClipCache：flash 分区资产缓存 ─────────────────────────────── */
 
@@ -581,6 +612,42 @@ private:
         lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
     }
 };
+
+/* 音乐封面：音乐播放时覆盖 MJPEG ROI 区域，黑色背景 + 专辑图。
+ * 退出时隐藏封面并恢复 MJPEG 角色动画。 */
+void FanMIPI50Display::ShowMusicCover(bool show, const std::string& picture_url) {
+    DisplayLockGuard lock(this);
+
+    if (show) {
+        if (music_cover_container_ == nullptr) {
+            auto screen = lv_screen_active();
+            
+            /* 只覆盖 MJPEG ROI 区域的黑色背景 */
+            music_cover_container_ = lv_obj_create(screen);
+            lv_obj_set_pos(music_cover_container_, roi_x_, roi_y_);
+            lv_obj_set_size(music_cover_container_, (lv_coord_t)kMjpegVideoWidth, (lv_coord_t)kMjpegVideoHeight);
+            lv_obj_set_style_radius(music_cover_container_, 0, 0);
+            lv_obj_set_style_bg_color(music_cover_container_, lv_color_black(), 0);
+            lv_obj_set_style_bg_opa(music_cover_container_, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(music_cover_container_, 0, 0);
+            lv_obj_set_style_pad_all(music_cover_container_, 0, 0);
+            lv_obj_move_foreground(music_cover_container_);
+            lv_obj_add_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
+        }
+
+        /* 停止 MJPEG 播放 */
+        if (mjpeg_player_is_running()) {
+            mjpeg_player_stop();
+        }
+        
+        /* 先不显示容器，保持 MJPEG，直到图片下载完成 */
+        lv_obj_add_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        if (music_cover_container_ != nullptr) {
+            lv_obj_add_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
 
 FanLcd20Display::ClipCache FanLcd20Display::s_clip_cache;
 

@@ -1,0 +1,1783 @@
+#include "esp32_music.h"
+#include "board.h"
+#include "system_info.h"
+#include "audio/audio_codec.h"
+#include "application.h"
+#include "protocols/protocol.h"
+#include "display/display.h"
+#include "boards/common/mjpeg_player.h"
+
+#include <esp_log.h>
+#include <esp_heap_caps.h>
+#include <esp_pthread.h>
+#include <cJSON.h>
+#include <cstring>
+#include <chrono>
+#include <sstream>
+#include <algorithm>
+#include <cctype> // 为isdigit函数
+#include <thread> // 为线程ID比较
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include "assets/lang_config.h"
+
+#define TAG "Esp32Music"
+
+// ========== 简单的ESP32认证函数 ==========
+
+/**
+ * @brief 获取设备MAC地址
+ * @return MAC地址字符串
+ */
+static std::string get_device_mac()
+{
+    return SystemInfo::GetMacAddress();
+}
+
+/**
+ * @brief 获取设备芯片ID
+ * @return 芯片ID字符串
+ */
+static std::string get_device_chip_id()
+{
+    // 使用MAC地址作为芯片ID，去除冒号分隔符
+    std::string mac = SystemInfo::GetMacAddress();
+    // 去除所有冒号
+    mac.erase(std::remove(mac.begin(), mac.end(), ':'), mac.end());
+    return mac;
+}
+
+// URL编码函数
+static std::string url_encode(const std::string &str)
+{
+    std::string encoded;
+    char hex[4];
+
+    for (size_t i = 0; i < str.length(); i++)
+    {
+        unsigned char c = str[i];
+
+        if ((c >= 'A' && c <= 'Z') ||
+            (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~')
+        {
+            encoded += c;
+        }
+        else if (c == ' ')
+        {
+            encoded += '+'; // 空格编码为'+'或'%20'
+        }
+        else
+        {
+            snprintf(hex, sizeof(hex), "%%%02X", c);
+            encoded += hex;
+        }
+    }
+    return encoded;
+}
+
+// 在文件开头添加一个辅助函数，统一处理URL构建
+
+Esp32Music::Esp32Music() : last_downloaded_data_(), current_music_url_(), current_song_name_(),
+                           song_name_displayed_(false), current_lyric_url_(),
+                           current_lyric_text_(), lyrics_(),
+                           current_lyric_index_(-1), lyric_thread_(), is_lyric_running_(false),
+                           display_mode_(DISPLAY_MODE_LYRICS), is_playing_(false), is_downloading_(false),
+                           play_thread_(), download_thread_(), audio_buffer_(), buffer_mutex_(),
+                           buffer_cv_(), buffer_size_(0), skip_enqueue_(false),
+                           mp3_decoder_(nullptr), mp3_frame_info_(),
+                           mp3_decoder_initialized_(false)
+{
+    ESP_LOGI(TAG, "Music player initialized with default spectrum display mode");
+    mono_buffer_.reserve(1152);
+    InitializeMp3Decoder();
+}
+
+Esp32Music::~Esp32Music()
+{
+    ESP_LOGI(TAG, "Destroying music player - stopping all operations");
+
+    // 停止所有操作
+    is_downloading_ = false;
+    is_playing_ = false;
+    is_lyric_running_ = false;
+
+    // 通知所有等待的线程
+    {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        buffer_cv_.notify_all();
+    }
+
+    // 等待下载线程结束，设置5秒超时
+    if (download_thread_.joinable())
+    {
+        ESP_LOGI(TAG, "Waiting for download thread to finish (timeout: 5s)");
+        auto start_time = std::chrono::steady_clock::now();
+
+        // 等待线程结束
+        bool thread_finished = false;
+        while (!thread_finished)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - start_time)
+                               .count();
+
+            if (elapsed >= 5)
+            {
+                ESP_LOGW(TAG, "Download thread join timeout after 5 seconds");
+                break;
+            }
+
+            // 再次设置停止标志，确保线程能够检测到
+            is_downloading_ = false;
+
+            // 通知条件变量
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                buffer_cv_.notify_all();
+            }
+
+            // 检查线程是否已经结束
+            if (!download_thread_.joinable())
+            {
+                thread_finished = true;
+            }
+
+            // 定期打印等待信息
+            if (elapsed > 0 && elapsed % 1 == 0)
+            {
+                ESP_LOGI(TAG, "Still waiting for download thread to finish... (%ds)", (int)elapsed);
+            }
+        }
+
+        if (download_thread_.joinable())
+        {
+            download_thread_.join();
+        }
+        ESP_LOGI(TAG, "Download thread finished");
+    }
+
+    // 等待播放线程结束，设置3秒超时
+    if (play_thread_.joinable())
+    {
+        ESP_LOGI(TAG, "Waiting for playback thread to finish (timeout: 3s)");
+        auto start_time = std::chrono::steady_clock::now();
+
+        bool thread_finished = false;
+        while (!thread_finished)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - start_time)
+                               .count();
+
+            if (elapsed >= 3)
+            {
+                ESP_LOGW(TAG, "Playback thread join timeout after 3 seconds");
+                break;
+            }
+
+            // 再次设置停止标志
+            is_playing_ = false;
+
+            // 通知条件变量
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                buffer_cv_.notify_all();
+            }
+
+            // 检查线程是否已经结束
+            if (!play_thread_.joinable())
+            {
+                thread_finished = true;
+            }
+        }
+
+        if (play_thread_.joinable())
+        {
+            play_thread_.join();
+        }
+        ESP_LOGI(TAG, "Playback thread finished");
+    }
+
+    // 等待歌词线程结束
+    if (lyric_thread_.joinable())
+    {
+        ESP_LOGI(TAG, "Waiting for lyric thread to finish");
+        lyric_thread_.join();
+        ESP_LOGI(TAG, "Lyric thread finished");
+    }
+
+    // 清理缓冲区和MP3解码器
+    ClearAudioBuffer();
+    CleanupMp3Decoder();
+
+    ESP_LOGI(TAG, "Music player destroyed successfully");
+}
+
+bool Esp32Music::Download(const std::string &song_name, const std::string &artist_name)
+{
+    ESP_LOGI(TAG, "Starting to get music details for: %s", song_name.c_str());
+
+    // 清空之前的数据，避免上一首歌的残留泄露或干扰
+    last_downloaded_data_.clear();
+    current_lyric_text_.clear();
+    current_lyric_url_.clear();
+
+    // 保存歌名用于后续显示
+    current_song_name_ = song_name;
+
+    // 第一步：请求stream_pcm接口获取音频信息
+    std::string base_url = "https://api.yaohud.cn/api/music/qq_plus?key=hjUDBRMTeQtM2qmDFqJ";
+    std::string full_url = base_url + "&msg=" + url_encode(song_name + " " + artist_name) + "&n=1&size=mp3";
+
+    //ESP_LOGI(TAG, "Request URL: %s", full_url.c_str());
+
+    // 使用Board提供的HTTP客户端
+    auto network = Board::GetInstance().GetNetwork();
+    auto http = network->CreateHttp(0);
+
+    // 设置基本请求头
+    http->SetHeader("User-Agent", "ESP32-Music-Player/1.0");
+    http->SetHeader("Accept", "application/json");
+
+    // 添加ESP32认证头
+    //add_auth_headers(http.get());
+
+    // 打开GET连接
+    if (!http->Open("GET", full_url))
+    {
+        ESP_LOGE(TAG, "Failed to connect to music API");
+        return false;
+    }
+
+    // 检查响应状态码
+    int status_code = http->GetStatusCode();
+    if (status_code != 200)
+    {
+        ESP_LOGE(TAG, "HTTP GET failed with status code: %d", status_code);
+        http->Close();
+        return false;
+    }
+
+    // 读取响应数据
+    last_downloaded_data_ = http->ReadAll();
+    http->Close();
+
+    ESP_LOGI(TAG, "HTTP GET Status = %d, content_length = %d", status_code, last_downloaded_data_.length());
+    //ESP_LOGD(TAG, "Complete music details response: %s", last_downloaded_data_.c_str());
+
+    if (!last_downloaded_data_.empty())
+    {
+        // 解析响应JSON以提取音频URL
+        cJSON *response_json = cJSON_Parse(last_downloaded_data_.c_str());
+        if (response_json)
+        {
+            cJSON *data = cJSON_GetObjectItem(response_json, "data");
+
+            // 提取关键信息
+            cJSON *name = cJSON_GetObjectItem(data, "name");
+            cJSON *singer = cJSON_GetObjectItem(data, "singer");
+            cJSON *picture = cJSON_GetObjectItem(data, "picture");
+            cJSON *interval = cJSON_GetObjectItem(data, "interval");
+            cJSON *audio_url = cJSON_GetObjectItem(data, "musicurl");
+            cJSON *lyric_url = cJSON_GetObjectItem(data, "viplrc");
+            cJSON *lrctxt = cJSON_GetObjectItem(data, "lrctxt");
+
+            // 检查audio_url是否有效
+            if (cJSON_IsString(audio_url) && audio_url->valuestring && strlen(audio_url->valuestring) > 0)
+            {
+                // 第二步：设置音频URL
+                std::string audio_path = audio_url->valuestring;
+
+                current_music_url_ = audio_path;
+
+                ESP_LOGI(TAG, "Starting streaming playback for: %s", song_name.c_str());
+                song_name_displayed_ = false; // 重置歌名显示标志
+
+                /* 把歌名 / 歌手 / 总时长下发到 display。display 端的 music UI 收到
+                 * 后会写入各自控件；总时长若为 0（API 没返回）则传 -1，让 display 保留
+                 * 上一次的值而不是用 0 覆盖。 */
+                {
+                    auto& board = Board::GetInstance();
+                    auto display = board.GetDisplay();
+                    if (display) {
+                        const char* name_str = (cJSON_IsString(name) && name->valuestring) ? name->valuestring : "";
+                        const char* singer_str = (cJSON_IsString(singer) && singer->valuestring) ? singer->valuestring : "";
+                        int interval_sec = 0;
+                        if (cJSON_IsNumber(interval)) {
+                            interval_sec = interval->valueint;
+                        } else if (cJSON_IsString(interval) && interval->valuestring) {
+                            /* API 偶尔把 interval 写成字符串，格式可能是：
+                             *   "239"          → 直接是秒数
+                             *   "03:59"        → MM:SS
+                             *   "3:59"         → M:SS（兼容）
+                             *   "03:59.500"    → 带小数（取整秒）
+                             * atoi 只在 ":" 前停下，"03:59" 会被解析成 3，所以这里单独解析。 */
+                            const char* s = interval->valuestring;
+                            int mm = 0, ss = 0;
+                            if (sscanf(s, "%d:%d", &mm, &ss) == 2) {
+                                interval_sec = mm * 60 + ss;
+                            } else {
+                                /* fallback：尝试 "MM:SS.xxx" 或纯数字 */
+                                float fsec = 0.0f;
+                                if (sscanf(s, "%f", &fsec) == 1) {
+                                    interval_sec = (int)fsec;
+                                } else {
+                                    interval_sec = atoi(s);
+                                }
+                            }
+                        }
+                        display->SetMusicInfo(name_str, singer_str, interval_sec);
+                    }
+                }
+
+                StartStreaming(current_music_url_);
+
+                // 保存专辑封面 URL
+                if (cJSON_IsString(picture) && picture->valuestring && strlen(picture->valuestring) > 0) {
+                    current_picture_url_ = picture->valuestring;
+                    //ESP_LOGI(TAG, "Music cover URL: %s", current_picture_url_.c_str());
+                } else {
+                    current_picture_url_.clear();
+                    ESP_LOGW(TAG, "No picture URL in music details response");
+                }
+
+                // 处理歌词 - 优先使用 getMusicDetails 直接返回的 lrctxt（与 lyric_url 下载内容相同，
+                // 省去一次 HTTP 请求，也避免 lyric_url 服务不可用导致没歌词）。
+                // 只有 lrctxt 为空时才退回到下载 lyric_url。
+                const char* inline_lyric = nullptr;
+                if (cJSON_IsString(lrctxt) && lrctxt->valuestring && strlen(lrctxt->valuestring) > 0) {
+                    inline_lyric = lrctxt->valuestring;
+                }
+
+                if (inline_lyric != nullptr) {
+                    // 直接保存 lrctxt，等下由 lyric 线程解析，避免重复 HTTP 下载
+                    current_lyric_text_ = inline_lyric;
+                    current_lyric_url_.clear();
+                    ESP_LOGI(TAG, "Lyrics inline in details response (%d bytes), skip URL download",
+                             current_lyric_text_.length());
+                } else if (cJSON_IsString(lyric_url) && lyric_url->valuestring && strlen(lyric_url->valuestring) > 0) {
+                    current_lyric_url_ = lyric_url->valuestring;
+                    current_lyric_text_.clear();
+                } else {
+                    current_lyric_url_.clear();
+                    current_lyric_text_.clear();
+                }
+
+                if (!current_lyric_text_.empty() || !current_lyric_url_.empty()) {
+                    // 根据显示模式决定是否启动歌词
+                    if (display_mode_ == DISPLAY_MODE_LYRICS) {
+                        ESP_LOGI(TAG, "Loading lyrics for: %s (lyrics display mode)", song_name.c_str());
+
+                        // 启动歌词解析和显示
+                        if (is_lyric_running_) {
+                            is_lyric_running_ = false;
+                            if (lyric_thread_.joinable()) {
+                                lyric_thread_.join();
+                            }
+                        }
+
+                        is_lyric_running_ = true;
+                        current_lyric_index_ = -1;
+                        lyrics_.clear();
+
+                        // 在创建歌词线程前先配置 esp_pthread，确保栈大小足够
+                        // LyricDisplayThread 主要做解析和等待，4KB 栈足够
+                        esp_pthread_cfg_t lyric_cfg = esp_pthread_get_default_config();
+                        lyric_cfg.stack_size = 4096;
+                        lyric_cfg.prio = 3;  // 低优先级，不阻塞音频线程
+                        lyric_cfg.thread_name = "lyric_disp";
+                        esp_pthread_set_cfg(&lyric_cfg);
+
+                        try {
+                            lyric_thread_ = std::thread(&Esp32Music::LyricDisplayThread, this);
+                        } catch (const std::exception& e) {
+                            ESP_LOGE(TAG, "Failed to create lyric thread: %s, continuing without lyrics", e.what());
+                            is_lyric_running_ = false;
+                        }
+                    } else {
+                        ESP_LOGI(TAG, "Lyrics available but spectrum display mode is active, skipping lyrics");
+                    }
+                } else {
+                    ESP_LOGW(TAG, "No lyric data for this song");
+                }
+
+                cJSON_Delete(response_json);
+                return true;
+            }
+            else
+            {
+                // audio_url为空或无效
+                ESP_LOGE(TAG, "Audio URL not found or empty for song: %s", song_name.c_str());
+                ESP_LOGE(TAG, "Failed to find music: 没有找到歌曲 '%s'", song_name.c_str());
+                cJSON_Delete(response_json);
+                return false;
+            }
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Failed to parse JSON response");
+        }
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Empty response from music API");
+    }
+
+    return false;
+}
+
+std::string Esp32Music::GetDownloadResult()
+{
+    return last_downloaded_data_;
+}
+
+// 开始流式播放
+bool Esp32Music::StartStreaming(const std::string &music_url)
+{
+    if (music_url.empty())
+    {
+        ESP_LOGE(TAG, "Music URL is empty");
+        return false;
+    }
+
+    ESP_LOGD(TAG, "Starting streaming for URL: %s", music_url.c_str());
+
+    // 停止之前的播放和下载
+    is_downloading_ = false;
+    is_playing_ = false;
+    skip_enqueue_ = false;  // ★ 确保干净启动
+
+    // 等待之前的线程完全结束
+    if (download_thread_.joinable())
+    {
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            buffer_cv_.notify_all(); // 通知线程退出
+        }
+        download_thread_.join();
+    }
+    if (play_thread_.joinable())
+    {
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            buffer_cv_.notify_all(); // 通知线程退出
+        }
+        play_thread_.join();
+    }
+
+    // 清空缓冲区
+    ClearAudioBuffer();
+
+    // 初始化 MP3 解码器
+    if (!mp3_decoder_initialized_)
+    {
+        InitializeMp3Decoder();
+    }
+
+    // 停止 MJPEG 动画（释放 MJPEG 占用的内存给音乐播放用）
+    auto& board = Board::GetInstance();
+    auto display = board.GetDisplay();
+    if (display)
+    {
+        if (mjpeg_player_is_running())
+        {
+            mjpeg_player_stop();
+            ESP_LOGI(TAG, "MJPEG stopped for music playback");
+        }
+    }
+
+    // 配置线程栈大小以避免栈溢出
+    // 注意：PlayAudioStream 中有 int16_t pcm_buffer[2304] = 4.6KB 的栈缓冲
+    // 加上 vector、调试日志、printf 等其他栈使用，8KB 足够
+    // 注：pthread stack 必须分配在内部 SRAM，过大会导致 NO_MEM
+    esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
+    cfg.stack_size = 8192;  // 8KB 栈，避免内部 SRAM 碎片
+    cfg.prio = 5;           // 中等优先级
+    cfg.thread_name = "audio_stream";
+    esp_pthread_set_cfg(&cfg);
+
+    // 开始下载线程
+    is_downloading_ = true;
+    try {
+        download_thread_ = std::thread(&Esp32Music::DownloadAudioStream, this, music_url);
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Failed to create download thread: %s", e.what());
+        is_downloading_ = false;
+        return false;
+    }
+
+    // 开始播放线程（会等待缓冲区有足够数据）
+    is_playing_ = true;
+    try {
+        play_thread_ = std::thread(&Esp32Music::PlayAudioStream, this);
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Failed to create play thread: %s", e.what());
+        is_playing_ = false;
+        // 等待下载线程结束
+        if (download_thread_.joinable()) {
+            download_thread_.join();
+        }
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Streaming threads started successfully");
+
+    return true;
+}
+
+// 停止流式播放
+bool Esp32Music::StopStreaming()
+{
+    ESP_LOGI(TAG, "Stopping music streaming - current state: downloading=%d, playing=%d",
+             is_downloading_.load(), is_playing_.load());
+
+    // 重置采样率到原始值
+    ResetSampleRate();
+
+    // ★ 重置 skip_enqueue_（防止空调用时残留）
+    skip_enqueue_ = false;
+
+    // 检查是否有流式播放正在进行
+    if (!is_playing_ && !is_downloading_)
+    {
+        ESP_LOGW(TAG, "No streaming in progress");
+        return true;
+    }
+
+    // 停止下载和播放标志
+    is_downloading_ = false;
+    is_playing_ = false;
+    skip_enqueue_ = true;  // ★ download 线程不再 enqueue，直接 free chunk 并退出
+    buffer_cv_.notify_all();  // 立即唤醒 download 线程的 cv.wait()
+
+    // 清空歌名显示 + 重置 music UI 上的进度 / 歌词
+    auto &board = Board::GetInstance();
+    auto display = board.GetDisplay();
+    if (display)
+    {
+        display->SetMusicInfo("", "", -1);  // interval=-1 保留总时长不刷 0
+        /* 传 "" 强制清掉当前/下一句歌词 label；display 内部对 "" 走
+         * "去抖后 != lyric" 路径立即写入空串。 */
+        display->SetMusicProgress(0, "", "");
+        /* 显式隐藏音乐封面。
+         *
+         * 之前依赖 application.cc 的 HandleStateChangedEvent 在状态切到 Idle 且
+         * !is_music_playing 时调 ShowMusicCover(false)，但播放音乐时设备本来就
+         * 处在 kDeviceStateIdle（music 在 idle 状态下后台播放），music 停止时
+         * 状态没变化，state machine 的 TransitionTo 是 no-op，
+         * HandleStateChangedEvent 不会被触发，封面就永远留在屏上了。
+         *
+         * 这里直接调一次，确保中断 / 自然结束 / 主动 stop 三种路径都能隐藏。 */
+        display->ShowMusicCover(false, "");
+        ESP_LOGI(TAG, "Cleared song name display and hid music cover");
+    }
+
+    // 通知所有等待的线程
+    {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        buffer_cv_.notify_all();
+    }
+
+    // 等待线程结束（避免重复代码，让StopStreaming也能等待线程完全停止）
+    if (download_thread_.joinable())
+    {
+        download_thread_.join();
+        ESP_LOGI(TAG, "Download thread joined in StopStreaming");
+    }
+
+    // 等待播放线程结束，使用更安全的方式
+    if (play_thread_.joinable())
+    {
+        // 先设置停止标志
+        is_playing_ = false;
+
+        // 通知条件变量，确保线程能够退出
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            buffer_cv_.notify_all();
+        }
+
+        // 阻塞等待 play_thread 退出。
+        // play_thread 内部会检查 is_playing_ 后退出循环并做清理（释放 buffer、更新 display），
+        // 清理过程一般在 100ms 内完成。
+        //
+        // 修复说明：原代码使用
+        //   while (...) { if (!play_thread_.joinable()) break; }
+        // 是错的：joinable() 在 join() 调用前始终为 true，所以循环一定会等满 1 秒
+        // 后 detach 线程。detach 后 play_thread 在后台继续运行，不断往 codec output
+        // 写残余 PCM 数据，被麦克风拾取识别成 STT，造成音乐播放时唤醒后误识别。
+        // 直接 join() 是最可靠的方式。
+        play_thread_.join();
+        ESP_LOGI(TAG, "Play thread joined in StopStreaming");
+    }
+
+    // 确保音频缓冲区和MP3解码器被清理（播放线程可能提前退出）
+    ClearAudioBuffer();
+    CleanupMp3Decoder();
+
+    /* 清理播放状态相关的 string，避免换歌时残留 1~3KB 歌词/URL/歌名在 heap
+     * 上累积导致 minimal sram 持续下降。lyrics_ 也需要清（63 行歌词≈2.5KB）。 */
+    current_song_name_.clear();
+    current_picture_url_.clear();
+    {
+        std::lock_guard<std::mutex> lock(lyrics_mutex_);
+        lyrics_.clear();
+    }
+
+    // 在线程完全结束后，只在频谱模式下停止FFT显示
+    if (display && display_mode_ == DISPLAY_MODE_SPECTRUM)
+    {
+        //display->stopFft();
+        ESP_LOGI(TAG, "Stopped FFT display in StopStreaming (spectrum mode)");
+    }
+    else if (display)
+    {
+        ESP_LOGI(TAG, "Not in spectrum mode, skipping FFT stop in StopStreaming");
+    }
+
+    ESP_LOGI(TAG, "Music streaming stop signal sent");
+    return true;
+}
+
+// 流式下载音频数据
+void Esp32Music::DownloadAudioStream(const std::string &music_url)
+{
+    ESP_LOGD(TAG, "Starting audio stream download from: %s", music_url.c_str());
+
+    // 验证URL有效性
+    if (music_url.empty() || music_url.find("http") != 0)
+    {
+        ESP_LOGE(TAG, "Invalid URL format: %s", music_url.c_str());
+        is_downloading_ = false;
+        return;
+    }
+
+    auto network = Board::GetInstance().GetNetwork();
+    auto http = network->CreateHttp(0);
+
+    // 设置基本请求头
+    http->SetHeader("User-Agent", "ESP32-Music-Player/1.0");
+    http->SetHeader("Accept", "*/*");
+    http->SetHeader("Range", "bytes=0-"); // 支持断点续传
+
+    // 添加ESP32认证头
+    //add_auth_headers(http.get());
+
+    if (!http->Open("GET", music_url))
+    {
+        ESP_LOGE(TAG, "Failed to connect to music stream URL");
+        is_downloading_ = false;
+        return;
+    }
+
+    int status_code = http->GetStatusCode();
+    if (status_code != 200 && status_code != 206)
+    { // 206 for partial content
+        ESP_LOGE(TAG, "HTTP GET failed with status code: %d", status_code);
+        http->Close();
+        is_downloading_ = false;
+        return;
+    }
+
+    ESP_LOGI(TAG, "Started downloading audio stream, status: %d", status_code);
+
+    // 分块读取音频数据
+    const size_t chunk_size = 4096; // 4KB每块
+    // 移到堆上避免 4KB 栈缓冲破坏 8KB 线程栈
+    char *buffer = (char *)heap_caps_malloc(chunk_size, MALLOC_CAP_SPIRAM);
+    if (!buffer)
+    {
+        ESP_LOGE(TAG, "Failed to allocate download buffer");
+        http->Close();
+        is_downloading_ = false;
+        return;
+    }
+    size_t total_downloaded = 0;
+    size_t resume_from = 0;   // 断点续传偏移
+    int retry_count = 0;
+    const int max_retries = 5;
+
+    while (is_downloading_ && is_playing_ && !skip_enqueue_)
+    {
+        int bytes_read = http->Read(buffer, chunk_size);
+        if (bytes_read < 0)
+        {
+            // SSL/HTTP 连接断开 - 尝试断点续传重连
+            int err = bytes_read;
+            ESP_LOGW(TAG, "Audio read error: %d, attempting reconnect (resume at %u, retry %d/%d)",
+                     err, (unsigned)resume_from, retry_count + 1, max_retries);
+            http->Close();
+
+            if (retry_count >= max_retries)
+            {
+                ESP_LOGE(TAG, "Max retries reached, aborting download");
+                break;
+            }
+            retry_count++;
+            vTaskDelay(pdMS_TO_TICKS(500 + retry_count * 500)); // 递增退避
+
+            // 用 Range 头重连，从上次成功位置续传
+            http->SetHeader("Range", "bytes=" + std::to_string(resume_from) + "-");
+            if (!http->Open("GET", music_url))
+            {
+                ESP_LOGE(TAG, "Reconnect failed, retry %d/%d", retry_count, max_retries);
+                continue;
+            }
+            int rc = http->GetStatusCode();
+            if (rc != 200 && rc != 206)
+            {
+                ESP_LOGE(TAG, "Reconnect HTTP status: %d", rc);
+                http->Close();
+                continue;
+            }
+            ESP_LOGI(TAG, "Reconnected, resuming from byte %u", (unsigned)resume_from);
+            continue;
+        }
+        if (bytes_read == 0)
+        {
+            ESP_LOGI(TAG, "Audio stream download completed, total: %u bytes", (unsigned)total_downloaded);
+            break;
+        }
+        // 读取成功，重置重试计数
+        retry_count = 0;
+
+        // 打印数据块信息
+        // ESP_LOGI(TAG, "Downloaded chunk: %d bytes at offset %d", bytes_read, total_downloaded);
+
+        // 安全地打印数据块的十六进制内容（前16字节）
+        if (bytes_read >= 16)
+        {
+            // ESP_LOGI(TAG, "Data: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X ...",
+            //         (unsigned char)buffer[0], (unsigned char)buffer[1], (unsigned char)buffer[2], (unsigned char)buffer[3],
+            //         (unsigned char)buffer[4], (unsigned char)buffer[5], (unsigned char)buffer[6], (unsigned char)buffer[7],
+            //         (unsigned char)buffer[8], (unsigned char)buffer[9], (unsigned char)buffer[10], (unsigned char)buffer[11],
+            //         (unsigned char)buffer[12], (unsigned char)buffer[13], (unsigned char)buffer[14], (unsigned char)buffer[15]);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Data chunk too small: %d bytes", bytes_read);
+        }
+
+        // 尝试检测文件格式（检查文件头）
+        if (total_downloaded == 0 && bytes_read >= 4)
+        {
+            if (memcmp(buffer, "ID3", 3) == 0)
+            {
+                ESP_LOGI(TAG, "Detected MP3 file with ID3 tag");
+            }
+            else if (buffer[0] == 0xFF && (buffer[1] & 0xE0) == 0xE0)
+            {
+                ESP_LOGI(TAG, "Detected MP3 file header");
+            }
+            else if (memcmp(buffer, "RIFF", 4) == 0)
+            {
+                ESP_LOGI(TAG, "Detected WAV file");
+            }
+            else if (memcmp(buffer, "fLaC", 4) == 0)
+            {
+                ESP_LOGI(TAG, "Detected FLAC file");
+            }
+            else if (memcmp(buffer, "OggS", 4) == 0)
+            {
+                ESP_LOGI(TAG, "Detected OGG file");
+            }
+            else
+            {
+                ESP_LOGI(TAG, "Unknown audio format, first 4 bytes: %02X %02X %02X %02X",
+                         (unsigned char)buffer[0], (unsigned char)buffer[1],
+                         (unsigned char)buffer[2], (unsigned char)buffer[3]);
+            }
+        }
+
+        // 创建音频数据块
+        uint8_t *chunk_data = (uint8_t *)heap_caps_malloc(bytes_read, MALLOC_CAP_SPIRAM);
+        if (!chunk_data)
+        {
+            ESP_LOGE(TAG, "Failed to allocate memory for audio chunk");
+            break;
+        }
+        memcpy(chunk_data, buffer, bytes_read);
+
+        // 等待缓冲区有空间
+        {
+            std::unique_lock<std::mutex> lock(buffer_mutex_);
+            /* ★ skip_enqueue_ 或 is_downloading_ 之一为 true 时立即返回（不阻塞）。
+             * skip_enqueue_ = true → 谓词直接为 true，wait 不等锁直接放行，download 直接 free chunk 并退出。
+             * 解决了 cv.wait() 期间 download 持有 buffer_mutex_ 导致 ClearAudioBuffer 等 300ms 的问题。 */
+            buffer_cv_.wait(lock, [this]
+                            { return skip_enqueue_.load() || !is_downloading_.load() || buffer_size_ < MAX_BUFFER_SIZE; });
+
+            if (skip_enqueue_ || !is_downloading_)
+            {
+                heap_caps_free(chunk_data);
+                break;
+            }
+
+            /* 正常 enqueue */
+            audio_buffer_.push(AudioChunk(chunk_data, bytes_read));
+            buffer_size_ += bytes_read;
+            total_downloaded += bytes_read;
+            resume_from += bytes_read;   // 断点续传偏移
+
+            // 通知播放线程有新数据
+            buffer_cv_.notify_one();
+
+            if (total_downloaded % (256 * 1024) == 0)
+            { // 每256KB打印一次进度
+                ESP_LOGI(TAG, "Downloaded %d bytes, buffer size: %d", total_downloaded, buffer_size_);
+            }
+        } // ★ 补回 unique_lock block 的 '}'
+    }
+
+    http->Close();
+    is_downloading_ = false;
+
+    // 通知播放线程下载完成
+    {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        buffer_cv_.notify_all();
+    }
+
+    if (buffer)
+    {
+        heap_caps_free(buffer);
+    }
+
+    ESP_LOGI(TAG, "Audio stream download thread finished");
+}
+
+// 流式播放音频数据
+void Esp32Music::PlayAudioStream()
+{
+    ESP_LOGI(TAG, "Starting audio stream playback");
+
+    // 初始化时间跟踪变量
+    current_play_time_ms_ = 0;
+    last_frame_time_ms_ = 0;
+    total_frames_decoded_ = 0;
+
+    auto codec = Board::GetInstance().GetAudioCodec();
+    if (!codec || !codec->output_enabled())
+    {
+        ESP_LOGE(TAG, "Audio codec not available or not enabled");
+        is_playing_ = false;
+        return;
+    }
+
+    if (!mp3_decoder_initialized_)
+    {
+        ESP_LOGE(TAG, "MP3 decoder not initialized");
+        is_playing_ = false;
+        return;
+    }
+
+    // 等待缓冲区有足够数据开始播放
+    {
+        std::unique_lock<std::mutex> lock(buffer_mutex_);
+        buffer_cv_.wait(lock, [this]
+                        { return buffer_size_ >= MIN_BUFFER_SIZE || (!is_downloading_ && !audio_buffer_.empty()); });
+    }
+
+    ESP_LOGI(TAG, "Starting playback with buffer size: %d", buffer_size_);
+
+    size_t total_played = 0;
+    uint8_t *mp3_input_buffer = nullptr;
+    int bytes_left = 0;
+    uint8_t *read_ptr = nullptr;
+
+    // 分配MP3输入缓冲区
+    mp3_input_buffer = (uint8_t *)heap_caps_malloc(8192, MALLOC_CAP_SPIRAM);
+    if (!mp3_input_buffer)
+    {
+        ESP_LOGE(TAG, "Failed to allocate MP3 input buffer");
+        is_playing_ = false;
+        return;
+    }
+
+    // 分配MP3解码输出缓冲区（移到堆上，避免 4.5KB 栈缓冲破坏 8KB 线程栈）
+    int16_t *pcm_buffer = (int16_t *)heap_caps_malloc(2304 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (!pcm_buffer)
+    {
+        ESP_LOGE(TAG, "Failed to allocate PCM decode buffer");
+        heap_caps_free(mp3_input_buffer);
+        mp3_input_buffer = nullptr;
+        is_playing_ = false;
+        return;
+    }
+
+    // 标记是否已经处理过ID3标签
+    bool id3_processed = false;
+
+    while (is_playing_)
+    {
+        // 检查设备状态，只有在空闲状态才播放音乐
+        auto &app = Application::GetInstance();
+        DeviceState current_state = app.GetDeviceState();
+
+        // 状态检查：音乐播放只在 idle 状态下进行
+        // 参考参考项目：不是直接 break 退出，而是循环等待 + 不输出音频
+        if (current_state != kDeviceStateIdle)
+        {
+            // 如果当前不在 idle 状态（用户按键唤醒、语音唤醒、说话等）
+            // 不 break，等 StopStreaming 主动设置 is_playing_ = false 来结束
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        // 设备状态检查通过，显示当前播放的歌名
+        if (!song_name_displayed_ && !current_song_name_.empty())
+        {
+            auto &board = Board::GetInstance();
+            auto display = board.GetDisplay();
+            if (display)
+            {
+                // 格式化歌名显示为《歌名》播放中...
+                //std::string formatted_song_name = "《" + current_song_name_ + "》播放中...";
+                //display->SetMusicInfo(formatted_song_name.c_str());
+                //ESP_LOGI(TAG, "Displaying song name: %s", formatted_song_name.c_str());
+                song_name_displayed_ = true;
+            }
+
+            // 根据显示模式启动相应的显示功能
+            if (display)
+            {
+                if (display_mode_ == DISPLAY_MODE_SPECTRUM)
+                {
+                    //display->start();
+                    ESP_LOGI(TAG, "Display start() called for spectrum visualization");
+                }
+                else
+                {
+                    ESP_LOGI(TAG, "Lyrics display mode active, FFT visualization disabled");
+                }
+            }
+        }
+
+        // 如果需要更多MP3数据，从缓冲区读取
+        if (bytes_left < 4096)
+        { // 保持至少4KB数据用于解码
+            AudioChunk chunk;
+
+            // 从缓冲区获取音频数据
+            {
+                std::unique_lock<std::mutex> lock(buffer_mutex_);
+                if (audio_buffer_.empty())
+                {
+                    if (!is_downloading_)
+                    {
+                        // 下载完成且缓冲区为空，播放结束
+                        ESP_LOGI(TAG, "Playback finished, total played: %d bytes", total_played);
+                        break;
+                    }
+                    // 等待新数据
+                    buffer_cv_.wait(lock, [this]
+                                    { return !audio_buffer_.empty() || !is_downloading_; });
+                    if (audio_buffer_.empty())
+                    {
+                        continue;
+                    }
+                }
+
+                chunk = audio_buffer_.front();
+                audio_buffer_.pop();
+                buffer_size_ -= chunk.size;
+
+                // 通知下载线程缓冲区有空间
+                buffer_cv_.notify_one();
+            }
+
+            // 将新数据添加到MP3输入缓冲区
+            if (chunk.data && chunk.size > 0)
+            {
+                // 移动剩余数据到缓冲区开头
+                if (bytes_left > 0 && read_ptr != mp3_input_buffer)
+                {
+                    memmove(mp3_input_buffer, read_ptr, bytes_left);
+                }
+
+                // 检查缓冲区空间
+                size_t space_available = 8192 - bytes_left;
+                size_t copy_size = std::min(chunk.size, space_available);
+
+                // 复制新数据
+                memcpy(mp3_input_buffer + bytes_left, chunk.data, copy_size);
+                bytes_left += copy_size;
+                read_ptr = mp3_input_buffer;
+
+                // 检查并跳过ID3标签（仅在开始时处理一次）
+                if (!id3_processed && bytes_left >= 10)
+                {
+                    size_t id3_skip = SkipId3Tag(read_ptr, bytes_left);
+                    if (id3_skip > 0)
+                    {
+                        read_ptr += id3_skip;
+                        bytes_left -= id3_skip;
+                        ESP_LOGI(TAG, "Skipped ID3 tag: %u bytes", (unsigned int)id3_skip);
+                    }
+                    id3_processed = true;
+                }
+
+                // 释放chunk内存
+                heap_caps_free(chunk.data);
+            }
+        }
+
+        // 尝试找到MP3帧同步
+        int sync_offset = MP3FindSyncWord(read_ptr, bytes_left);
+        if (sync_offset < 0)
+        {
+            ESP_LOGW(TAG, "No MP3 sync word found, skipping %d bytes", bytes_left);
+            bytes_left = 0;
+            continue;
+        }
+
+        // 跳过到同步位置
+        if (sync_offset > 0)
+        {
+            read_ptr += sync_offset;
+            bytes_left -= sync_offset;
+        }
+
+        // 解码MP3帧（pcm_buffer 已在函数开头从堆分配）
+        int decode_result = MP3Decode(mp3_decoder_, &read_ptr, &bytes_left, pcm_buffer, 0);
+
+        if (decode_result == 0)
+        {
+            // 解码成功，获取帧信息
+            MP3GetLastFrameInfo(mp3_decoder_, &mp3_frame_info_);
+            total_frames_decoded_++;
+
+            // 基本的帧信息有效性检查，防止除零错误
+            if (mp3_frame_info_.samprate == 0 || mp3_frame_info_.nChans == 0)
+            {
+                ESP_LOGW(TAG, "Invalid frame info: rate=%d, channels=%d, skipping",
+                         mp3_frame_info_.samprate, mp3_frame_info_.nChans);
+                continue;
+            }
+
+            // 计算当前帧的持续时间(毫秒)
+            int frame_duration_ms = (mp3_frame_info_.outputSamps * 1000) /
+                                    (mp3_frame_info_.samprate * mp3_frame_info_.nChans);
+
+            // 更新当前播放时间
+            current_play_time_ms_ += frame_duration_ms;
+
+            ESP_LOGD(TAG, "Frame %d: time=%lldms, duration=%dms, rate=%d, ch=%d",
+                     total_frames_decoded_, current_play_time_ms_, frame_duration_ms,
+                     mp3_frame_info_.samprate, mp3_frame_info_.nChans);
+
+            // 更新歌词显示
+            int buffer_latency_ms = 600; // 实测调整值
+            UpdateLyricDisplay(current_play_time_ms_ + buffer_latency_ms);
+
+            // 将PCM数据发送到Application的音频解码队列
+            if (mp3_frame_info_.outputSamps > 0)
+            {
+                int16_t *final_pcm_data = pcm_buffer;
+                int final_sample_count = mp3_frame_info_.outputSamps;
+
+                // 如果是双通道，转换为单通道混合
+                if (mp3_frame_info_.nChans == 2)
+                {
+                    // 双通道转单通道：将左右声道混合
+                    int stereo_samples = mp3_frame_info_.outputSamps; // 包含左右声道的总样本数
+                    int mono_samples = stereo_samples / 2;            // 实际的单声道样本数
+
+                    mono_buffer_.resize(mono_samples);
+
+                    for (int i = 0; i < mono_samples; ++i)
+                    {
+                        // 混合左右声道 (L + R) / 2
+                        int left = pcm_buffer[i * 2];      // 左声道
+                        int right = pcm_buffer[i * 2 + 1]; // 右声道
+                        mono_buffer_[i] = (int16_t)((left + right) / 2);
+                    }
+
+                    final_pcm_data = mono_buffer_.data();
+                    final_sample_count = mono_samples;
+
+                    ESP_LOGD(TAG, "Converted stereo to mono: %d -> %d samples",
+                             stereo_samples, mono_samples);
+                }
+                else if (mp3_frame_info_.nChans == 1)
+                {
+                    // 已经是单声道，无需转换
+                    ESP_LOGD(TAG, "Already mono audio: %d samples", final_sample_count);
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "Unsupported channel count: %d, treating as mono",
+                             mp3_frame_info_.nChans);
+                }
+
+                // 创建AudioStreamPacket
+                AudioStreamPacket packet;
+                packet.sample_rate = mp3_frame_info_.samprate;
+                packet.frame_duration = 60; // 使用Application默认的帧时长
+                packet.timestamp = 0;
+
+                // 将int16_t PCM数据转换为uint8_t字节数组
+                size_t pcm_size_bytes = final_sample_count * sizeof(int16_t);
+                packet.payload.resize(pcm_size_bytes);
+                memcpy(packet.payload.data(), final_pcm_data, pcm_size_bytes);
+
+                ESP_LOGD(TAG, "Sending %d PCM samples (%d bytes, rate=%d, channels=%d->1) to Application",
+                         final_sample_count, pcm_size_bytes, mp3_frame_info_.samprate, mp3_frame_info_.nChans);
+
+                // 发送到Application的音频解码队列
+                app.AddAudioData(std::move(packet));
+                total_played += pcm_size_bytes;
+
+                // 打印播放进度
+                if (total_played % (128 * 1024) == 0)
+                {
+                    ESP_LOGI(TAG, "Played %d bytes, buffer size: %d", total_played, buffer_size_);
+                }
+            }
+        }
+        else
+        {
+            // 解码失败
+            ESP_LOGW(TAG, "MP3 decode failed with error: %d", decode_result);
+
+            // 跳过一些字节继续尝试
+            if (bytes_left > 1)
+            {
+                read_ptr++;
+                bytes_left--;
+            }
+            else
+            {
+                bytes_left = 0;
+            }
+        }
+    }
+
+    // 清理
+    if (mp3_input_buffer)
+    {
+        heap_caps_free(mp3_input_buffer);
+        mp3_input_buffer = nullptr;
+    }
+
+    if (pcm_buffer)
+    {
+        heap_caps_free(pcm_buffer);
+        pcm_buffer = nullptr;
+    }
+
+    // 播放结束时进行基本清理，但不调用StopStreaming避免线程自我等待
+    ESP_LOGI(TAG, "Audio stream playback finished, total played: %d bytes", total_played);
+    ESP_LOGI(TAG, "Performing basic cleanup from play thread");
+
+    // 停止播放标志
+    is_playing_ = false;
+
+    // 关键修复：播放线程退出时，主动清空 I2S TX buffer 中的残余音频数据。
+    // 否则这些残余 PCM 数据会继续通过扬声器播放，被麦克风拾取后被 STT 误识别。
+    // 在 idle/listening 状态下，应保证 codec output 干净。
+    {
+        auto codec = Board::GetInstance().GetAudioCodec();
+        if (codec && codec->output_enabled())
+        {
+            // 写入一段静音，让 I2S DMA 把残余数据自然消耗掉
+            const int silence_samples = 4096;
+            std::vector<int16_t> silence(silence_samples, 0);
+            codec->OutputData(silence);
+            codec->OutputData(silence);
+            ESP_LOGI(TAG, "Flushed residual PCM data from codec output");
+        }
+    }
+
+    /* ★★★ 关键修复：恢复 MJPEG 动画前必须先释放 audio_buffer_ (~152KB PSRAM) 和 lyrics_ (~2KB)。
+     * audio_buffer_ 中还有 152KB 未消费的数据，在 StopStreaming 的 ClearAudioBuffer() 之前，
+     * SetRoleAnimation("idle") 就已经在播放线程清理代码中调用了。
+     * 此时 PSRAM 还被这些 chunk 占着，MJPEG 启动需要 ~1152KB 就 NO_MEM。
+     * 所以在 SetRoleAnimation 之前同步释放它们。*/
+    ClearAudioBuffer();
+    CleanupMp3Decoder();
+    {
+        std::lock_guard<std::mutex> lock(lyrics_mutex_);
+        lyrics_.clear();
+    }
+    current_song_name_.clear();
+    current_picture_url_.clear();
+
+    /* 停止歌词线程并等待其退出，确保内存释放后再恢复动画。
+     * lyric_thread 持有歌词显示用的内存（歌词 label buffer 等），不等它退出
+     * 会让 MJPEG 启动时内存不足 (ESP_ERR_NO_MEM)。*/
+    is_lyric_running_ = false;
+    if (lyric_thread_.joinable())
+    {
+        lyric_thread_.join();
+        ESP_LOGI(TAG, "Lyric thread joined before restoring animation");
+    }
+
+    {
+        auto &board = Board::GetInstance();
+        auto display = board.GetDisplay();
+        if (display)
+        {
+            /* 清掉 music UI 上的歌词 / 进度；AI 聊天字幕保持原状。
+             * 传 "" 强制清掉当前/下一句歌词 label。 */
+            display->SetMusicProgress(0, "", "");
+            display->SetStatus(Lang::Strings::STANDBY);
+            display->SetRoleAnimation("idle");
+            /* 播放线程自然结束时也要显式隐藏封面：
+             * 状态机此时若本来就在 Idle，TransitionTo(Idle) 是 no-op，
+             * application.cc 的 HandleStateChangedEvent 不会被触发。
+             * 同 StopStreaming 里那个 fix 的原因。 */
+            display->ShowMusicCover(false, "");
+            ESP_LOGI(TAG, "Playback finished, restored idle animation and hid music cover");
+        }
+    }
+
+    // 重置采样率到原始值
+    ResetSampleRate();
+
+    // 只在频谱显示模式下才停止FFT显示
+    if (display_mode_ == DISPLAY_MODE_SPECTRUM)
+    {
+        auto &board = Board::GetInstance();
+        auto display = board.GetDisplay();
+        if (display)
+        {
+            //display->stopFft();
+            ESP_LOGI(TAG, "Stopped FFT display from play thread (spectrum mode)");
+        }
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Not in spectrum mode, skipping FFT stop");
+    }
+}
+
+// 清空音频缓冲区
+void Esp32Music::ClearAudioBuffer()
+{
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+
+    while (!audio_buffer_.empty())
+    {
+        AudioChunk chunk = audio_buffer_.front();
+        audio_buffer_.pop();
+        if (chunk.data)
+        {
+            heap_caps_free(chunk.data);
+        }
+    }
+
+    buffer_size_ = 0;
+    ESP_LOGI(TAG, "Audio buffer cleared");
+}
+
+// 初始化MP3解码器
+bool Esp32Music::InitializeMp3Decoder()
+{
+    mp3_decoder_ = MP3InitDecoder();
+    if (mp3_decoder_ == nullptr)
+    {
+        ESP_LOGE(TAG, "Failed to initialize MP3 decoder");
+        mp3_decoder_initialized_ = false;
+        return false;
+    }
+
+    mp3_decoder_initialized_ = true;
+    ESP_LOGI(TAG, "MP3 decoder initialized successfully");
+    return true;
+}
+
+// 清理MP3解码器
+void Esp32Music::CleanupMp3Decoder()
+{
+    if (mp3_decoder_ != nullptr)
+    {
+        MP3FreeDecoder(mp3_decoder_);
+        mp3_decoder_ = nullptr;
+    }
+    mp3_decoder_initialized_ = false;
+    ESP_LOGI(TAG, "MP3 decoder cleaned up");
+}
+
+// 重置采样率到原始值
+void Esp32Music::ResetSampleRate()
+{
+    auto &board = Board::GetInstance();
+    auto codec = board.GetAudioCodec();
+    if (codec && codec->original_output_sample_rate() > 0 &&
+        codec->output_sample_rate() != codec->original_output_sample_rate())
+    {
+        ESP_LOGI(TAG, "重置采样率：从 %d Hz 重置到原始值 %d Hz",
+                 codec->output_sample_rate(), codec->original_output_sample_rate());
+        if (codec->SetOutputSampleRate(-1))
+        { // -1 表示重置到原始值
+            ESP_LOGI(TAG, "成功重置采样率到原始值: %d Hz", codec->output_sample_rate());
+        }
+        else
+        {
+            ESP_LOGW(TAG, "无法重置采样率到原始值");
+        }
+    }
+}
+
+// 跳过MP3文件开头的ID3标签
+size_t Esp32Music::SkipId3Tag(uint8_t *data, size_t size)
+{
+    if (!data || size < 10)
+    {
+        return 0;
+    }
+
+    // 检查ID3v2标签头 "ID3"
+    if (memcmp(data, "ID3", 3) != 0)
+    {
+        return 0;
+    }
+
+    // 计算标签大小（synchsafe integer格式）
+    uint32_t tag_size = ((uint32_t)(data[6] & 0x7F) << 21) |
+                        ((uint32_t)(data[7] & 0x7F) << 14) |
+                        ((uint32_t)(data[8] & 0x7F) << 7) |
+                        ((uint32_t)(data[9] & 0x7F));
+
+    // ID3v2头部(10字节) + 标签内容
+    size_t total_skip = 10 + tag_size;
+
+    // 确保不超过可用数据大小
+    if (total_skip > size)
+    {
+        total_skip = size;
+    }
+
+    ESP_LOGI(TAG, "Found ID3v2 tag, skipping %u bytes", (unsigned int)total_skip);
+    return total_skip;
+}
+
+// 下载歌词
+bool Esp32Music::DownloadLyrics(const std::string &lyric_url)
+{
+    //ESP_LOGI(TAG, "Downloading lyrics from: %s", lyric_url.c_str());
+
+    // 检查URL是否为空
+    if (lyric_url.empty())
+    {
+        ESP_LOGE(TAG, "Lyric URL is empty!");
+        return false;
+    }
+
+    // 添加重试逻辑
+    const int max_retries = 3;
+    int retry_count = 0;
+    bool success = false;
+    std::string lyric_content;
+    std::string current_url = lyric_url;
+    int redirect_count = 0;
+    const int max_redirects = 5; // 最多允许5次重定向
+
+    while (retry_count < max_retries && !success && redirect_count < max_redirects)
+    {
+        if (retry_count > 0)
+        {
+            ESP_LOGI(TAG, "Retrying lyric download (attempt %d of %d)", retry_count + 1, max_retries);
+            // 重试前暂停一下
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+
+        // 使用Board提供的HTTP客户端
+        auto network = Board::GetInstance().GetNetwork();
+        auto http = network->CreateHttp(0);
+        if (!http)
+        {
+            ESP_LOGE(TAG, "Failed to create HTTP client for lyric download");
+            retry_count++;
+            continue;
+        }
+
+        // 设置基本请求头
+        http->SetHeader("User-Agent", "ESP32-Music-Player/1.0");
+        http->SetHeader("Accept", "text/plain");
+
+        // 添加ESP32认证头
+        //add_auth_headers(http.get());
+
+        // 打开GET连接
+        if (!http->Open("GET", current_url))
+        {
+            ESP_LOGE(TAG, "Failed to open HTTP connection for lyrics");
+            // 移除delete http; 因为unique_ptr会自动管理内存
+            retry_count++;
+            continue;
+        }
+
+        // 检查HTTP状态码
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "Lyric download HTTP status code: %d", status_code);
+
+        // 处理重定向 - 由于Http类没有GetHeader方法，我们只能根据状态码判断
+        if (status_code == 301 || status_code == 302 || status_code == 303 || status_code == 307 || status_code == 308)
+        {
+            // 由于无法获取Location头，只能报告重定向但无法继续
+            ESP_LOGW(TAG, "Received redirect status %d but cannot follow redirect (no GetHeader method)", status_code);
+            http->Close();
+            retry_count++;
+            continue;
+        }
+
+        // 非200系列状态码视为错误
+        if (status_code < 200 || status_code >= 300)
+        {
+            ESP_LOGE(TAG, "HTTP GET failed with status code: %d", status_code);
+            http->Close();
+            retry_count++;
+            continue;
+        }
+
+        // 读取响应
+        lyric_content.clear();
+        char buffer[1024];
+        int bytes_read;
+        bool read_error = false;
+        int total_read = 0;
+
+        // 由于无法获取Content-Length和Content-Type头，我们不知道预期大小和内容类型
+        ESP_LOGD(TAG, "Starting to read lyric content");
+
+        while (true)
+        {
+            bytes_read = http->Read(buffer, sizeof(buffer) - 1);
+            // ESP_LOGD(TAG, "Lyric HTTP read returned %d bytes", bytes_read); // 注释掉以减少日志输出
+
+            if (bytes_read > 0)
+            {
+                buffer[bytes_read] = '\0';
+                lyric_content += buffer;
+                total_read += bytes_read;
+
+                // 定期打印下载进度 - 改为DEBUG级别减少输出
+                if (total_read % 4096 == 0)
+                {
+                    ESP_LOGD(TAG, "Downloaded %d bytes so far", total_read);
+                }
+            }
+            else if (bytes_read == 0)
+            {
+                // 正常结束，没有更多数据
+                ESP_LOGD(TAG, "Lyric download completed, total bytes: %d", total_read);
+                success = true;
+                break;
+            }
+            else
+            {
+                // bytes_read < 0，可能是ESP-IDF的已知问题
+                // 如果已经读取到了一些数据，则认为下载成功
+                if (!lyric_content.empty())
+                {
+                    ESP_LOGW(TAG, "HTTP read returned %d, but we have data (%d bytes), continuing", bytes_read, lyric_content.length());
+                    success = true;
+                    break;
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "Failed to read lyric data: error code %d", bytes_read);
+                    read_error = true;
+                    break;
+                }
+            }
+        }
+
+        http->Close();
+
+        if (read_error)
+        {
+            retry_count++;
+            continue;
+        }
+
+        // 如果成功读取数据，跳出重试循环
+        if (success)
+        {
+            break;
+        }
+    }
+
+    // 检查是否超过了最大重试次数
+    if (retry_count >= max_retries)
+    {
+        ESP_LOGE(TAG, "Failed to download lyrics after %d attempts", max_retries);
+        return false;
+    }
+
+    // 记录前几个字节的数据，帮助调试
+    if (!lyric_content.empty())
+    {
+        size_t preview_size = std::min(lyric_content.size(), size_t(50));
+        std::string preview = lyric_content.substr(0, preview_size);
+        ESP_LOGD(TAG, "Lyric content preview (%d bytes): %s", lyric_content.length(), preview.c_str());
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Failed to download lyrics or lyrics are empty");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Lyrics downloaded successfully, size: %d bytes", lyric_content.length());
+    return ParseLyrics(lyric_content);
+}
+
+// 解析歌词
+bool Esp32Music::ParseLyrics(const std::string &lyric_content)
+{
+    ESP_LOGI(TAG, "Parsing lyrics content");
+
+    // 使用锁保护lyrics_数组访问
+    std::lock_guard<std::mutex> lock(lyrics_mutex_);
+
+    lyrics_.clear();
+
+    // 按行分割歌词内容
+    std::istringstream stream(lyric_content);
+    std::string line;
+
+    while (std::getline(stream, line))
+    {
+        // 去除行尾的回车符
+        if (!line.empty() && line.back() == '\r')
+        {
+            line.pop_back();
+        }
+
+        // 跳过空行
+        if (line.empty())
+        {
+            continue;
+        }
+
+        // 解析LRC格式: [mm:ss.xx]歌词文本
+        if (line.length() > 10 && line[0] == '[')
+        {
+            size_t close_bracket = line.find(']');
+            if (close_bracket != std::string::npos)
+            {
+                std::string tag_or_time = line.substr(1, close_bracket - 1);
+                std::string content = line.substr(close_bracket + 1);
+
+                // 检查是否是元数据标签而不是时间戳
+                // 元数据标签通常是 [ti:标题], [ar:艺术家], [al:专辑] 等
+                size_t colon_pos = tag_or_time.find(':');
+                if (colon_pos != std::string::npos)
+                {
+                    std::string left_part = tag_or_time.substr(0, colon_pos);
+
+                    // 检查冒号左边是否是时间（数字）
+                    bool is_time_format = true;
+                    for (char c : left_part)
+                    {
+                        if (!isdigit(c))
+                        {
+                            is_time_format = false;
+                            break;
+                        }
+                    }
+
+                    // 如果不是时间格式，跳过这一行（元数据标签）
+                    if (!is_time_format)
+                    {
+                        // 可以在这里处理元数据，例如提取标题、艺术家等信息
+                        ESP_LOGD(TAG, "Skipping metadata tag: [%s]", tag_or_time.c_str());
+                        continue;
+                    }
+
+                    // 是时间格式，解析时间戳
+                    try
+                    {
+                        int minutes = std::stoi(tag_or_time.substr(0, colon_pos));
+                        float seconds = std::stof(tag_or_time.substr(colon_pos + 1));
+                        int timestamp_ms = minutes * 60 * 1000 + (int)(seconds * 1000);
+
+                        // 安全处理歌词文本，确保UTF-8编码正确
+                        std::string safe_lyric_text;
+                        if (!content.empty())
+                        {
+                            // 创建安全副本并验证字符串
+                            safe_lyric_text = content;
+                            // 确保字符串以null结尾
+                            safe_lyric_text.shrink_to_fit();
+                        }
+
+                        lyrics_.push_back(std::make_pair(timestamp_ms, safe_lyric_text));
+
+                        if (!safe_lyric_text.empty())
+                        {
+                            // 限制日志输出长度，避免中文字符截断问题
+                            size_t log_len = std::min(safe_lyric_text.length(), size_t(50));
+                            std::string log_text = safe_lyric_text.substr(0, log_len);
+                            ESP_LOGD(TAG, "Parsed lyric: [%d ms] %s", timestamp_ms, log_text.c_str());
+                        }
+                        else
+                        {
+                            ESP_LOGD(TAG, "Parsed lyric: [%d ms] (empty)", timestamp_ms);
+                        }
+                    }
+                    catch (const std::exception &e)
+                    {
+                        ESP_LOGW(TAG, "Failed to parse time: %s", tag_or_time.c_str());
+                    }
+                }
+            }
+        }
+    }
+
+    // 按时间戳排序
+    std::sort(lyrics_.begin(), lyrics_.end());
+
+    ESP_LOGI(TAG, "Parsed %d lyric lines", lyrics_.size());
+    return !lyrics_.empty();
+}
+
+// 歌词显示线程
+void Esp32Music::LyricDisplayThread()
+{
+    ESP_LOGI(TAG, "Lyric display thread started");
+
+    // 优先使用 getMusicDetails 直接返回的 lrctxt（与 lyric_url 内容相同，避免重复 HTTP 下载）。
+    // 只有 lrctxt 为空时才退回到下载 lyric_url。
+    bool ok = false;
+    if (!current_lyric_text_.empty()) {
+        ESP_LOGI(TAG, "Using inline lyric text (%d bytes), skip URL download",
+                 current_lyric_text_.length());
+        ok = ParseLyrics(current_lyric_text_);
+    } else if (!current_lyric_url_.empty()) {
+        ok = DownloadLyrics(current_lyric_url_);
+    } else {
+        ESP_LOGE(TAG, "No lyric data source available");
+    }
+
+    if (!ok) {
+        ESP_LOGE(TAG, "Failed to load lyrics");
+        is_lyric_running_ = false;
+        return;
+    }
+
+    // 定期检查是否需要更新显示(频率可以降低)
+    while (is_lyric_running_ && is_playing_)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    ESP_LOGI(TAG, "Lyric display thread finished");
+}
+
+void Esp32Music::UpdateLyricDisplay(int64_t current_time_ms)
+{
+    std::lock_guard<std::mutex> lock(lyrics_mutex_);
+
+    if (lyrics_.empty())
+    {
+        return;
+    }
+
+    // 查找当前应该显示的歌词
+    int new_lyric_index = -1;
+
+    // 从当前歌词索引开始查找，提高效率
+    int start_index = (current_lyric_index_.load() >= 0) ? current_lyric_index_.load() : 0;
+
+    // 正向查找：找到最后一个时间戳小于等于当前时间的歌词
+    for (int i = start_index; i < (int)lyrics_.size(); i++)
+    {
+        if (lyrics_[i].first <= current_time_ms)
+        {
+            new_lyric_index = i;
+        }
+        else
+        {
+            break; // 时间戳已超过当前时间
+        }
+    }
+
+    // 如果没有找到(可能当前时间比第一句歌词还早)，显示空
+    if (new_lyric_index == -1)
+    {
+        new_lyric_index = -1;
+    }
+
+    // 如果歌词索引发生变化，更新显示
+    std::string lyric_text;
+    std::string lyric_next_text;
+    if (new_lyric_index >= 0 && new_lyric_index < (int)lyrics_.size())
+    {
+        lyric_text = lyrics_[new_lyric_index].second;
+        /* 下一句：给"接下来要唱"的预览行用。
+         * 索引 +1 越界或当前是最后一句时给空串，display 那边按 "" 清掉预览。 */
+        int next_idx = new_lyric_index + 1;
+        if (next_idx < (int)lyrics_.size()) {
+            lyric_next_text = lyrics_[next_idx].second;
+        }
+    }
+
+    if (new_lyric_index != current_lyric_index_)
+    {
+        current_lyric_index_ = new_lyric_index;
+
+        auto &board = Board::GetInstance();
+        auto display = board.GetDisplay();
+        if (display)
+        {
+            /* 把"当前播放时间 + 当前歌词 + 下一句歌词"一起发到 display：
+             *  - SetMusicProgress 内部会更新进度条与两个歌词 label
+             *  - 这里只在新一句歌词触发时才调用，避免每帧重复写 label */
+            display->SetMusicProgress(static_cast<int>(current_time_ms),
+                                      lyric_text.c_str(),
+                                      lyric_next_text.c_str());
+            ESP_LOGD(TAG, "Lyric update at %lldms: cur=%s next=%s",
+                     current_time_ms,
+                     lyric_text.empty() ? "(none)" : lyric_text.c_str(),
+                     lyric_next_text.empty() ? "(none)" : lyric_next_text.c_str());
+        }
+    } else {
+        /* 歌词没换，但播放时间在走。每隔若干帧刷一次进度条/时间标签即可，
+         * 太频繁反而抢 LVGL。50ms 一次对用户而言刷新率足够。
+         * lyric/lyric_next 都传 nullptr，让 display 沿用上次显示。 */
+        auto &board = Board::GetInstance();
+        auto display = board.GetDisplay();
+        if (display)
+        {
+            display->SetMusicProgress(static_cast<int>(current_time_ms),
+                                      nullptr,
+                                      nullptr);
+        }
+    }
+}
+
+// 删除复杂的认证初始化方法，使用简单的静态函数
+
+// 删除复杂的类方法，使用简单的静态函数
+
+/**
+ * @brief 添加认证头到HTTP请求
+ * @param http_client HTTP客户端指针
+ *
+ * 添加的认证头包括：
+ * - X-MAC-Address: 设备MAC地址
+ * - X-Chip-ID: 设备芯片ID
+ * - X-Timestamp: 当前时间戳
+ * - X-Dynamic-Key: 动态生成的密钥
+ */
+// 删除复杂的AddAuthHeaders方法，使用简单的静态函数
+
+// 删除复杂的认证验证和配置方法，使用简单的静态函数
+
+// 显示模式控制方法实现
+void Esp32Music::SetDisplayMode(DisplayMode mode)
+{
+    /**DisplayMode old_mode = display_mode_.load();
+    display_mode_ = mode;
+
+    ESP_LOGI(TAG, "Display mode changed from %s to %s",
+             (old_mode == DISPLAY_MODE_SPECTRUM) ? "SPECTRUM" : "LYRICS",
+             (mode == DISPLAY_MODE_SPECTRUM) ? "SPECTRUM" : "LYRICS");**/
+}

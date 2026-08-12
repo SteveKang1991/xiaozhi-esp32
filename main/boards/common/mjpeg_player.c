@@ -487,24 +487,44 @@ static esp_err_t mjpeg_open_decoder(void)
     return ESP_OK;
 }
 
-/** mjpeg_player_start 预加载整文件；stop 释放 */
+/** mjpeg_player 持久预加载池：在模块初始化时一次性分配 2MB PSRAM，
+ * 后续每次 start()/stop() 复用同一块 buffer，彻底避免播放期间反复
+ * alloc/free 导致 PSRAM 碎片化（本设备 minimal_sram 最低仅 ~10KB，
+ * 两个 12KB 栈 + decoder 工作区 30KB 凑不够）。 */
 static uint8_t *s_preload_buf = NULL;
 static size_t s_preload_size = 0;
 static bool s_preload_is_malloc = false;
 
+/** 初始化时一次性分配最大预加载池；后续不释放（跨播放复用）。 */
+static bool mjpeg_alloc_preload_pool(void)
+{
+    if (s_preload_buf) {
+        return true;
+    }
+    /* 优先 PSRAM；其次内部堆 */
+    s_preload_buf = heap_caps_malloc(MJPEG_PRELOAD_MAX_BYTES, MALLOC_CAP_SPIRAM);
+    if (!s_preload_buf) {
+        s_preload_buf = malloc(MJPEG_PRELOAD_MAX_BYTES);
+        if (s_preload_buf) {
+            s_preload_is_malloc = true;
+        }
+    }
+    if (s_preload_buf) {
+        s_preload_size = MJPEG_PRELOAD_MAX_BYTES;
+        ESP_LOGW(TAG, "🎱 Preload pool allocated: %u KB (%s)",
+                 (unsigned)(MJPEG_PRELOAD_MAX_BYTES / 1024),
+                 s_preload_is_malloc ? "malloc" : "PSRAM");
+    }
+    return s_preload_buf != NULL;
+}
+
 static void mjpeg_release_preload_buf(void)
 {
-    if (!s_preload_buf) {
-        return;
-    }
-    if (s_preload_is_malloc) {
-        free(s_preload_buf);
-    } else {
-        heap_caps_free(s_preload_buf);
-    }
-    s_preload_buf = NULL;
+    /* 持久池策略：不释放 s_preload_buf，下次播放直接复用。
+     * 仅清除使用状态，让 start() 重新填充。 */
     s_preload_size = 0;
-    s_preload_is_malloc = false;
+    /* 注意：s_preload_buf / s_preload_is_malloc / s_preload_size 本身保留，
+     * 不 heap_caps_free()，避免碎片化。 */
 }
 
 static inline void mjpeg_apply_frame_pacing(int64_t t_start, int64_t frame_interval_us)
@@ -1481,82 +1501,44 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
         }
     }
 
-    s_preload_buf = NULL;
-    s_preload_size = 0;
-    s_preload_is_malloc = false;
 #if MJPEG_PRELOAD_MAX_BYTES > 0
     {
-        uint8_t* pb = NULL;
+        /* 持久预加载池策略：启动时一次性分配 2MB PSRAM，后续复用。
+         * 必须先确保池存在，再把文件数据读入池中。 */
+        if (!mjpeg_alloc_preload_pool()) {
+            ESP_LOGW(TAG, "⚠️ 预加载池分配失败（%u KB），MJPEG 走流式读取",
+                     (unsigned)(MJPEG_PRELOAD_MAX_BYTES / 1024));
+        }
         size_t sz = 0;
         if (s_cfg.src_type == MJPEG_SRC_PARTITION) {
-            /* PARTITION 源：把整个文件读到 PSRAM */
-            if (s_cfg.partition && s_cfg.partition_size > 0
+            /* PARTITION 源：把文件读入预加载池 */
+            if (s_preload_buf && s_cfg.partition && s_cfg.partition_size > 0
                 && s_cfg.partition_size <= (uint32_t)MJPEG_PRELOAD_MAX_BYTES) {
-                pb = heap_caps_malloc(s_cfg.partition_size, MALLOC_CAP_SPIRAM);
-                if (pb) {
-                    esp_err_t er = esp_partition_read((const esp_partition_t *)s_cfg.partition,
-                                                      s_cfg.partition_offset,
-                                                      pb, s_cfg.partition_size);
-                    if (er == ESP_OK) {
-                        sz = s_cfg.partition_size;
-                    } else {
-                        // ESP_LOGE(TAG, "PARTITION 预加载读失败: %s", esp_err_to_name(er));
-                        heap_caps_free(pb);
-                        pb = NULL;
-                    }
-                } else {
-                    pb = malloc(s_cfg.partition_size);
-                    if (pb) {
-                        s_preload_is_malloc = true;
-                        esp_err_t er = esp_partition_read((const esp_partition_t *)s_cfg.partition,
-                                                          s_cfg.partition_offset,
-                                                          pb, s_cfg.partition_size);
-                        if (er == ESP_OK) {
-                            sz = s_cfg.partition_size;
-                        } else {
-                            free(pb);
-                            pb = NULL;
-                            s_preload_is_malloc = false;
-                        }
-                    }
+                esp_err_t er = esp_partition_read((const esp_partition_t *)s_cfg.partition,
+                                                  s_cfg.partition_offset,
+                                                  s_preload_buf, s_cfg.partition_size);
+                if (er == ESP_OK) {
+                    sz = s_cfg.partition_size;
                 }
             }
         } else {
-            /* FILE 源：原 fopen + fseek/ftell/fread */
+            /* FILE 源：把文件读入预加载池 */
             FILE *pf = fopen(s_cfg.file_path, "rb");
             if (pf) {
                 if (fseek(pf, 0, SEEK_END) == 0) {
                     long fsz = ftell(pf);
                     if (fsz > 0 && (size_t)fsz <= (size_t)MJPEG_PRELOAD_MAX_BYTES) {
-                        pb = heap_caps_malloc((size_t)fsz, MALLOC_CAP_SPIRAM);
-                        if (!pb) {
-                            pb = malloc((size_t)fsz);
-                            if (pb) s_preload_is_malloc = true;
-                        }
-                        if (pb) {
-                            rewind(pf);
-                            if (fread(pb, 1, (size_t)fsz, pf) == (size_t)fsz) {
-                                sz = (size_t)fsz;
-                            } else {
-                                if (s_preload_is_malloc) free(pb);
-                                else heap_caps_free(pb);
-                                pb = NULL;
-                                s_preload_is_malloc = false;
-                            }
-                        } else {
-                            // ESP_LOGW(TAG, "⚠️ 预加载分配失败，使用流式读取");
+                        rewind(pf);
+                        if (fread(s_preload_buf, 1, (size_t)fsz, pf) == (size_t)fsz) {
+                            sz = (size_t)fsz;
                         }
                     }
                 }
                 fclose(pf);
             }
         }
-        if (pb && sz > 0) {
-            s_preload_buf = pb;
+        if (sz > 0) {
             s_preload_size = sz;
-            // ESP_LOGI(TAG, "📦 预加载 %u KB（%s），读任务从内存取帧",
-            //          (unsigned)(sz / 1024),
-            //          s_preload_is_malloc ? "内部堆" : "PSRAM");
         }
     }
 #endif
@@ -1577,6 +1559,9 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     };
 #endif
     bool need_dma_alloc = (s_dma_bufs[0] == NULL);
+    /**ESP_LOGW(TAG, "DEBUG pre-alloc: need_dma_alloc=%d fb[0]=%p fb[1]=%p preload=%p preload_sz=%u decoder_open=%d",
+             need_dma_alloc ? 1 : 0, s_cfg.fb[0], s_cfg.fb[1], s_preload_buf,
+             (unsigned)s_preload_size, s_decoder_open ? 1 : 0);**/
     if (need_dma_alloc) {
         for (int i = 0; i < NUM_DMA_BUFS; i++) {
 #if CONFIG_IDF_TARGET_ESP32P4
@@ -1590,7 +1575,8 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
             size_t actual = FRAME_BUF_SIZE;
 #endif
             if (!s_dma_bufs[i]) {
-                // ESP_LOGE(TAG, "frame buf %d alloc failed", i);
+                ESP_LOGE(TAG, "❌ DEBUG frame buf %d alloc failed (need %u bytes)",
+                         i, (unsigned)FRAME_BUF_SIZE);
                 mjpeg_release_preload_buf();
                 s_running = false;
                 return ESP_ERR_NO_MEM;
@@ -1618,23 +1604,26 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     /* 打开 decoder（模块级复用：仅在 stop 后首次 start 时新建，后续直接返回） */
     esp_err_t open_ret = mjpeg_open_decoder();
     if (open_ret != ESP_OK) {
+        ESP_LOGE(TAG, "❌ DEBUG mjpeg_open_decoder failed: %s", esp_err_to_name(open_ret));
         mjpeg_release_preload_buf();
         s_running = false;
         return open_ret;
     }
     s_running = true;
     /* read=CPU1(避 WDT+避开 decode SPI flash 互斥), decode=CPU0; 优先级读低解码高 */
-    ret = xTaskCreatePinnedToCore(mjpeg_read_task, "mjpeg_read", 12288, NULL, MJPEG_READ_TASK_PRIORITY, &s_read_task,
+    ret = xTaskCreatePinnedToCore(mjpeg_read_task, "mjpeg_read", 4096, NULL, MJPEG_READ_TASK_PRIORITY, &s_read_task,
                                   MJPEG_READ_TASK_CORE_ID);
     if (ret != pdPASS) {
+        ESP_LOGE(TAG, "❌ DEBUG xTaskCreatePinnedToCore mjpeg_read_task failed");
         mjpeg_release_preload_buf();
         s_running = false;
         return ESP_ERR_NO_MEM;
     }
 
-    ret = xTaskCreatePinnedToCore(mjpeg_decode_task, "mjpeg_dec", 12288, NULL, MJPEG_DECODE_TASK_PRIORITY,
+    ret = xTaskCreatePinnedToCore(mjpeg_decode_task, "mjpeg_dec", 4096, NULL, MJPEG_DECODE_TASK_PRIORITY,
                                   &s_decode_task, MJPEG_DECODE_TASK_CORE_ID);
     if (ret != pdPASS) {
+        ESP_LOGE(TAG, "❌ DEBUG xTaskCreatePinnedToCore mjpeg_decode_task failed");
         mjpeg_release_preload_buf();
         s_running = false;
         return ESP_ERR_NO_MEM;
@@ -1658,6 +1647,11 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
         s_last_partition_key[0] = '\0';
     }
 
+    /* DEBUG: 打印 PSRAM 剩余帮助定位 NO_MEM */
+    /**ESP_LOGW(TAG, "DEBUG mjpeg_player_start OK: free_heap=%u free_psram=%u fb[0]=%p preload=%p",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             s_cfg.fb[0], s_preload_buf);**/
     return ESP_OK;
 }
 

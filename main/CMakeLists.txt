@@ -63,6 +63,7 @@ list(APPEND SOURCES
     "boards/common/system_reset.cc"
     "boards/common/mjpeg_player.c"
     "boards/common/sd_scanner.c"
+    "boards/common/esp32_music.cc"
 )
 list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/common)
 

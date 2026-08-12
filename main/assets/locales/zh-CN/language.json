@@ -58,6 +58,7 @@
 		"BLUFI_CINFIG": "登录系统扫描：",
         "DOWNLOADING_EMOTIONS": "下载动画资源...",
         "DOWNLOADING_EMOTION_PROGRESS": "请勿关机，正在下载：%d/%d",
-        "EMOTION_SYNC_COMPLETE": "动画同步完成"
+        "EMOTION_SYNC_COMPLETE": "动画同步完成",
+        "MUSIC_PLAYING": "音乐播放中..."
     }
 }
