@@ -704,11 +704,11 @@ void Application::ActivationTask() {
     // Check for new firmware version
     CheckNewVersion();
 
-    // Sync emotion files from server
-    CheckEmotionFiles();
-
     // Initialize the protocol
     InitializeProtocol();
+
+    // Sync emotion files from server
+    CheckEmotionFiles();
 
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
