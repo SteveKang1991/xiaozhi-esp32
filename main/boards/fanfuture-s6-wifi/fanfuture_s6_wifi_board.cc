@@ -14,7 +14,6 @@
 #include "power_manager.h"
 #include "lightam_controller.h"
 #include "fan_lcd20_display.h"
-#include "custom_audio_codec.h"
 #include "as5600.h"
 
 #include <wifi_station.h>
@@ -47,7 +46,7 @@ private:
     esp_lcd_panel_handle_t panel_ = nullptr;
     Pca9557* pca9557_;
     Esp32Camera* camera_;
-    bool aec_device = false;
+    bool aec_device = true;
     As5600* as5600_ = nullptr;
 
     static void As5600LogTask(void* arg) {
@@ -318,12 +317,12 @@ public:
             GetBacklight()->RestoreBrightness();
         } 
 
-        #if CONFIG_USE_DEVICE_AEC
+        /**#if CONFIG_USE_DEVICE_AEC
         Settings settings("aecMode", false);
         aec_device = settings.GetBool("aec_device", aec_device);
         auto& app = Application::GetInstance();
         app.SetAecMode(aec_device ? kAecOnDeviceSide : kAecOff);
-        #endif
+        #endif**/
     }
 
     /**virtual Led* GetLed() override {
@@ -332,9 +331,22 @@ public:
     }**/
 
     virtual AudioCodec* GetAudioCodec() override {
-        static CustomAudioCodec audio_codec(
-            i2c_bus_, 
-            pca9557_);
+        static BoxAudioCodec audio_codec(
+            i2c_bus_,
+            AUDIO_INPUT_SAMPLE_RATE,
+            AUDIO_OUTPUT_SAMPLE_RATE,
+            AUDIO_I2S_GPIO_MCLK,
+            AUDIO_I2S_GPIO_BCLK,
+            AUDIO_I2S_GPIO_WS,
+            AUDIO_I2S_GPIO_DOUT,
+            AUDIO_I2S_GPIO_DIN,
+            AUDIO_CODEC_PA_PIN,
+            AUDIO_CODEC_ES8311_ADDR,
+            AUDIO_CODEC_ES7210_ADDR,
+            AUDIO_INPUT_REFERENCE,
+            35.0f,  // Physical MIC1 gain
+            2,      // Physical MIC3 is the playback reference input
+            0.0f);  // reference_gain
         return &audio_codec;
     }
 

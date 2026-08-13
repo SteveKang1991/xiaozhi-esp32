@@ -46,7 +46,7 @@ private:
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
     Esp32Camera* camera_;
-    bool aec_device = false;
+    bool aec_device = true;
 
     void InitializePowerManager() {
         power_manager_ = new PowerManager(GPIO_NUM_11);
@@ -189,6 +189,10 @@ private:
                 aec_device = app.GetAecMode() == kAecOnDeviceSide ? true : false;
                 Settings settings("aecMode", true);
                 settings.SetBool("aec_device", aec_device);
+
+                auto codec = GetAudioCodec();
+                auto volume = codec->output_volume();
+                codec->SetOutputVolume(volume);
             }
             #endif
         });
@@ -260,12 +264,12 @@ public:
             GetBacklight()->RestoreBrightness();
         }  
 
-        #if CONFIG_USE_DEVICE_AEC
+        /**#if CONFIG_USE_DEVICE_AEC
         Settings settings("aecMode", false);
         aec_device = settings.GetBool("aec_device", aec_device);
         auto& app = Application::GetInstance();
         app.SetAecMode(aec_device ? kAecOnDeviceSide : kAecOff);
-        #endif
+        #endif**/
     }
 
     /**virtual Led* GetLed() override {
@@ -286,7 +290,10 @@ public:
             AUDIO_CODEC_PA_PIN,
             AUDIO_CODEC_ES8311_ADDR,
             AUDIO_CODEC_ES7210_ADDR,
-            AUDIO_INPUT_REFERENCE);
+            AUDIO_INPUT_REFERENCE,
+            35.0f,  // Physical MIC1 gain
+            2,      // Physical MIC3 is the playback reference input
+            0.0f);  // reference_gain
         return &audio_codec;
     }
 
