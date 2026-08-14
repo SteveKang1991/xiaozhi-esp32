@@ -344,7 +344,7 @@ public:
             AUDIO_CODEC_ES8311_ADDR,
             AUDIO_CODEC_ES7210_ADDR,
             AUDIO_INPUT_REFERENCE,
-            35.0f,  // Physical MIC1 gain
+            28.0f,  // Physical MIC1 gain
             2,      // Physical MIC3 is the playback reference input
             0.0f);  // reference_gain
         return &audio_codec;

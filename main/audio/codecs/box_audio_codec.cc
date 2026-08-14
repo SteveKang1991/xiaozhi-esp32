@@ -188,7 +188,7 @@ void BoxAudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_
 void BoxAudioCodec::SetOutputVolume(int volume) {
     auto& app = Application::GetInstance();
     if (app.GetAecMode() == kAecOnDeviceSide) {
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume*0.8f));
+        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume*0.7f));
     }
     else {
         ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume));
@@ -245,7 +245,7 @@ void BoxAudioCodec::EnableOutput(bool enable) {
         ESP_ERROR_CHECK(esp_codec_dev_open(output_dev_, &fs));
         auto& app = Application::GetInstance();
         if (app.GetAecMode() == kAecOnDeviceSide) {
-            ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_*0.8f));
+            ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_*0.7f));
         }
         else {
             ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_));
