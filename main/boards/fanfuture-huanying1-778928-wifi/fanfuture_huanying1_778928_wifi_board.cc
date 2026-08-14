@@ -40,6 +40,7 @@ private:
     i2c_master_bus_handle_t i2c_bus_;
     Button boot_button_;
     Button mode_button_;
+    Button io_button_;
     Display* display_;
     PowerSaveTimer* power_save_timer_;
     PowerManager* power_manager_;
@@ -47,6 +48,7 @@ private:
     esp_lcd_panel_handle_t panel_ = nullptr;
     Esp32Camera* camera_;
     bool aec_device = true;
+    int volume_direction_ = -1; // io_button 默认减小方向，撞到边界时反向
 
     void InitializePowerManager() {
         power_manager_ = new PowerManager(GPIO_NUM_11);
@@ -196,6 +198,21 @@ private:
             }
             #endif
         });
+
+        io_button_.OnClick([this]() {
+            power_save_timer_->WakeUp();
+            auto codec = GetAudioCodec();
+            auto volume = codec->output_volume() + volume_direction_ * 10;
+            if (volume <= 0) {
+                volume = 0;
+                volume_direction_ = 1; // 撞到 0，反向增大
+            } else if (volume >= 100) {
+                volume = 100;
+                volume_direction_ = -1; // 撞到 100，反向减小
+            }
+            codec->SetOutputVolume(volume);
+            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume));
+        });
     }
 
     // 物联网初始化，添加对 AI 可见设备
@@ -250,7 +267,8 @@ private:
 public:
     FanFutureHuanying1778928WiFiBoard() :
         boot_button_(BOOT_BUTTON_GPIO),
-        mode_button_(MODE_BUTTON_GPIO) {
+        mode_button_(MODE_BUTTON_GPIO),
+        io_button_(IO_BUTTON_GPIO) {
         InitializePowerManager();
         InitializePowerSaveTimer();
         InitializeI2c();

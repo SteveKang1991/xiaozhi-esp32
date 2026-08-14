@@ -26,6 +26,7 @@
 #define MODE_BUTTON_GPIO          GPIO_NUM_12  // Mode按钮引脚
 //#define VOLUME_UP_BUTTON_GPIO     GPIO_NUM_12  // 音量增加按钮引脚
 //#define VOLUME_DOWN_BUTTON_GPIO   GPIO_NUM_11  // 音量减少按钮引脚
+#define IO_BUTTON_GPIO            GPIO_NUM_9     // IO按钮引脚
 
 #define DISPLAY_BACKLIGHT_PIN GPIO_NUM_8     // 显示屏背光控制引脚
 #define DISPLAY_MOSI_PIN      GPIO_NUM_16     // 显示屏 MOSI（主出从入）引脚，用于数据传输
