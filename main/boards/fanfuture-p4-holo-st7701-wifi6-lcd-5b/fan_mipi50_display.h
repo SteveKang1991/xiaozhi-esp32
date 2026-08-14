@@ -657,8 +657,13 @@ private:
         lv_obj_set_scrollbar_mode(chat_message_label_, LV_SCROLLBAR_MODE_OFF);
         lv_obj_set_scroll_dir(chat_message_label_, LV_DIR_VER);
         lv_obj_set_size(chat_message_label_, 24, (lv_coord_t)(height_ - 300));
-        /* container 必须透明，不能设 bg_color — 否则整块黑底会重叠视频画面。 */
-        lv_obj_set_style_bg_opa(chat_message_label_, LV_OPA_TRANSP, 0);
+        /* 根因修复：container 设不透明黑色背景。
+         * 之前 LV_OPA_TRANSP 让旧文字像素直接画到 MJPEG 视频帧上,
+         * 文字内容变化时只有被新字符覆盖的区域重绘,旧字符残留。
+         * 不透明背景保证 container 每帧重绘时整个矩形区域被清屏,旧字符全部消失。
+         * 视觉效果:字幕区是窄黑条,字浮在黑条上(类似卡拉OK字幕)。 */
+        lv_obj_set_style_bg_color(chat_message_label_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(chat_message_label_, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(chat_message_label_, 0, 0);
         lv_obj_set_style_pad_all(chat_message_label_, 0, 0);
         /* LV_ALIGN_LEFT_MID: 左边缘对齐到屏左 x=0，垂直居中 → 视觉位置 x=0..20, y=150..704。 */
@@ -720,11 +725,12 @@ inline void FanMIPI50Display::SetChatMessage(const char* role, const char* conte
     }
     if (content == nullptr || content[0] == '\0') {
         lv_label_set_text(chat_message_inner_label_, "");
-        last_chat_content_.clear();
-        /* 立即停止任何进行中的滚动动画（防止 SetChatMessage("") 后还在继续滚动） */
+        /* 不透明背景的 container 会在下次重绘时自动清空整个字幕区域,
+         * 旧字符像素不再可能残留 — 不需要 scroll_to_y 1->0 同步等待。 */
         static lv_anim_t s_scroll_anim;
         lv_anim_delete(&s_scroll_anim, nullptr);
         lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
+        last_chat_content_.clear();
         if (bottom_bar_ != nullptr) {
             lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
         }
@@ -739,18 +745,11 @@ inline void FanMIPI50Display::SetChatMessage(const char* role, const char* conte
     }
     last_chat_content_ = content;
 
-    /* 关键：先强制删除旧滚动动画 + scroll_y 归零。
-     * 上一句若有滚动动画停在 scroll_y=N，短文本的 content_h 远小于 container_h，
-     * 若不归零，inner label 会被向下推到不可见区域，留下"上半部分第2句、下半部分第1句"的残影。 */
+    /* 停止旧滚动动画 — 不透明背景保证 scroll_y 变化时整个区域被清屏。 */
     {
         static lv_anim_t s_scroll_anim;
         lv_anim_delete(&s_scroll_anim, nullptr);
-        lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
     }
-
-    /* 先清空旧文本，避免短文本接长文本时残留上半部分 */
-    lv_label_set_text(chat_message_inner_label_, "");
-
     /* 按 UTF-8 字符拆分：每个字符后插一个 '\n'。 */
     std::string in(content);
     std::string out;
@@ -782,16 +781,8 @@ inline void FanMIPI50Display::SetChatMessage(const char* role, const char* conte
     lv_coord_t content_h = lv_obj_get_height(chat_message_inner_label_);
     lv_coord_t container_h = lv_obj_get_height(chat_message_label_);
 
-    /**ESP_LOGI(FAN_MIPI50_DISPLAY_TAG,
-             "SetChatMessage: content_h=%d container_h=%d (text chars=%u)",
-             (int)content_h, (int)container_h, (unsigned)out.size());**/
-
     if (content_h <= container_h) {
-        /* 文本短，不滚动，定位到顶（content 顶部对齐 container 顶部）。 */
         lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
-        /* 再次强制 layout：inner label 高度已经从长文本（如 800）收缩到短文本（20），
-         * 但 container 的 scroll_y 可能仍停留在旧动画末帧；若不再次刷新，残影会停留。 */
-        lv_obj_update_layout(chat_message_label_);
         if (bottom_bar_ != nullptr && !hide_subtitle_) {
             lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
         }
@@ -807,14 +798,19 @@ inline void FanMIPI50Display::SetChatMessage(const char* role, const char* conte
     int total_chars = content_h / 20;
     int extra_chars = total_chars - chars_per_screen;
     if (extra_chars < 1) extra_chars = 1;
-    uint32_t duration_ms = (uint32_t)(extra_chars * 400);  // 400ms/字符
+    /* 总时长根据像素距离线性计算，20px/s 的速度。
+     * 之前 400ms/字符导致单次滚动最多 60s，期间每帧都触发 layout。
+     * 用像素距离算时长使得时长正比于实际滚动距离，减少动画总帧数。 */
+    uint32_t duration_ms = (uint32_t)(scroll_range_px * 1000 / 20);  // 20px/s
     if (duration_ms < 2000) duration_ms = 2000;
-    if (duration_ms > 60000) duration_ms = 60000;
+    if (duration_ms > 30000) duration_ms = 30000;
 
-    /* 先归零：若之前在滚动，确保从 0 开始。 */
+    /* 先归零：若之前在滚动,确保从 0 开始。 */
     lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
 
-    /* exec_cb: 每帧直接把 v 写到 container 的 scroll_y（线性、单次、动画到底后停）。 */
+    /* exec_cb: 每帧直接把 v 写到 container 的 scroll_y（线性、单次、动画到底后停）。
+     * 用 lv_obj_scroll_to_y(..., LV_ANIM_OFF) 替代带动画版本 — 每帧直接跳到 v 位置,
+     * 不启动新动画，CPU 开销小一个数量级。 */
     static lv_anim_t s_scroll_anim;
     lv_anim_delete(&s_scroll_anim, nullptr);
     lv_anim_init(&s_scroll_anim);
@@ -835,19 +831,26 @@ inline void FanMIPI50Display::SetChatMessage(const char* role, const char* conte
 }
 
 /* 清空纵向字幕：基类 ClearChatMessages 默认调 lv_label_set_text(chat_message_label_, "")，
- * 但 chat_message_label_ 实际上是 container obj，重写后改清 inner label。 */
+ * 但 chat_message_label_ 实际上是 container obj，重写后改清 inner label。
+ * 进入 idle 状态时调用此函数，确保旧字幕完全清除不留残影。 */
 inline void FanMIPI50Display::ClearChatMessages() {
     DisplayLockGuard lock(this);
     if (chat_message_inner_label_ != nullptr) {
         lv_label_set_text(chat_message_inner_label_, "");
+        lv_obj_update_layout(chat_message_inner_label_);
     }
     if (chat_message_label_ != nullptr) {
+        static lv_anim_t s_scroll_anim;
+        lv_anim_delete(&s_scroll_anim, nullptr);
         lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
     }
     last_chat_content_.clear();
     if (bottom_bar_ != nullptr) {
         lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
     }
+    /* 强制立即 flush 一次 — MJPEG 持锁期间 LVGL 常规 timer 任务被饿死,
+     * 单纯改 LVGL 内部对象状态不会立即画到 LCD,需要在这里主动 push 一帧。 */
+    lv_refr_now(nullptr);
 }
 
 /* 音乐封面：音乐播放时覆盖 MJPEG ROI 区域。

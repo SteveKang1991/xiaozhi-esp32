@@ -1413,9 +1413,11 @@ void Application::HandleStateChangedEvent() {
                 // 非音乐播放：隐藏音乐封面，恢复 idle 角色动画
                 display->ShowMusicCover(false, "");
                 display->SetStatus(Lang::Strings::STANDBY);
-                display->ClearChatMessages();
                 display->SetRoleAnimation("idle");
             }
+            /* 任何回到 idle 的转场都清空字幕(也包括音乐播放路径,
+             * 否则播放恢复后仍能看到上一次 AI 句子末段的残留)。 */
+            display->ClearChatMessages();
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             // 主动确保 codec input 已启用（唤醒词检测需要录音）
@@ -1435,6 +1437,8 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetRoleAnimation("listen");
+            /* speak -> listen 转场时清掉上一句 AI 字幕,避免末尾字符残影 */
+            display->ClearChatMessages();
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
