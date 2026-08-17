@@ -1031,6 +1031,10 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this, display]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
+                        /* 关键修复：等待本地播放队列真正排空后再离开 Speaking。
+                         * 否则 tts stop 走 MQTT 到达时,UDP 末尾音频包可能还在路上 /
+                         * 在 audio_decode_queue_ 里尚未播放,导致最后一个字只听到一半。 */
+                        audio_service_.WaitForPlaybackQueueEmpty();
                         if (listening_mode_ == kListeningModeManualStop) {
                             display->SetChatMessage("system", "");
                             SetDeviceState(kDeviceStateIdle);
@@ -1367,13 +1371,12 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
 #if CONFIG_SEND_WAKE_WORD_DATA
-    // 先发送唤醒词元数据，让服务器知道接下来是唤醒词音频
-    // 否则服务器可能先把音频发给ASR识别，导致误识别
-    protocol_->SendWakeWordDetected(wake_word);
-    // 然后发送唤醒词音频数据
+    // Encode and send the wake word data to the server
     while (auto packet = audio_service_.PopWakeWordPacket()) {
         protocol_->SendAudio(std::move(packet));
     }
+    // Set the chat state to wake word detected
+    protocol_->SendWakeWordDetected(wake_word);
     SetListeningMode(GetDefaultListeningMode());
 #else
     // Set flag to play popup sound after state changes to listening
@@ -1476,6 +1479,11 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
+            /* 等待 playback queue 排空后再 reset decoder。
+             * 否则 tts stop 触发 speaking->listening 时,ResetDecoder() 会立即清空
+             * playback queue,导致末尾音频包(还在路上/排队中的)被丢弃,
+             * 表现为最后一个字只听到一半就被切断。 */
+            audio_service_.WaitForPlaybackQueueEmpty();
             audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:
