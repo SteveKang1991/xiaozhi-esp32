@@ -57,6 +57,10 @@ Application::~Application() {
         esp_timer_stop(clock_timer_handle_);
         esp_timer_delete(clock_timer_handle_);
     }
+    if (tts_stop_grace_timer_ != nullptr) {
+        esp_timer_stop(tts_stop_grace_timer_);
+        esp_timer_delete(tts_stop_grace_timer_);
+    }
     vEventGroupDelete(event_group_);
 }
 
@@ -996,7 +1000,10 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
+        /* 关键修复:tts stop 触发 SetDeviceState(Listening) 后到 grace 窗口结束之前,
+         * 仍然接受 UDP 音频帧,确保服务器估算提前导致的末帧不被丢弃。
+         * 正常情况下 Listening 收到的包应当是麦克风上传/历史数据,不应当入解码队列。 */
+        if (GetDeviceState() == kDeviceStateSpeaking || tts_stop_grace_accept_audio_) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
@@ -1031,10 +1038,28 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this, display]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
-                        /* 关键修复：等待本地播放队列真正排空后再离开 Speaking。
-                         * 否则 tts stop 走 MQTT 到达时,UDP 末尾音频包可能还在路上 /
-                         * 在 audio_decode_queue_ 里尚未播放,导致最后一个字只听到一半。 */
+                        /* 关键修复：tts stop (MQTT) 与 UDP 末帧不同通道异步,
+                         * stop 可能早到几十~几百 ms 导致末帧被错过 Speaking 状态丢弃。
+                         * 开启 400ms "末帧缓冲窗口":窗口期间即使 state 已转 Listening,
+                         * OnIncomingAudio 仍然把 UDP 帧入队播放。
+                         * 配合之前的 WaitForPlaybackQueueEmpty 保证播放完整。 */
                         audio_service_.WaitForPlaybackQueueEmpty();
+                        tts_stop_grace_accept_audio_ = true;
+                        if (tts_stop_grace_timer_ == nullptr) {
+                            esp_timer_create_args_t grace_args = {
+                                .callback = [](void* arg) {
+                                    Application* app = (Application*)arg;
+                                    app->tts_stop_grace_accept_audio_ = false;
+                                },
+                                .arg = this,
+                                .dispatch_method = ESP_TIMER_TASK,
+                                .name = "tts_stop_grace",
+                                .skip_unhandled_events = true,
+                            };
+                            esp_timer_create(&grace_args, &tts_stop_grace_timer_);
+                        }
+                        esp_timer_stop(tts_stop_grace_timer_);
+                        esp_timer_start_once(tts_stop_grace_timer_, 400000);  // 400ms
                         if (listening_mode_ == kListeningModeManualStop) {
                             display->SetChatMessage("system", "");
                             SetDeviceState(kDeviceStateIdle);
@@ -1479,11 +1504,9 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
-            /* 等待 playback queue 排空后再 reset decoder。
-             * 否则 tts stop 触发 speaking->listening 时,ResetDecoder() 会立即清空
-             * playback queue,导致末尾音频包(还在路上/排队中的)被丢弃,
-             * 表现为最后一个字只听到一半就被切断。 */
-            audio_service_.WaitForPlaybackQueueEmpty();
+            /* 复位解码器:进入 Speaking 时主动清空解码器状态,避免上一轮唤醒词/音乐的
+             * 残留包混入新一句 TTS 导致第一帧噪声。ResetDecoder 不会清掉正在播放的
+             * 任务,只在 idle/connecting→speaking 这条路径上有意义。 */
             audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:

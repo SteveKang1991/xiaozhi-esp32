@@ -145,6 +145,15 @@ private:
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
+    /* 关键修复:tts stop (MQTT) 与 UDP 末帧走不同通道、不同任务、不同延迟。
+     * 服务器按"播放时长 + 网络延迟"估算 stop 发送时机,实际可能早到几十~几百 ms,
+     * 导致 stop 触发 SetDeviceState(Listening) 之后才到达的 UDP 末帧被 OnIncomingAudio
+     * 的状态检查直接丢弃,表现为末尾音/最后一个字被截断。
+     *
+     * 修复:在 tts stop 触发后,保留一段"末帧缓冲窗口",在此期间即使 state 已是 Listening,
+     * OnIncomingAudio 仍把 UDP 帧入队播放。窗口长度 400ms 足以覆盖 RTT 抖动 + 服务器 sleep 误差。 */
+    volatile bool tts_stop_grace_accept_audio_ = false;
+    esp_timer_handle_t tts_stop_grace_timer_ = nullptr;
 
 
     // Event handlers
