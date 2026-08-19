@@ -1,6 +1,7 @@
 #include "application.h"
 #include "board.h"
 #include "display.h"
+#include "upgrade_screen.h"
 #include "system_info.h"
 #include "audio_codec.h"
 #include "mqtt_protocol.h"
@@ -14,6 +15,7 @@
 
 #include <cstring>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
@@ -21,6 +23,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <cstdio>
+#include <cstdint>
 #include <unistd.h>
 
 #define TAG "Application"
@@ -520,6 +523,8 @@ void Application::CheckEmotionFiles() {
         return;
     }
 
+    auto display = Board::GetInstance().GetDisplay();
+
     if (!EnsureEmotionDir()) {
         ESP_LOGW(kEmotionTag, "Emotion directory unavailable, skip sync");
         return;
@@ -549,7 +554,6 @@ void Application::CheckEmotionFiles() {
     // 服务器返回空列表（用户已删除所有角色动画），清三个角色文件
     if (fetch_result.emotions.empty()) {
         // 构造三个角色文件的本地路径，确保即使服务器没有，CleanOrphan 也能找到并删除旧的
-        auto display = Board::GetInstance().GetDisplay();
         int w = display ? display->width() : 0;
         int h = display ? display->height() : 0;
         if (w <= 0) w = 240;
@@ -601,14 +605,38 @@ void Application::CheckEmotionFiles() {
         return;
     }
 
-    // 确有需要下载的，显示下载提示
-    auto display = Board::GetInstance().GetDisplay();
-    display->SetStatus(Lang::Strings::DOWNLOADING_EMOTIONS);
-    display->SetEmotion("download");
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    // 显示全屏下载界面
+    UpgradeScreen::Show(Lang::Strings::DOWNLOADING_EMOTIONS, "");
+    
+    SetDeviceState(kDeviceStateUpgrading);
+
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    audio_service_.Stop();
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     // 重新遍历，实际下载
     download_count = 0;
+    // 累计下载字节, 用于驱动 UI 进度条
+    size_t bytes_done_total = 0;
+    size_t bytes_total_sum = 0;
+    size_t latest_speed_bps = 0;
+    // 先按 info.size 算出待下载总字节（已存在的跳过）
+    for (const auto& info : emotions) {
+        if (info.type.empty() || info.url.empty()) continue;
+        int width = info.width > 0 ? info.width : 240;
+        int height = info.height > 0 ? info.height : 290;
+        std::string local_path = MakeEmotionLocalPath(info.type, width, height);
+        struct stat st = {};
+        if (stat(local_path.c_str(), &st) == 0 && st.st_size > 0 && st.st_size == (off_t)info.size) {
+            std::string local_md5 = MD5::Calculate(local_path);
+            if (!local_md5.empty() && local_md5 == info.hash) {
+                continue;
+            }
+        }
+        bytes_total_sum += static_cast<size_t>(info.size);
+    }
+
     for (auto& info : emotions) {
         if (info.type.empty() || info.url.empty()) {
             continue;
@@ -631,22 +659,49 @@ void Application::CheckEmotionFiles() {
         download_count++;
         char progress_msg[64];
         snprintf(progress_msg, sizeof(progress_msg), Lang::Strings::DOWNLOADING_EMOTION_PROGRESS, download_count, total_count);
-        display->SetChatMessage("system", progress_msg);
+        UpgradeScreen::SetStatusMessage(progress_msg);
 
-        ProcessEmotionFile(info);
+        auto per_file_cb = [&](size_t got_bytes, size_t file_total, size_t speed_bps) {
+            latest_speed_bps = speed_bps;
+            // 若 Content-Length 不可知, 用 expected_size 补上
+            size_t known_total = file_total > 0 ? file_total : static_cast<size_t>(info.size);
+            size_t display_done = bytes_done_total + got_bytes;
+            size_t display_total = bytes_total_sum;
+            int progress = total_count > 0 ? (download_count * 100 / total_count) : 100;
+            if (display_total > 0) {
+                int byte_pct = static_cast<int>(display_done * 100ULL / display_total);
+                if (byte_pct < progress) progress = byte_pct;
+            }
+            (void)known_total;
+            UpgradeScreen::Update(progress, display_done, display_total, speed_bps);
+        };
+
+        size_t file_start_bytes = bytes_done_total;
+        ProcessEmotionFile(info, per_file_cb);
+        // 把这个文件实际下载的字节数加到累计里
+        struct stat st2 = {};
+        if (stat(info.local_path.c_str(), &st2) == 0) {
+            bytes_done_total = file_start_bytes + static_cast<size_t>(st2.st_size);
+        }
         valid_paths.push_back(info.local_path);
+
+        int progress = total_count > 0 ? (download_count * 100 / total_count) : 100;
+        UpgradeScreen::Update(progress, bytes_done_total, bytes_total_sum, latest_speed_bps);
     }
 
     // 清理孤儿文件
     CleanOrphanEmotionFiles(valid_paths);
 
     // 下载完成
+    UpgradeScreen::Dismiss();
+    audio_service_.Start();
+    board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
     display->SetStatus(Lang::Strings::EMOTION_SYNC_COMPLETE);
     display->SetChatMessage("system", Lang::Strings::EMOTION_SYNC_COMPLETE);
     vTaskDelay(pdMS_TO_TICKS(500));
 }
 
-void Application::ProcessEmotionFile(const EmotionInfo& info) {
+void Application::ProcessEmotionFile(const EmotionInfo& info, DownloadProgressCallback progress_cb) {
     const std::string& local = info.local_path;
 
     // 检查本地是否已存在
@@ -663,7 +718,7 @@ void Application::ProcessEmotionFile(const EmotionInfo& info) {
         unlink(local.c_str());
     }
 
-    if (!DownloadEmotionFile(info.url, local, info.size)) {
+    if (!DownloadEmotionFile(info.url, local, info.size, progress_cb)) {
         ESP_LOGE(kEmotionTag, "Failed to download emotion: %s", info.url.c_str());
         return;
     }
@@ -678,7 +733,8 @@ void Application::ProcessEmotionFile(const EmotionInfo& info) {
     ESP_LOGI(kEmotionTag, "Emotion ready: %s", local.c_str());
 }
 
-bool Application::DownloadEmotionFile(const std::string& url, const std::string& local_path, size_t expected_size) {
+bool Application::DownloadEmotionFile(const std::string& url, const std::string& local_path,
+                                       size_t expected_size, DownloadProgressCallback progress_cb) {
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
     auto http = network->CreateHttp(0);
@@ -695,6 +751,23 @@ bool Application::DownloadEmotionFile(const std::string& url, const std::string&
         return false;
     }
 
+    // Content-Length 优先, 没有则用 expected_size
+    size_t content_length = expected_size;
+    {
+        std::string cl = http->GetResponseHeader("Content-Length");
+        if (!cl.empty()) {
+            char* end = nullptr;
+            unsigned long long v = strtoull(cl.c_str(), &end, 10);
+            if (end != cl.c_str() && v > 0) {
+                content_length = static_cast<size_t>(v);
+            }
+        }
+        if (content_length == 0) {
+            size_t bl = http->GetBodyLength();
+            if (bl > 0) content_length = bl;
+        }
+    }
+
     // 先下载到 .tmp 再 rename，避免断电/中断导致损坏
     std::string tmp_path = local_path + ".tmp";
     FILE* fp = fopen(tmp_path.c_str(), "wb");
@@ -707,6 +780,9 @@ bool Application::DownloadEmotionFile(const std::string& url, const std::string&
     char buffer[4096];
     int read;
     size_t total = 0;
+    int64_t last_report_us = esp_timer_get_time();
+    size_t last_report_bytes = 0;
+    size_t current_speed_bps = 0;
     while ((read = http->Read(buffer, sizeof(buffer))) > 0) {
         if (fwrite(buffer, 1, read, fp) != (size_t)read) {
             ESP_LOGE(kEmotionTag, "Write failed");
@@ -716,9 +792,26 @@ bool Application::DownloadEmotionFile(const std::string& url, const std::string&
             return false;
         }
         total += read;
+
+        if (progress_cb) {
+            const int64_t now_us = esp_timer_get_time();
+            const int64_t delta_us = now_us - last_report_us;
+            if (delta_us >= 250000) {
+                const size_t delta_bytes = total - last_report_bytes;
+                current_speed_bps = static_cast<size_t>(
+                    (static_cast<uint64_t>(delta_bytes) * 1000000ULL) / delta_us);
+                last_report_us = now_us;
+                last_report_bytes = total;
+                progress_cb(total, content_length, current_speed_bps);
+            }
+        }
     }
     fclose(fp);
     http->Close();
+
+    if (progress_cb) {
+        progress_cb(total, content_length, current_speed_bps);
+    }
 
     if (expected_size > 0 && total != expected_size) {
         ESP_LOGE(kEmotionTag, "Size mismatch: got %u, expect %u", (unsigned)total, (unsigned)expected_size);
@@ -811,14 +904,33 @@ void Application::CheckSDAssetsFiles() {
         return;
     }
 
-    // 确有需要下载的，显示下载提示
-    if (display) {
-        display->SetStatus(Lang::Strings::DOWNLOADING_SD_ASSETS);
-        vTaskDelay(pdMS_TO_TICKS(1500));
-    }
+    // 显示全屏下载界面
+    UpgradeScreen::Show(Lang::Strings::DOWNLOADING_SD_ASSETS, "");
+
+    auto& board = Board::GetInstance();
+    SetDeviceState(kDeviceStateUpgrading);
+
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    audio_service_.Stop();
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     // 实际下载
     download_count = 0;
+    // 累计下载字节, 用于驱动 UI 进度条
+    size_t bytes_done_total = 0;
+    size_t bytes_total_sum = 0;
+    size_t latest_speed_bps = 0;
+
+    // 预扫一遍, 估算所有要下载的文件大小（HTTP 不可知时用 0）
+    for (const auto& info : fetch_result.files) {
+        if (info.path.empty() || info.url.empty()) continue;
+        std::string local_path = info.path;
+        struct stat st = {};
+        if (stat(local_path.c_str(), &st) == 0 && st.st_size > 0) continue;
+        // 这里无法预知真实大小, 给个经验值（设为 0 表示未知, 不影响进度条计算）
+        bytes_total_sum += static_cast<size_t>(info.size > 0 ? info.size : 0);
+    }
+
     for (const auto& info : fetch_result.files) {
         if (info.path.empty() || info.url.empty()) {
             continue;
@@ -831,14 +943,35 @@ void Application::CheckSDAssetsFiles() {
         }
 
         download_count++;
-        if (display) {
-            char progress_msg[64];
-            snprintf(progress_msg, sizeof(progress_msg), Lang::Strings::DOWNLOADING_SD_ASSETS_PROGRESS,
-                     download_count, total_count);
-            display->SetChatMessage("system", progress_msg);
-        }
+        char progress_msg[64];
+        snprintf(progress_msg, sizeof(progress_msg), Lang::Strings::DOWNLOADING_SD_ASSETS_PROGRESS,
+                 download_count, total_count);
+        UpgradeScreen::SetStatusMessage(progress_msg);
 
-        if (DownloadSDAssetsFile(info.url, local_path)) {
+        // 回调里: 累加已下载字节并刷新 UI
+        auto per_file_cb = [&](size_t got_bytes, size_t /*file_total*/, size_t speed_bps) {
+            // 这里 got_bytes 是当前文件的累计, 我们用 (bytes_done_total + got_bytes) 作为 UI 显示
+            latest_speed_bps = speed_bps;
+            size_t display_done = bytes_done_total + got_bytes;
+            size_t display_total = bytes_total_sum;
+            int progress = total_count > 0 ? (download_count * 100 / total_count) : 100;
+            // bytes 维度进度: 当确切知道大小时算字节进度
+            if (display_total > 0) {
+                int byte_pct = static_cast<int>(display_done * 100ULL / display_total);
+                if (byte_pct < progress) progress = byte_pct;
+            }
+            UpgradeScreen::Update(progress, display_done, display_total, speed_bps);
+        };
+
+        if (DownloadSDAssetsFile(info.url, local_path, per_file_cb)) {
+            // 把这个文件实际下载的字节数加到累计里
+            // 重新 stat 文件以获得真实大小
+            struct stat st2 = {};
+            if (stat(local_path.c_str(), &st2) == 0) {
+                bytes_done_total += static_cast<size_t>(st2.st_size);
+            }
+            int progress = total_count > 0 ? (download_count * 100 / total_count) : 100;
+            UpgradeScreen::Update(progress, bytes_done_total, bytes_total_sum, latest_speed_bps);
             ESP_LOGI(kSDAssetsTag, "SD asset ready: %s", local_path.c_str());
         } else {
             ESP_LOGE(kSDAssetsTag, "Failed to download SD asset: %s -> %s",
@@ -846,6 +979,9 @@ void Application::CheckSDAssetsFiles() {
         }
     }
 
+    UpgradeScreen::Dismiss();
+    audio_service_.Start();
+    board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
     if (display) {
         display->SetStatus(Lang::Strings::SD_ASSETS_SYNC_COMPLETE);
         display->SetChatMessage("system", Lang::Strings::SD_ASSETS_SYNC_COMPLETE);
@@ -859,7 +995,8 @@ void Application::CheckSDAssetsFiles() {
  * - 失败时清理 .tmp
  * - 不做 MD5 校验（按需求保持简单）
  */
-bool Application::DownloadSDAssetsFile(const std::string& url, const std::string& local_path) {
+bool Application::DownloadSDAssetsFile(const std::string& url, const std::string& local_path,
+                                       DownloadProgressCallback progress_cb) {
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
     auto http = network->CreateHttp(0);
@@ -874,6 +1011,24 @@ bool Application::DownloadSDAssetsFile(const std::string& url, const std::string
         ESP_LOGE(kSDAssetsTag, "HTTP status %d for %s", status, url.c_str());
         http->Close();
         return false;
+    }
+
+    // 文件总字节数, 不确定时为 0
+    size_t content_length = 0;
+    {
+        std::string cl = http->GetResponseHeader("Content-Length");
+        if (!cl.empty()) {
+            char* end = nullptr;
+            unsigned long long v = strtoull(cl.c_str(), &end, 10);
+            if (end != cl.c_str() && v > 0) {
+                content_length = static_cast<size_t>(v);
+            }
+        }
+        // 某些实现把长度直接放 GetBodyLength()
+        if (content_length == 0) {
+            size_t bl = http->GetBodyLength();
+            if (bl > 0) content_length = bl;
+        }
     }
 
     // 确保目标目录存在
@@ -908,6 +1063,10 @@ bool Application::DownloadSDAssetsFile(const std::string& url, const std::string
     char buffer[4096];
     int read;
     size_t total = 0;
+    // 网速统计: 每 ~256ms 触发一次回调
+    int64_t last_report_us = esp_timer_get_time();
+    size_t last_report_bytes = 0;
+    size_t current_speed_bps = 0;
     while ((read = http->Read(buffer, sizeof(buffer))) > 0) {
         if (fwrite(buffer, 1, read, fp) != (size_t)read) {
             ESP_LOGE(kSDAssetsTag, "Write failed for %s", tmp_path.c_str());
@@ -917,9 +1076,27 @@ bool Application::DownloadSDAssetsFile(const std::string& url, const std::string
             return false;
         }
         total += read;
+
+        if (progress_cb) {
+            const int64_t now_us = esp_timer_get_time();
+            const int64_t delta_us = now_us - last_report_us;
+            if (delta_us >= 250000) {  // 250ms
+                const size_t delta_bytes = total - last_report_bytes;
+                current_speed_bps = static_cast<size_t>(
+                    (static_cast<uint64_t>(delta_bytes) * 1000000ULL) / delta_us);
+                last_report_us = now_us;
+                last_report_bytes = total;
+                progress_cb(total, content_length, current_speed_bps);
+            }
+        }
     }
     fclose(fp);
     http->Close();
+
+    // 兜底再汇报一次最终值
+    if (progress_cb) {
+        progress_cb(total, content_length, current_speed_bps);
+    }
 
     if (total == 0) {
         ESP_LOGE(kSDAssetsTag, "Downloaded 0 bytes for %s", url.c_str());
@@ -1546,6 +1723,10 @@ ListeningMode Application::GetDefaultListeningMode() const {
 
 void Application::Reboot() {
     ESP_LOGI(TAG, "Rebooting...");
+    // 关闭背光,避免重启瞬间显示垃圾数据导致蓝屏闪烁
+    if (Backlight* bl = Board::GetInstance().GetBacklight()) {
+        bl->SetBrightness(0, false);
+    }
     // Disconnect the audio channel
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         protocol_->CloseAudioChannel();
@@ -1559,10 +1740,9 @@ void Application::Reboot() {
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
     auto& board = Board::GetInstance();
-    auto display = board.GetDisplay();
 
     std::string upgrade_url = url;
-    std::string version_info = version.empty() ? "(Manual upgrade)" : version;
+    std::string version_info = version.empty() ? "" : version.c_str();
 
     // Close audio channel if it's open
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
@@ -1571,39 +1751,39 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
     }
     ESP_LOGI(TAG, "Starting firmware upgrade from URL: %s", upgrade_url.c_str());
 
-    Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "download", Lang::Sounds::OGG_UPGRADE);
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    // Show upgrade screen — full-screen overlay that replaces all UI during upgrade.
+    // Shows title, version, progress bar, bytes, speed, and elapsed time.
+    UpgradeScreen::Show(Lang::Strings::OTA_UPGRADE, version_info.c_str());
 
     SetDeviceState(kDeviceStateUpgrading);
 
-    std::string message = std::string(Lang::Strings::NEW_VERSION) + version_info;
-    display->SetChatMessage("system", message.c_str());
+    audio_service_.PlaySound(Lang::Sounds::OGG_UPGRADE);
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
     audio_service_.Stop();
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(500));
 
-    bool upgrade_success = Ota::Upgrade(upgrade_url, [this, display](int progress, size_t speed) {
-        char buffer[32];
-        snprintf(buffer, sizeof(buffer), "%d%% %uKB/s", progress, speed / 1024);
-        Schedule([display, message = std::string(buffer)]() {
-            display->SetChatMessage("system", message.c_str());
-        });
+    // UpgradeScreen::Update dispatches UI updates via lv_async_call, so it is
+    // safe to call from the OTA download task (which is not the LVGL task).
+    bool upgrade_success = Ota::Upgrade(upgrade_url, [](int progress, size_t downloaded, size_t total, size_t speed) {
+        UpgradeScreen::Update(progress, downloaded, total, speed);
     });
 
     if (!upgrade_success) {
-        // Upgrade failed, restart audio service and continue running
+        // Upgrade failed, dismiss upgrade screen and show error
         ESP_LOGE(TAG, "Firmware upgrade failed, restarting audio service and continuing operation...");
-        audio_service_.Start(); // Restart audio service
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER); // Restore power save level
+        UpgradeScreen::Dismiss();
+        audio_service_.Start();
+        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Alert(Lang::Strings::ERROR, Lang::Strings::UPGRADE_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
         vTaskDelay(pdMS_TO_TICKS(3000));
         return false;
     } else {
-        // Upgrade success, reboot immediately
+        // Upgrade success — show completion on upgrade screen then reboot
         ESP_LOGI(TAG, "Firmware upgrade successful, rebooting...");
-        display->SetChatMessage("system", "Upgrade successful, rebooting...");
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Brief pause to show message
+        UpgradeScreen::SetStatusMessage("升级成功, 正在重启...");
+        vTaskDelay(pdMS_TO_TICKS(1000));
         Reboot();
         return true;
     }

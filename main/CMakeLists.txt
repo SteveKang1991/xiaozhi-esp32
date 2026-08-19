@@ -16,6 +16,7 @@ set(SOURCES "audio/audio_codec.cc"
             "display/display.cc"
             "display/lcd_display.cc"
             "display/oled_display.cc"
+            "display/upgrade_screen/upgrade_screen.cc"
             "display/lvgl_display/lvgl_display.cc"
             "display/emote_display.cc"
             "display/lvgl_display/emoji_collection.cc"
@@ -40,7 +41,7 @@ set(SOURCES "audio/audio_codec.cc"
             "utils/md5.cc"
             )
 
-set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "utils")
+set(INCLUDE_DIRS "." "display" "display/upgrade_screen" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "utils")
 
 # Add board common files
 list(APPEND SOURCES

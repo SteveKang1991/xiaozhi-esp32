@@ -2,6 +2,8 @@
 #include "system_info.h"
 #include "settings.h"
 #include "assets/lang_config.h"
+#include <esp_lvgl_port.h>
+#include <esp_timer.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -12,7 +14,6 @@
 #include <esp_app_format.h>
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
-#include <esp_heap_caps.h>
 #ifdef SOC_HMAC_SUPPORTED
 #include <esp_hmac.h>
 #endif
@@ -23,6 +24,131 @@
 #include <algorithm>
 
 #define TAG "Ota"
+
+namespace {
+
+/**
+ * LvglBurstLock - brief mutex acquisition used during download.
+ *
+ * Phase 0: We need to protect esp_ota_write() calls from LVGL flush callbacks,
+ * but we do NOT want to hold the lock continuously (that would block lv_timer_handler
+ * and prevent lv_async_call callbacks from running, freezing the OTA progress UI).
+ *
+ * This guard acquires the lock for a configurable burst, enough to cover a single
+ * esp_ota_write() (~hundreds of microseconds), then immediately releases it.
+ * After each burst, lv_timer_handler() gets a chance to process lv_async_call
+ * callbacks queued by OtaScreen::Update().
+ *
+ * Usage: for each HTTP-read burst, hold lock around the esp_ota_write call.
+ */
+class LvglBurstLock {
+public:
+    explicit LvglBurstLock(int timeout_ms = 10) : acquired_(false), timeout_ms_(timeout_ms) {
+        Acquire();
+    }
+    ~LvglBurstLock() { Release(); }
+
+    void Acquire() {
+        if (!acquired_ && lvgl_port_lock(timeout_ms_)) {
+            acquired_ = true;
+        }
+    }
+    void Release() {
+        if (acquired_) {
+            lvgl_port_unlock();
+            acquired_ = false;
+        }
+    }
+
+private:
+    bool acquired_;
+    int timeout_ms_;
+};
+
+/**
+ * LvglQueueDrain - stops the tick timer before a full pause.
+ *
+ * Phase 1: Before we begin holding the LVGL lock for the entire flash-write
+ * phase, we must stop the tick timer so lv_timer_handler() is never invoked.
+ *
+ * IMPORTANT: Do NOT call lv_timer_handler() here! lv_timer_handler() can
+ * trigger a new flush (lvgl_port_flush_callback) which blocks on a semaphore
+ * waiting for the DSI ISR. If that ISR hasn't fired yet (e.g. due to tick
+ * timer being stopped), calling lv_timer_handler() while holding the mutex
+ * deadlocks both tasks:
+ *   - OTA task: holds the mutex, waiting for lv_timer_handler() to return
+ *   - lvgl_port task: holds the mutex (wait-list), waiting for DSI ISR to give semaphore
+ *
+ * By skipping lv_timer_handler() entirely, we avoid this deadlock. Phase 2
+ * will retry the flush after acquiring the mutex — at that point the DSI ISR
+ * will have fired (timer was resumed) or the lock timeout will abort OTA.
+ */
+class LvglQueueDrain {
+public:
+    LvglQueueDrain() : timer_stopped_(false) {
+        if (lvgl_port_stop() == ESP_OK) {
+            timer_stopped_ = true;
+            ESP_LOGI(TAG, "Tick timer stopped (skipping drain — avoids flush deadlock)");
+        } else {
+            ESP_LOGW(TAG, "Failed to stop timer in drain");
+        }
+    }
+    ~LvglQueueDrain() {
+        // Timer is NOT resumed here — LvglOtaLock resumes it on success or failure.
+        // LvglOtaLock always calls lvgl_port_resume() in its destructor.
+    }
+    bool IsDrained() const { return timer_stopped_; }
+private:
+    bool timer_stopped_;
+};
+
+/**
+ * LvglOtaLock - full LVGL lock matching MetalioClaw4's pause behaviour.
+ *
+ * Phase 2: While esp_ota_write() is in progress, we MUST prevent lv_timer_handler
+ * from ever running, because even if the timer is stopped, lv_timer_handler()
+ * checks the flush pending flag and may trigger DSI DMA while MSPI is handling
+ * flash writes — this is the blue-screen race.
+ *
+ * This guard takes the recursive mutex and keeps it held for the entire Phase 2
+ * section.  The tick timer is also stopped so no timer fires.  The LVGL task
+ * is effectively paused.  On destruction, the mutex is released and the timer
+ * restarted.
+ *
+ * This is equivalent to esp_lv_adapter_pause(-1) in esp_lvgl_adapter.
+ */
+class LvglOtaLock {
+public:
+    LvglOtaLock() : locked_(false) {
+        // Stop tick timer first, before acquiring the lock.  This prevents
+        // the timer ISR from firing while we acquire the lock.
+        lvgl_port_stop();
+        // Now acquire the mutex — lvgl_port task will block immediately.
+        if (lvgl_port_lock(portMAX_DELAY)) {
+            locked_ = true;
+            ESP_LOGI(TAG, "LVGL fully locked (OTA Phase 2)");
+        } else {
+            ESP_LOGW(TAG, "LVGL lock failed, resuming timer");
+            lvgl_port_resume();
+        }
+    }
+
+    ~LvglOtaLock() {
+        if (locked_) {
+            lvgl_port_unlock();
+            locked_ = false;
+        }
+        lvgl_port_resume();
+        ESP_LOGI(TAG, "LVGL lock released, timer resumed");
+    }
+
+    bool IsLocked() const { return locked_; }
+
+private:
+    bool locked_;
+};
+
+}  // namespace
 
 
 Ota::Ota() {
@@ -264,7 +390,7 @@ void Ota::MarkCurrentVersionValid() {
     }
 }
 
-bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback) {
+bool Ota::Upgrade(const std::string& firmware_url, OtaProgressCallback callback) {
     ESP_LOGI(TAG, "Upgrading firmware from %s", firmware_url.c_str());
     esp_ota_handle_t update_handle = 0;
     auto update_partition = esp_ota_get_next_update_partition(NULL);
@@ -274,8 +400,14 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
     }
 
     ESP_LOGI(TAG, "Writing to partition %s at offset 0x%lx", update_partition->label, update_partition->address);
+
+    // Layout: esp_image_header(24) + esp_image_segment_header(8) + esp_app_desc(128) = 160
+    constexpr size_t kAppDescOffset = sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
+    constexpr size_t kMinHeaderSize = kAppDescOffset + sizeof(esp_app_desc_t);
+
     bool image_header_checked = false;
-    std::string image_header;
+    char pending_buf[1024];
+    size_t pending_len = 0;
 
     auto network = Board::GetInstance().GetNetwork();
     auto http = network->CreateHttp(0);
@@ -295,76 +427,102 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
         return false;
     }
 
-    constexpr size_t PAGE_SIZE = 4096;
-    char* buffer = (char*)heap_caps_malloc(PAGE_SIZE, MALLOC_CAP_INTERNAL);
-    if (buffer == nullptr) {
-        ESP_LOGE(TAG, "Failed to allocate buffer");
-        return false;
-    }
-
-    size_t buffer_offset = 0;  // Current data size in buffer
+    // Phase 0: download header.  512-byte stack buffer — short SPI flash burst per write.
+    char buffer[512];
     size_t total_read = 0, recent_read = 0;
     auto last_calc_time = esp_timer_get_time();
+
     while (true) {
-        int ret = http->Read(buffer + buffer_offset, PAGE_SIZE - buffer_offset);
+        int ret = http->Read(buffer, sizeof(buffer));
         if (ret < 0) {
             ESP_LOGE(TAG, "Failed to read HTTP data: %s", esp_err_to_name(ret));
-            heap_caps_free(buffer);
             return false;
         }
 
-        // Calculate speed and progress every second
         recent_read += ret;
         total_read += ret;
-        buffer_offset += ret;
+
+        // Report progress every second or on last chunk.
+        // Phase 0: lv_timer_handler runs normally, lv_async_call works → progress updates.
         if (esp_timer_get_time() - last_calc_time >= 1000000 || ret == 0) {
-            size_t progress = total_read * 100 / content_length;
-            ESP_LOGI(TAG, "Progress: %u%% (%u/%u), Speed: %uB/s", progress, total_read, content_length, recent_read);
+            size_t progress = content_length > 0 ? total_read * 100 / content_length : 0;
+            ESP_LOGI(TAG, "Progress: %u%% (%u/%u), Speed: %uB/s",
+                     progress, (unsigned)total_read, (unsigned)content_length, (unsigned)recent_read);
             if (callback) {
-                callback(progress, recent_read);
+                callback(progress, total_read, content_length, recent_read);
             }
             last_calc_time = esp_timer_get_time();
             recent_read = 0;
         }
 
-        if (!image_header_checked) {
-            image_header.append(buffer, buffer_offset);
-            if (image_header.size() >= sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t)) {
-                esp_app_desc_t new_app_info;
-                memcpy(&new_app_info, image_header.data() + sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t), sizeof(esp_app_desc_t));
+        if (ret == 0) {
+            break;
+        }
 
-                if (esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &update_handle)) {
-                    esp_ota_abort(update_handle);
-                    ESP_LOGE(TAG, "Failed to begin OTA");
-                    heap_caps_free(buffer);
+        // ── Phase 0: accumulate header bytes until esp_app_desc is complete ──
+        if (!image_header_checked) {
+            if (pending_len + static_cast<size_t>(ret) > sizeof(pending_buf)) {
+                ESP_LOGE(TAG, "Pending buffer overflow: %u + %d", (unsigned)pending_len, ret);
+                return false;
+            }
+            memcpy(pending_buf + pending_len, buffer, ret);
+            pending_len += ret;
+
+            if (pending_len >= (int)kMinHeaderSize) {
+                esp_app_desc_t new_app_info;
+                memcpy(&new_app_info, pending_buf + kAppDescOffset, sizeof(esp_app_desc_t));
+
+                auto current_version = esp_app_get_description()->version;
+                ESP_LOGI(TAG, "Current version: %s, New version: %s",
+                         current_version, new_app_info.version);
+
+                // ── Phase 1: stop LVGL tick timer ──
+                // We stop the tick timer here (no lv_timer_handler call — that
+                // would deadlock if a DSI flush is in-flight). The timer stays
+                // stopped until LvglOtaLock takes over.
+                ESP_LOGI(TAG, "Stopping LVGL tick timer (OTA Phase 1)...");
+                LvglQueueDrain drain;
+
+                // ── Phase 2: acquire LVGL lock ──
+                // LvglOtaLock stops the tick timer (idempotent), then acquires the
+                // LVGL mutex with portMAX_DELAY. lv_timer_handler() is blocked for
+                // the entire flash-write period — no DSI DMA during esp_ota_write.
+                LvglOtaLock lock;
+                if (!lock.IsLocked()) {
+                    ESP_LOGE(TAG, "Failed to acquire LVGL lock for Phase 2");
                     return false;
                 }
 
+                esp_err_t begin_err = esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &update_handle);
+                if (begin_err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to begin OTA: %s", esp_err_to_name(begin_err));
+                    return false;
+                }
+
+                // Write header to flash
+                auto err = esp_ota_write(update_handle, pending_buf, pending_len);
+                pending_len = 0;
+                if (err != ESP_OK) {
+                    esp_ota_abort(update_handle);
+                    ESP_LOGE(TAG, "Failed to write OTA header data: %s", esp_err_to_name(err));
+                    return false;
+                }
                 image_header_checked = true;
-                std::string().swap(image_header);
+                // lock stays in scope — LVGL fully paused for remaining flash writes
             }
+            continue;
         }
 
-        // Write to flash when buffer is full (4KB) or it's the last chunk
-        bool is_last_chunk = (ret == 0);
-        if (buffer_offset == PAGE_SIZE || (is_last_chunk && buffer_offset > 0)) {
-            auto err = esp_ota_write(update_handle, buffer, buffer_offset);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to write OTA data: %s", esp_err_to_name(err));
-                esp_ota_abort(update_handle);
-                heap_caps_free(buffer);
-                return false;
-            }
-
-            buffer_offset = 0;
-        }
-
-        if (is_last_chunk) {
-            break;
+        // ── Phase 2 (continued): write each HTTP chunk to flash ──
+        // lock is still in scope — LVGL mutex is held, timer is stopped.
+        auto err = esp_ota_write(update_handle, buffer, ret);
+        if (err != ESP_OK) {
+            esp_ota_abort(update_handle);
+            ESP_LOGE(TAG, "Failed to write OTA data: %s", esp_err_to_name(err));
+            return false;
         }
     }
-    http->Close();
-    heap_caps_free(buffer);
+    http->Close();  // lock exits scope here → mutex released, timer resumed
 
     esp_err_t err = esp_ota_end(update_handle);
     if (err != ESP_OK) {
@@ -386,8 +544,8 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
     return true;
 }
 
-bool Ota::StartUpgrade(std::function<void(int progress, size_t speed)> callback) {
-    return Upgrade(firmware_url_, callback);
+bool Ota::StartUpgrade(OtaProgressCallback callback) {
+    return Upgrade(firmware_url_, std::move(callback));
 }
 
 

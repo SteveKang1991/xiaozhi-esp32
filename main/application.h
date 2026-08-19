@@ -180,14 +180,17 @@ private:
     ListeningMode GetDefaultListeningMode() const;
 
     // 表情文件同步（开机阶段下载到 SD 卡）
+    using DownloadProgressCallback = std::function<void(size_t bytes_done, size_t bytes_total, size_t speed_bps)>;
     void CheckEmotionFiles();
-    void ProcessEmotionFile(const EmotionInfo& info);
+    void ProcessEmotionFile(const EmotionInfo& info, DownloadProgressCallback progress_cb = nullptr);
     void CleanOrphanEmotionFiles(const std::vector<std::string>& valid_names);
-    bool DownloadEmotionFile(const std::string& url, const std::string& local_path, size_t expected_size);
+    bool DownloadEmotionFile(const std::string& url, const std::string& local_path, size_t expected_size,
+                             DownloadProgressCallback progress_cb = nullptr);
 
     // SD 资源文件同步（音乐背景图 .bin 等），不做 MD5 校验、按文件名比对缺失即下载
     void CheckSDAssetsFiles();
-    bool DownloadSDAssetsFile(const std::string& url, const std::string& local_path);
+    bool DownloadSDAssetsFile(const std::string& url, const std::string& local_path,
+                              DownloadProgressCallback progress_cb = nullptr);
     
     // State change handler called by state machine
     void OnStateChanged(DeviceState old_state, DeviceState new_state);
