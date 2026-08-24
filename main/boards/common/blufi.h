@@ -109,10 +109,15 @@ private:
     void _reset_scan_state();
     static void _wifi_scan_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
                                          void *event_data);
+    void _do_scan_after_sta_start();
 
     static void _ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
                                   void *event_data);
+    static void _sta_disconnect_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
+                                              void *event_data);
     void _on_got_ip();
+    void _ensure_disconnect_handler_registered();
+    const char* _disconnect_reason_str(uint8_t reason);
 
     // These C-style functions are registered with ESP-IDF and call the corresponding instance
     // methods.
@@ -159,10 +164,14 @@ private:
     bool m_sta_got_ip;
     bool m_provisioned;
     bool m_deinited;
+    bool m_deiniting;  // prevents re-entrancy: set true at start of deinit(), false at end
     uint8_t m_sta_bssid[6]{};
     uint8_t m_sta_ssid[32]{};
     int m_sta_ssid_len;
     bool m_sta_is_connecting;
+    bool m_conn_success_sent = false;  // 标记CONN_SUCCESS是否已发送,避免_on_got_ip重复发送
+    bool m_conn_success_acked = false; // 标记手机是否已ACK(CONN_SUCCESS发出后收到手机任意请求即认为ACK)
+    int64_t m_conn_success_send_time = 0; // CONN_SUCCESS发送时的时间戳(微秒)
     esp_blufi_extra_info_t m_sta_conn_info{};
 
     // WiFi scan related
@@ -173,4 +182,7 @@ private:
     bool m_has_recent_scan_results = false;
     esp_event_handler_instance_t m_scan_handler_instance = nullptr;
     esp_event_handler_instance_t m_ip_handler_instance = nullptr;
+    esp_event_handler_instance_t m_disconnect_handler_instance = nullptr;
+    bool m_waiting_for_conn_result = false;  // 等待WiFi连接结果(用于密码错误检测)
+    uint8_t m_last_disconnect_reason = 0;
 };

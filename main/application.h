@@ -143,6 +143,7 @@ private:
     bool aborted_ = false;
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
+    bool first_boot_after_blufi_ = false;   // Flag to reboot after first OTA check following BluFi provisioning
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
     /* 关键修复:tts stop (MQTT) 与 UDP 末帧走不同通道、不同任务、不同延迟。

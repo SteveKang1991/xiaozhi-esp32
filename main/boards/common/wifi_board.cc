@@ -121,12 +121,11 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
         case NetworkEvent::Connected:
             // Stop timeout timer
             esp_timer_stop(connect_timer_);
-#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-            // make sure blufi resources has been released
-            Blufi::GetInstance().deinit();
-#endif
             in_config_mode_ = false;
             ESP_LOGI(TAG, "Connected to WiFi: %s", data.c_str());
+            // 注意: 不在这里调 Blufi::deinit()!
+            // Blufi 内部有自己的 keepalive task 负责等待手机ACK后再deinit
+            // 如果这里deinit,会导致CONN_SUCCESS通知发不出去,手机端永远收不到配网成功消息
             break;
         case NetworkEvent::Scanning:
             ESP_LOGI(TAG, "WiFi scanning");

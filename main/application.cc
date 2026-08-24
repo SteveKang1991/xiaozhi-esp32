@@ -276,6 +276,12 @@ void Application::HandleNetworkConnectedEvent() {
     auto state = GetDeviceState();
 
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
+        // Mark as first boot after BluFi if coming from wifi_configuring state
+        if (state == kDeviceStateWifiConfiguring) {
+            first_boot_after_blufi_ = true;
+            ESP_LOGI(TAG, "Network connected after BluFi provisioning, will reboot after OTA check");
+        }
+        
         // Network is ready, start activation
         SetDeviceState(kDeviceStateActivating);
         if (activation_task_handle_ != nullptr) {
@@ -451,6 +457,13 @@ void Application::CheckNewVersion() {
         }
         retry_count = 0;
         retry_delay = 10; // Reset retry delay
+
+        // Reboot after first OTA check following BluFi provisioning
+        if (first_boot_after_blufi_) {
+            ESP_LOGI(TAG, "First OTA check after BluFi completed, rebooting device...");
+            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second before reboot
+            esp_restart();
+        }
 
         if (ota_->HasNewVersion()) {
             if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
