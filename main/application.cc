@@ -1530,8 +1530,9 @@ void Application::HandleWakeWordDetectedEvent() {
         // 先同步停止音乐播放（唤醒词打断）
         auto& board = Board::GetInstance();
         auto music = board.GetMusic();
-        if (music) {
+        if (music && music->IsPlaying()) {
             music->StopStreaming();
+            SetDeviceState(kDeviceStateConnecting);
         }
 
         audio_service_.EncodeWakeWord();
@@ -1547,7 +1548,6 @@ void Application::HandleWakeWordDetectedEvent() {
             return;
         }
         // Channel already opened, continue directly
-        SetDeviceState(kDeviceStateConnecting);
         ContinueWakeWordInvoke(wake_word);
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
         AbortSpeaking(kAbortReasonWakeWordDetected);

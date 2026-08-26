@@ -889,11 +889,16 @@ void FanMIPI55Display::ShowMusicCover(bool show, const std::string& picture_url)
                 }
                 int status = http->GetStatusCode();
                 if (status != 200) {
-                    ESP_LOGE(FAN_MIPI55_DISPLAY_TAG, "Music cover picture HTTP status: %d", status);
+                    ESP_LOGE(FAN_MIPI55_DISPLAY_TAG, "Music cover HTTP status: %d", status);
                     http->Close();
                     return;
                 }
                 size_t len = http->GetBodyLength();
+                if (len == 0) {
+                    ESP_LOGW(FAN_MIPI55_DISPLAY_TAG, "Music cover empty response (0 bytes)");
+                    http->Close();
+                    return;
+                }
                 uint8_t* data = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_8BIT);
                 if (!data) {
                     ESP_LOGE(FAN_MIPI55_DISPLAY_TAG, "OOM for music cover picture (%d bytes)", len);
@@ -909,6 +914,11 @@ void FanMIPI55Display::ShowMusicCover(bool show, const std::string& picture_url)
                 http->Close();
 
                 ESP_LOGI(FAN_MIPI55_DISPLAY_TAG, "Music cover downloaded: %d bytes, spawning decode thread...", len);
+
+                if (len < 3 || data[0] != 0xFF || data[1] != 0xD8 || data[2] != 0xFF) {
+                    heap_caps_free(data);
+                    return;
+                }
 
                 /* 把 raw JPEG 移交给 decode 线程，然后立即退出本线程。
                  * download 线程不再阻塞在 decode 上，play 线程 / AFE 不会被打断。 */

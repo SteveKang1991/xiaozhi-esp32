@@ -1,5 +1,6 @@
 #include "circular_strip.h"
 #include "application.h"
+#include "board.h"
 #include <esp_log.h>
 #include <algorithm>
 
@@ -176,6 +177,85 @@ void CircularStrip::Scroll(StripColor low, StripColor high, int length, int inte
     });
 }
 
+void CircularStrip::RainbowCycle(int interval_ms) {
+    StartStripTask(interval_ms, [this]() {
+        static int phase = 0;  // 0-767: 红→绿(0-255), 绿→蓝(256-511), 蓝→红(512-767)
+        
+        StripColor color = {0, 0, 0};
+        
+        if (phase < 256) {
+            // 红 → 绿
+            color.red = static_cast<uint8_t>(default_brightness_ * (255 - phase) / 255);
+            color.green = static_cast<uint8_t>(default_brightness_ * phase / 255);
+            color.blue = 0;
+        } else if (phase < 512) {
+            // 绿 → 蓝
+            int p = phase - 256;
+            color.red = 0;
+            color.green = static_cast<uint8_t>(default_brightness_ * (255 - p) / 255);
+            color.blue = static_cast<uint8_t>(default_brightness_ * p / 255);
+        } else {
+            // 蓝 → 红
+            int p = phase - 512;
+            color.red = static_cast<uint8_t>(default_brightness_ * p / 255);
+            color.green = 0;
+            color.blue = static_cast<uint8_t>(default_brightness_ * (255 - p) / 255);
+        }
+        
+        // 全部LED显示同一颜色
+        for (int i = 0; i < max_leds_; i++) {
+            led_strip_set_pixel(led_strip_, i, color.red, color.green, color.blue);
+        }
+        led_strip_refresh(led_strip_);
+        
+        phase = (phase + 3) % 768;  // 每次步进3，速度适中
+    });
+}
+
+void CircularStrip::RandomColorScroll(int length, int interval_ms) {
+    StartStripTask(interval_ms, [this, length]() {
+        static int offset = 0;
+        static int color_phase = 0;
+        
+        // 每次滚动到起点时换一个随机颜色
+        if (offset == 0) {
+            color_phase = (color_phase + esp_random() % 200 + 50) % 768;
+        }
+        
+        // 根据相位计算当前滚动块的颜色
+        StripColor scroll_color = {0, 0, 0};
+        if (color_phase < 256) {
+            scroll_color.red = static_cast<uint8_t>(default_brightness_ * (255 - color_phase) / 255);
+            scroll_color.green = static_cast<uint8_t>(default_brightness_ * color_phase / 255);
+            scroll_color.blue = 0;
+        } else if (color_phase < 512) {
+            int p = color_phase - 256;
+            scroll_color.red = 0;
+            scroll_color.green = static_cast<uint8_t>(default_brightness_ * (255 - p) / 255);
+            scroll_color.blue = static_cast<uint8_t>(default_brightness_ * p / 255);
+        } else {
+            int p = color_phase - 512;
+            scroll_color.red = static_cast<uint8_t>(default_brightness_ * p / 255);
+            scroll_color.green = 0;
+            scroll_color.blue = static_cast<uint8_t>(default_brightness_ * (255 - p) / 255);
+        }
+        
+        // 清空背景
+        for (int i = 0; i < max_leds_; i++) {
+            led_strip_set_pixel(led_strip_, i, 0, 0, 0);
+        }
+        
+        // 设置滚动的亮块
+        for (int j = 0; j < length; j++) {
+            int i = (offset + j) % max_leds_;
+            led_strip_set_pixel(led_strip_, i, scroll_color.red, scroll_color.green, scroll_color.blue);
+        }
+        
+        led_strip_refresh(led_strip_);
+        offset = (offset + 1) % max_leds_;
+    });
+}
+
 void CircularStrip::StartStripTask(int interval_ms, std::function<void()> cb) {
     if (led_strip_ == nullptr) {
         return;
@@ -209,9 +289,27 @@ void CircularStrip::OnStateChanged() {
             Blink(color, 500);
             break;
         }
-        case kDeviceStateIdle:
-            FadeOut(50);
+        case kDeviceStateIdle: {
+            // 优先检查音乐播放状态
+            auto& board = Board::GetInstance();
+            auto music = board.GetMusic();
+            if (music && music->IsPlaying()) {
+                // 音乐播放中：随机选择一种炫彩效果，烘托音乐氛围
+                int effect = esp_random() % 2;
+                
+                if (effect == 0) {
+                    // RGB 彩虹循环效果（整体变色）
+                    RainbowCycle(10);
+                } else {
+                    // 五彩斑斓随机颜色滚动效果（亮块移动）
+                    RandomColorScroll(5, 80);
+                }
+            }
+            else {
+                FadeOut(50);
+            }
             break;
+        }
         case kDeviceStateConnecting: {
             StripColor color = { low_brightness_, low_brightness_, default_brightness_ };
             SetAllColor(color);

@@ -9,7 +9,7 @@
 #include <mutex>
 #include <vector>
 
-#define DEFAULT_BRIGHTNESS 32
+#define DEFAULT_BRIGHTNESS 128
 #define LOW_BRIGHTNESS 4
 
 struct StripColor {
@@ -47,6 +47,8 @@ private:
     void StartStripTask(int interval_ms, std::function<void()> cb);
     void Rainbow(StripColor low, StripColor high, int interval_ms);
     void FadeOut(int interval_ms);
+    void RainbowCycle(int interval_ms);
+    void RandomColorScroll(int length, int interval_ms);
 };
 
 #endif // _CIRCULAR_STRIP_H_

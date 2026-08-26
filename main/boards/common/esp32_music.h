@@ -16,6 +16,9 @@ extern "C" {
 #include "mp3dec.h"
 }
 
+// 前向声明 cJSON，避免在头文件中引入 cJSON.h
+struct cJSON;
+
 // 音频数据块结构
 struct AudioChunk {
     uint8_t* data;
@@ -65,8 +68,10 @@ private:
     std::mutex buffer_mutex_;
     std::condition_variable buffer_cv_;
     size_t buffer_size_;
+    int64_t download_start_time_ms_;  // 记录下载开始时间，用于超时检测
     static constexpr size_t MAX_BUFFER_SIZE = 256 * 1024;  // 256KB缓冲区（降低以减少brownout风险）
     static constexpr size_t MIN_BUFFER_SIZE = 32 * 1024;   // 32KB最小播放缓冲（降低以减少brownout风险）
+    static constexpr int64_t DOWNLOAD_TIMEOUT_MS = 3000;   // 3秒下载超时，防止死等
     
     // MP3解码器相关
     HMP3Decoder mp3_decoder_;
@@ -86,6 +91,15 @@ private:
     bool ParseLyrics(const std::string& lyric_content);
     void LyricDisplayThread();
     void UpdateLyricDisplay(int64_t current_time_ms);
+
+    // 启动歌词线程（歌词模式开启时调用），供 HandleMusicDetailsJson 共用
+    void StartLyricThreadIfNeeded(const std::string& song_name);
+
+    // 解析音乐详情 JSON 并启动播放与歌词。
+    //   is_backup_api = false  -> 主接口 qq_plus，字段: data.musicurl/singer/interval/viplrc/lrctxt
+    //   is_backup_api = true   -> 备用接口 wyvip，  字段: data.url/songname/vipmusic.duration/music.lrc/lrcurl
+    // 成功返回 true；audio_url 缺失或为空返回 false（让调用方决定是否继续尝试备用 URL）。
+    bool HandleMusicDetailsJson(cJSON* response_json, const std::string& song_name, bool is_backup_api);
     
     // ID3标签处理
     size_t SkipId3Tag(uint8_t* data, size_t size);
