@@ -71,9 +71,9 @@ public:
     /**
      * Music playback progress / lyric update.
      *
-     * Called continuously from the playback thread (~every MP3 frame) while
-     * music is playing. Implementations update the progress bar position
-     * and (if non-null) the on-screen lyric text.
+     * Called from the FFT display task (~10Hz) while music is playing.
+     * play_thread must not call this — grabbing the LVGL lock from the audio
+     * path causes I2S underruns.
      *
      * @param current_ms   Current playback time in milliseconds.
      * @param lyric        UTF-8 lyric line for `current_ms`, or nullptr/empty
@@ -88,6 +88,22 @@ public:
      * 退出音乐播放时调用 ShowMusicCover(false, "") 隐藏并回到 MJPEG 角色动画。
      * 默认实现为空，由具体 display 子类重写。 */
     virtual void ShowMusicCover(bool show, const std::string& picture_url = "") {}
+
+    /**
+     * FFT：启用/停用频谱。停用只隐藏条并暂停计算，缓冲区与任务跨歌曲复用。
+     * 真正释放在 Display 析构。 */
+    virtual void EnableFft(bool enable) {}
+
+    /**
+     * 停止 FFT 显示（隐藏并暂停；不释放 arena / 不删 24 个 bar）。
+     * 默认实现为空，由具体 display 子类重写。 */
+    virtual void StopFft() {}
+
+    /**
+     * 获取音乐封面容器对象，用于 FFT canvas 的父对象。
+     * 返回 nullptr 表示音乐封面未激活。
+     * 默认实现为空。 */
+    virtual lv_obj_t* GetMusicCoverContainer() { return nullptr; }
 
     inline int width() const { return width_; }
     inline int height() const { return height_; }

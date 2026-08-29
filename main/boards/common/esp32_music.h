@@ -8,6 +8,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <vector>
+#include <cstdint>
 
 #include "music.h"
 
@@ -50,6 +51,10 @@ private:
     std::atomic<int> current_lyric_index_;
     std::thread lyric_thread_;
     std::atomic<bool> is_lyric_running_;
+    std::atomic<bool> suppress_play_exit_ui_{false};  // 换歌 join 旧 play 时不要切 Listening / 拆 UI
+
+    void StopLyricThread();
+    bool EnsureDecodeBuffers();
 
     // 专辑封面相关
     std::string current_picture_url_;  // 专辑封面 URL
@@ -59,7 +64,8 @@ private:
     std::atomic<bool> is_downloading_;
     std::thread play_thread_;
     std::thread download_thread_;
-    int64_t current_play_time_ms_;  // 当前播放时间(毫秒)
+    std::atomic<int64_t> current_play_time_ms_{0};  // 当前播放时间(毫秒)，FFT 任务只读
+    int64_t played_pcm_samples_{0}; // 已送出的单声道 PCM 样本，用来算时间避免逐帧整除误差
     int64_t last_frame_time_ms_;    // 上一帧的时间戳
     int total_frames_decoded_;      // 已解码的帧数
 
@@ -82,6 +88,7 @@ private:
     void DownloadAudioStream(const std::string& music_url);
     void PlayAudioStream();
     void ClearAudioBuffer();
+    void SignalPlaybackAbort();  // 停下载/播放并唤醒等待中的 play 线程
     bool InitializeMp3Decoder();
     void CleanupMp3Decoder();
     void ResetSampleRate();  // 重置采样率到原始值
@@ -104,7 +111,28 @@ private:
     // ID3标签处理
     size_t SkipId3Tag(uint8_t* data, size_t size);
 
+    static constexpr int FFT_PCM_SAMPLES = 1152;  // 一帧 MP3 单声道最大样本数
+    int16_t* final_pcm_data_fft = nullptr;  // FFT 只读副本（seqlock 保护）
+    std::atomic<uint32_t> fft_pcm_seq_{0};          // 偶数=稳定，奇数=正在写入
+    std::atomic<int> fft_pcm_samples_{0};
+
     std::vector<int16_t> mono_buffer_;  // 双→单声道转换复用 buffer，构造函数预分配
+    uint8_t* mp3_input_buffer_ = nullptr;   // 8KB，跨歌曲复用
+    int16_t* pcm_decode_buffer_ = nullptr;   // 2304 samples，跨歌曲复用
+    char* download_scratch_ = nullptr;     // 4KB HTTP 读缓冲，跨歌曲复用
+    int16_t* silence_flush_ = nullptr;     // 4096 静音，停播 flush I2S
+
+    static constexpr size_t STREAM_CHUNK_SIZE = 4096;
+    static constexpr size_t CHUNK_POOL_KEEP = 8;   // 停播后保留的空闲块，避免反复 malloc
+    static constexpr size_t CHUNK_POOL_MAX = 64;  // 与 MAX_BUFFER_SIZE/4096 对齐
+    std::mutex chunk_pool_mutex_;
+    std::vector<uint8_t*> chunk_pool_;
+
+    uint8_t* AllocStreamChunk();
+    void FreeStreamChunk(uint8_t* p);
+    void TrimChunkPool();
+    void ReleaseFftPcm();
+    void PublishPcmForFft(const int16_t* pcm, int sample_count);
 
 public:
     Esp32Music();
@@ -119,7 +147,9 @@ public:
     virtual bool StopStreaming() override;  // 停止流式播放
     virtual size_t GetBufferSize() const override { return buffer_size_; }
     virtual bool IsDownloading() const override { return is_downloading_; }
-    virtual int16_t* GetAudioData() override { return nullptr; }  // 不再使用 FFT，保留接口满足 music.h 抽象
+    virtual int16_t* GetAudioData() override { return final_pcm_data_fft; }
+    virtual bool CopyPcmForFft(int16_t* dst, size_t max_samples) override;
+    virtual void TickPlaybackUi() override;
     virtual bool IsPlaying() const override { return is_playing_; }
     
     // 专辑封面相关

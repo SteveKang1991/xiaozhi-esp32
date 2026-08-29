@@ -10,6 +10,8 @@
 #include <mutex>
 #include <deque>
 #include <memory>
+#include <vector>
+#include <cstdint>
 
 #include "protocol.h"
 #include "ota.h"
@@ -115,6 +117,8 @@ public:
 
     // 新增：接收外部音频数据（如音乐播放）
     void AddAudioData(AudioStreamPacket&& packet);
+    // 零拷贝路径：直接喂 PCM，避免 packet.payload 再分配
+    void AddAudioData(int16_t* pcm, size_t num_samples, int sample_rate);
     
     /**
      * Reset protocol resources (thread-safe)

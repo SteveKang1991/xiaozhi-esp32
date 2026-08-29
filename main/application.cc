@@ -24,6 +24,7 @@
 #include <dirent.h>
 #include <cstdio>
 #include <cstdint>
+#include <vector>
 #include <unistd.h>
 
 #define TAG "Application"
@@ -1906,112 +1907,101 @@ void Application::ResetProtocol() {
 // 新增：接收外部音频数据（如音乐播放）
 void Application::AddAudioData(AudioStreamPacket &&packet)
 {
+    if (packet.payload.size() < 2) {
+        return;
+    }
+    AddAudioData(reinterpret_cast<int16_t*>(packet.payload.data()),
+                  packet.payload.size() / sizeof(int16_t),
+                  packet.sample_rate);
+}
+
+void Application::AddAudioData(int16_t* pcm, size_t num_samples, int sample_rate)
+{
+    if (pcm == nullptr || num_samples == 0) {
+        return;
+    }
+
     auto codec = Board::GetInstance().GetAudioCodec();
     DeviceState current_state = state_machine_.GetState();
-    // 仅在 idle 状态 + 音乐正在播放时输出音频
     auto& board = Board::GetInstance();
     auto music = board.GetMusic();
     bool is_music_playing = music && music->IsPlaying();
-    if (is_music_playing && current_state == kDeviceStateIdle && codec->output_enabled())
-    {
-        // packet.payload包含的是原始PCM数据（int16_t）
-        if (packet.payload.size() >= 2)
-        {
-            size_t num_samples = packet.payload.size() / sizeof(int16_t);
-            std::vector<int16_t> pcm_data(num_samples);
-            memcpy(pcm_data.data(), packet.payload.data(), packet.payload.size());
-
-            // 检查采样率是否匹配，如果不匹配则进行简单重采样
-            if (packet.sample_rate != codec->output_sample_rate())
-            {
-                // 验证采样率参数
-                if (packet.sample_rate <= 0 || codec->output_sample_rate() <= 0)
-                {
-                    ESP_LOGE(TAG, "Invalid sample rates: %d -> %d",
-                             packet.sample_rate, codec->output_sample_rate());
-                    return;
-                }
-
-                std::vector<int16_t> resampled;
-
-                ESP_LOGD(TAG, "Music Player: Resample from %d Hz to %d Hz (avoid I2S reconfig)",
-                         packet.sample_rate, codec->output_sample_rate());
-
-                // 关键修复：不要调用 SetOutputSampleRate 切换采样率，
-                // 因为会 disable+reconfig I2S TX，影响共享 I2S bus 的 RX（麦克风），
-                // 导致语音唤醒失效。改为在软件层做重采样。
-                if (packet.sample_rate > codec->output_sample_rate())
-                {
-                    // 下采样到 codec 当前采样率
-                    float downsample_ratio = static_cast<float>(packet.sample_rate) / codec->output_sample_rate();
-                    size_t expected_size = static_cast<size_t>(pcm_data.size() / downsample_ratio + 0.5f);
-                    resampled.resize(expected_size);
-
-                    size_t resampled_index = 0;
-                    float source_index = 0.0f;
-                    for (size_t i = 0; i < pcm_data.size() && resampled_index < expected_size; i++)
-                    {
-                        size_t idx = static_cast<size_t>(source_index);
-                        if (idx < pcm_data.size())
-                        {
-                            resampled[resampled_index++] = pcm_data[idx];
-                        }
-                        source_index += downsample_ratio;
-                    }
-
-                    pcm_data = std::move(resampled);
-                    ESP_LOGD(TAG, "Downsampled music audio from %d to %d Hz",
-                             packet.sample_rate, codec->output_sample_rate());
-                }
-                else
-                {
-                    // 上采样到 codec 当前采样率
-                    float upsample_ratio = codec->output_sample_rate() / static_cast<float>(packet.sample_rate);
-                    size_t expected_size = static_cast<size_t>(pcm_data.size() * upsample_ratio + 0.5f);
-                    resampled.reserve(expected_size);
-
-                    for (size_t i = 0; i < pcm_data.size(); ++i)
-                    {
-                        resampled.push_back(pcm_data[i]);
-
-                        int interpolation_count = static_cast<int>(upsample_ratio) - 1;
-                        if (interpolation_count > 0 && i + 1 < pcm_data.size())
-                        {
-                            int16_t current = pcm_data[i];
-                            int16_t next = pcm_data[i + 1];
-                            for (int j = 1; j <= interpolation_count; ++j)
-                            {
-                                float t = static_cast<float>(j) / (interpolation_count + 1);
-                                int16_t interpolated = static_cast<int16_t>(current + (next - current) * t);
-                                resampled.push_back(interpolated);
-                            }
-                        }
-                        else if (interpolation_count > 0)
-                        {
-                            for (int j = 1; j <= interpolation_count; ++j)
-                            {
-                                resampled.push_back(pcm_data[i]);
-                            }
-                        }
-                    }
-
-                    pcm_data = std::move(resampled);
-                    ESP_LOGD(TAG, "Upsampled music audio from %d to %d Hz",
-                             packet.sample_rate, codec->output_sample_rate());
-                }
-            }
-
-            // 确保音频输出已启用
-            if (!codec->output_enabled())
-            {
-                codec->EnableOutput(true);
-            }
-
-            // 发送PCM数据到音频编解码器
-            codec->OutputData(pcm_data);
-
-            audio_service_.UpdateOutputTimestamp();
-        }
+    if (!is_music_playing || current_state != kDeviceStateIdle || !codec || !codec->output_enabled()) {
+        return;
     }
+
+    const int16_t* out_pcm = pcm;
+    size_t out_samples = num_samples;
+
+    // 重采样缓冲复用，避免每帧 vector 分配造成 PSRAM 抖动
+    thread_local static std::vector<int16_t> resample_buf;
+
+    if (sample_rate != codec->output_sample_rate())
+    {
+        if (sample_rate <= 0 || codec->output_sample_rate() <= 0)
+        {
+            ESP_LOGE(TAG, "Invalid sample rates: %d -> %d",
+                     sample_rate, codec->output_sample_rate());
+            return;
+        }
+
+        const int src_rate = sample_rate;
+        const int dst_rate = codec->output_sample_rate();
+
+        if (src_rate > dst_rate)
+        {
+            size_t expected_size = (num_samples * (size_t)dst_rate + (size_t)src_rate / 2) / (size_t)src_rate;
+            if (expected_size == 0) {
+                expected_size = 1;
+            }
+            resample_buf.resize(expected_size);
+            for (size_t i = 0; i < expected_size; i++) {
+                size_t idx = (i * (size_t)src_rate) / (size_t)dst_rate;
+                if (idx >= num_samples) {
+                    idx = num_samples - 1;
+                }
+                resample_buf[i] = pcm[idx];
+            }
+        }
+        else
+        {
+            float upsample_ratio = (float)dst_rate / (float)src_rate;
+            size_t expected_size = (size_t)(num_samples * upsample_ratio + 0.5f);
+            resample_buf.clear();
+            resample_buf.reserve(expected_size);
+            int interpolation_count = (int)upsample_ratio - 1;
+            for (size_t i = 0; i < num_samples; ++i)
+            {
+                resample_buf.push_back(pcm[i]);
+                if (interpolation_count > 0 && i + 1 < num_samples)
+                {
+                    int16_t current = pcm[i];
+                    int16_t next = pcm[i + 1];
+                    for (int j = 1; j <= interpolation_count; ++j)
+                    {
+                        float t = (float)j / (interpolation_count + 1);
+                        resample_buf.push_back((int16_t)(current + (next - current) * t));
+                    }
+                }
+                else if (interpolation_count > 0)
+                {
+                    for (int j = 1; j <= interpolation_count; ++j)
+                    {
+                        resample_buf.push_back(pcm[i]);
+                    }
+                }
+            }
+        }
+        out_pcm = resample_buf.data();
+        out_samples = resample_buf.size();
+    }
+
+    if (!codec->output_enabled())
+    {
+        codec->EnableOutput(true);
+    }
+
+    codec->OutputData(out_pcm, (int)out_samples);
+    audio_service_.UpdateOutputTimestamp();
 }
 

@@ -3,6 +3,7 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "assets/lang_config.h"
+#include "board.h"
 
 #include <vector>
 #include <algorithm>
@@ -11,16 +12,25 @@
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
+#include <esp_heap_caps.h>
 #include <cstring>
+#include <cmath>
 #include <src/misc/cache/lv_cache.h>
 
-#include "board.h"
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 #define TAG "LcdDisplay"
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 LV_FONT_DECLARE(font_awesome_30_4);
+
+// FFT 静态成员初始化
+float LcdDisplay::avg_power_spectrum_[FFT_SIZE / 2] = {0};
+int LcdDisplay::bar_heights_[32] = {0};
+int LcdDisplay::peak_heights_[32] = {0};
 
 void LcdDisplay::InitializeLcdThemes() {
     auto text_font = std::make_shared<LvglBuiltInFont>(&BUILTIN_TEXT_FONT);
@@ -74,6 +84,36 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
     Settings settings("display", false);
     std::string theme_name = settings.GetString("theme", "light");
     current_theme_ = LvglThemeManager::GetInstance().GetTheme(theme_name);
+
+    // FFT：开机不分配。首次进音乐分配 arena + 24 个 bar + 任务；退出只隐藏。
+    audio_data_ = nullptr;
+    fft_real_ = nullptr;
+    fft_imag_ = nullptr;
+    hanning_window_ = nullptr;
+    fft_arena_ = nullptr;
+
+    // 初始化 FFT 状态
+    fft_data_ready_ = false;
+    fft_enabled_ = false;
+    fft_container_ = nullptr;
+    fft_bar_width_ = 0;
+    fft_bar_gap_ = 2;
+    fft_bar_max_h_ = 0;
+    fft_total_w_ = 0;
+    fft_origin_x_ = 0;
+    fft_origin_y_ = 0;
+    memset(avg_power_spectrum_, 0, sizeof(avg_power_spectrum_));
+    memset(bar_heights_, 0, sizeof(bar_heights_));
+    memset(peak_heights_, 0, sizeof(peak_heights_));
+    memset(draw_bar_h_, 0, sizeof(draw_bar_h_));
+    memset(draw_peak_h_, 0, sizeof(draw_peak_h_));
+    memset(last_draw_bar_h_, 0, sizeof(last_draw_bar_h_));
+    memset(last_draw_peak_h_, 0, sizeof(last_draw_peak_h_));
+    for (int i = 0; i < FFT_BAR_COUNT; i++) {
+        fft_cap_color_[i] = getCapColor(i);
+    }
+
+    ESP_LOGI(TAG, "FFT state initialized (lazy alloc on first music play)");
 
     // Create a timer to hide the preview image
     esp_timer_create_args_t preview_timer_args = {
@@ -284,6 +324,9 @@ MipiLcdDisplay::MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
 }
 
 LcdDisplay::~LcdDisplay() {
+    teardownFft();
+    ESP_LOGI(TAG, "FFT resources torn down in destructor");
+    
     SetPreviewImage(nullptr);
     
     // Clean up GIF controller
@@ -1294,7 +1337,7 @@ void LcdDisplay::SetTheme(Theme* theme) {
 void LcdDisplay::SetHideSubtitle(bool hide) {
     DisplayLockGuard lock(this);
     hide_subtitle_ = hide;
-    
+
     // Immediately update UI visibility based on the setting
     if (bottom_bar_ != nullptr) {
         if (hide) {
@@ -1305,6 +1348,566 @@ void LcdDisplay::SetHideSubtitle(bool hide) {
             if (text != nullptr && text[0] != '\0') {
                 lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
             }
+        }
+    }
+}
+
+// ============================================================================
+// FFT 音乐频谱显示实现
+// ============================================================================
+
+void LcdDisplay::EnableFft(bool enable) {
+    if (enable && !fft_enabled_) {
+        ESP_LOGI(TAG, "Enabling FFT display");
+
+        if (!ensureFftBuffers()) {
+            ESP_LOGE(TAG, "EnableFft aborted: FFT buffer alloc failed");
+            return;
+        }
+
+        lv_obj_t* parent = GetMusicCoverContainer();
+        if (parent == nullptr) {
+            parent = lv_scr_act();
+        }
+
+        if (fft_container_ == nullptr) {
+            createFftBars(parent);
+        } else {
+            setFftBarsVisible(true);
+        }
+
+        memset(avg_power_spectrum_, 0, sizeof(avg_power_spectrum_));
+        memset(bar_heights_, 0, sizeof(bar_heights_));
+        memset(peak_heights_, 0, sizeof(peak_heights_));
+        memset(last_draw_bar_h_, 0xFF, sizeof(last_draw_bar_h_));
+        memset(last_draw_peak_h_, 0xFF, sizeof(last_draw_peak_h_));
+        fft_data_ready_ = false;
+        fft_enabled_ = true;
+
+        if (fft_task_handle_ == nullptr) {
+            fft_task_should_stop_ = false;
+            xTaskCreatePinnedToCore(
+                periodicUpdateTaskWrapper,
+                "fft_display",
+                8192,
+                this,
+                1,
+                &fft_task_handle_,
+                1
+            );
+            ESP_LOGI(TAG, "FFT task started (pinned CPU1, priority 1)");
+        }
+    } else if (!enable && fft_enabled_) {
+        ESP_LOGI(TAG, "Disabling FFT display (hide & park, keep buffers)");
+        StopFft();
+    }
+}
+
+void LcdDisplay::StopFft() {
+    if (!fft_enabled_ && fft_container_ == nullptr) {
+        return;
+    }
+
+    // 只停计算/隐藏 UI。不要在这里 vTaskDelay 或删 obj：
+    // ShowMusicCover(false) 持有 DisplayLock 时调用本函数，若再等 FFT 任务
+    //（任务里也要抢同一把锁）会死锁，LVGL 卡死。
+    fft_enabled_ = false;
+    fft_data_ready_ = false;
+    memset(avg_power_spectrum_, 0, sizeof(avg_power_spectrum_));
+    memset(bar_heights_, 0, sizeof(bar_heights_));
+    memset(peak_heights_, 0, sizeof(peak_heights_));
+    setFftBarsVisible(false);
+    ESP_LOGI(TAG, "FFT parked (buffers and bars retained)");
+}
+
+void LcdDisplay::setFftBarsVisible(bool visible) {
+    if (fft_container_ == nullptr) {
+        return;
+    }
+    DisplayLockGuard lock(this);
+    if (visible) {
+        lv_obj_remove_flag(fft_container_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(fft_container_);
+    } else {
+        lv_obj_add_flag(fft_container_, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void LcdDisplay::teardownFft() {
+    fft_enabled_ = false;
+    fft_task_should_stop_ = true;
+    if (fft_task_handle_ != nullptr) {
+        for (int i = 0; i < 30 && fft_task_handle_ != nullptr; i++) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (fft_task_handle_ != nullptr) {
+            vTaskDelete(fft_task_handle_);
+            fft_task_handle_ = nullptr;
+        }
+    }
+
+    destroyFftBars();
+
+    audio_data_ = nullptr;
+    fft_real_ = nullptr;
+    fft_imag_ = nullptr;
+    hanning_window_ = nullptr;
+    if (fft_arena_ != nullptr) {
+        heap_caps_free(fft_arena_);
+        fft_arena_ = nullptr;
+    }
+    fft_data_ready_ = false;
+}
+
+void LcdDisplay::periodicUpdateTaskWrapper(void* arg) {
+    auto self = static_cast<LcdDisplay*>(arg);
+    self->periodicUpdateTask();
+}
+
+void LcdDisplay::periodicUpdateTask() {
+    ESP_LOGI(TAG, "FFT periodic update task started");
+
+    const TickType_t audioProcessInterval = pdMS_TO_TICKS(15);  // 与参考频谱同一拍：~67Hz 跟瞬态
+    const TickType_t displayInterval      = pdMS_TO_TICKS(40);  // 25Hz 绘制，peak 按每帧像素下落
+    const TickType_t uiInterval          = pdMS_TO_TICKS(50);  // 歌词 20Hz，不能跟频谱互斥否则会整句才跟上
+
+    TickType_t lastAudioTime   = xTaskGetTickCount();
+    TickType_t lastDisplayTime = xTaskGetTickCount();
+    TickType_t lastUiTime       = xTaskGetTickCount();
+
+    while (!fft_task_should_stop_) {
+        if (!fft_enabled_) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            lastAudioTime = lastDisplayTime = lastUiTime = xTaskGetTickCount();
+            continue;
+        }
+
+        TickType_t currentTime = xTaskGetTickCount();
+
+        if (currentTime - lastAudioTime >= audioProcessInterval) {
+            readAudioData();
+            lastAudioTime = currentTime;
+        }
+
+        // 歌词先刷：以前频谱同一拍就跳过 UI，会出现「一句唱完了字幕才跟上」。
+        if (currentTime - lastUiTime >= uiInterval) {
+            auto music = Board::GetInstance().GetMusic();
+            if (music != nullptr) {
+                music->TickPlaybackUi();
+            }
+            lastUiTime = currentTime;
+        }
+
+        if (currentTime - lastDisplayTime >= displayInterval) {
+            if (fft_data_ready_ && fft_enabled_) {
+                drawSpectrumIfReady();
+                fft_data_ready_ = false;
+            }
+            lastDisplayTime = currentTime;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    ESP_LOGI(TAG, "FFT periodic update task stopped");
+    fft_task_handle_ = nullptr;
+    vTaskDelete(nullptr);
+}
+
+// FFT 频谱：单个容器 + DRAW_MAIN 画柱/帽。避免 48 个 lv_obj 在软件旋转下拆成几十块脏矩形。
+
+// 懒分配 FFT 计算缓冲区 + hanning 窗
+// 返回 true = 成功（或已分配），false = 失败
+bool LcdDisplay::ensureFftBuffers() {
+    if (fft_arena_ != nullptr && audio_data_ != nullptr && fft_real_ != nullptr &&
+        fft_imag_ != nullptr && hanning_window_ != nullptr) {
+        return true;
+    }
+
+    const size_t pcm_bytes = sizeof(int16_t) * 1152;
+    const size_t fft_bytes = FFT_SIZE * sizeof(float);
+    const size_t off_real = (pcm_bytes + 3u) & ~3u;
+    const size_t off_imag = off_real + fft_bytes;
+    const size_t off_win  = off_imag + fft_bytes;
+    const size_t total    = off_win + fft_bytes;
+
+    ESP_LOGI(TAG, "FFT arena alloc: %u bytes PSRAM (once)", (unsigned)total);
+    fft_arena_ = (uint8_t*)heap_caps_malloc(total, MALLOC_CAP_SPIRAM);
+    if (fft_arena_ == nullptr) {
+        ESP_LOGE(TAG, "FFT arena alloc failed");
+        return false;
+    }
+
+    audio_data_ = (int16_t*)(fft_arena_);
+    fft_real_ = (float*)(fft_arena_ + off_real);
+    fft_imag_ = (float*)(fft_arena_ + off_imag);
+    hanning_window_ = (float*)(fft_arena_ + off_win);
+
+    for (int i = 0; i < FFT_SIZE; i++) {
+        hanning_window_[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (FFT_SIZE - 1)));
+    }
+
+    ESP_LOGI(TAG, "FFT arena ready");
+    return true;
+}
+
+void LcdDisplay::createFftBars(lv_obj_t* parent) {
+    if (fft_container_ != nullptr) return;
+
+    DisplayLockGuard lock(this);
+
+    if (parent == nullptr) {
+        parent = lv_scr_act();
+    }
+
+    // 计算布局参数：24 个条等宽分布，底部对齐
+    const int total_w = width_ * 8 / 10;          // 屏幕 80% 宽度
+    const int origin_x = (width_ - total_w) / 2;
+    fft_total_w_   = total_w;
+    fft_origin_x_  = origin_x;
+    fft_bar_gap_   = 2;                           // 条间距 2px
+    fft_bar_width_ = (total_w - (FFT_BAR_COUNT - 1) * fft_bar_gap_) / FFT_BAR_COUNT;
+    fft_bar_max_h_ = height_ * 3 / 10;           // 最高条约屏高 30%，冲高/抛帽都更高
+    fft_origin_y_ = height_ - fft_bar_max_h_ - (height_ * 0.04);  
+
+    // 创建一个透明父容器（便于统一管理 24 个 obj，删除时一并清理）
+    fft_container_ = lv_obj_create(parent);
+    lv_obj_set_size(fft_container_, total_w, fft_bar_max_h_);
+    lv_obj_set_pos(fft_container_, origin_x, fft_origin_y_);
+    lv_obj_set_style_bg_opa(fft_container_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(fft_container_, 0, 0);
+    lv_obj_set_style_pad_all(fft_container_, 0, 0);
+    lv_obj_set_style_radius(fft_container_, 0, 0);
+    lv_obj_remove_flag(fft_container_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(fft_container_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(fft_container_, fftDrawEventCb, LV_EVENT_DRAW_MAIN, this);
+    lv_obj_move_foreground(fft_container_);
+
+    for (int i = 0; i < FFT_BAR_COUNT; i++) {
+        fft_cap_color_[i] = getCapColor(i);
+        draw_bar_h_[i] = 0;
+        draw_peak_h_[i] = 0;
+        last_draw_bar_h_[i] = -1;
+        last_draw_peak_h_[i] = -1;
+    }
+
+    ESP_LOGI(TAG, "FFT spectrum container created: bar_w=%d, max_h=%d, origin=(%d,%d)",
+             fft_bar_width_, fft_bar_max_h_, origin_x, fft_origin_y_);
+}
+
+void LcdDisplay::fftDrawEventCb(lv_event_t* e) {
+    auto* self = static_cast<LcdDisplay*>(lv_event_get_user_data(e));
+    if (self == nullptr) {
+        return;
+    }
+    lv_layer_t* layer = lv_event_get_layer(e);
+    lv_obj_t* obj = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    if (layer == nullptr || obj == nullptr) {
+        return;
+    }
+    self->drawFftLayer(layer, obj);
+}
+
+void LcdDisplay::drawFftLayer(lv_layer_t* layer, lv_obj_t* obj) {
+    lv_area_t coords;
+    lv_obj_get_coords(obj, &coords);
+
+    const int cap_room = FFT_CAP_H + FFT_CAP_GAP;
+    const lv_color_t bar_color = getBarColor();
+
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.radius = 1;
+    dsc.border_width = 0;
+    dsc.bg_opa = LV_OPA_COVER;
+
+    for (int i = 0; i < FFT_BAR_COUNT; i++) {
+        int bar_h = draw_bar_h_[i];
+        int peak_h = draw_peak_h_[i];
+        if (bar_h < 1) bar_h = 1;
+        if (bar_h > fft_bar_max_h_ - cap_room) bar_h = fft_bar_max_h_ - cap_room;
+        if (peak_h < bar_h + cap_room) peak_h = bar_h + cap_room;
+        if (peak_h > fft_bar_max_h_) peak_h = fft_bar_max_h_;
+
+        const int x1 = coords.x1 + i * (fft_bar_width_ + fft_bar_gap_);
+        const int x2 = x1 + fft_bar_width_ - 1;
+
+        lv_area_t bar_a;
+        bar_a.x1 = x1;
+        bar_a.x2 = x2;
+        bar_a.y1 = coords.y1 + (fft_bar_max_h_ - bar_h);
+        bar_a.y2 = coords.y2;
+        dsc.bg_color = bar_color;
+        lv_draw_rect(layer, &dsc, &bar_a);
+
+        lv_area_t cap_a;
+        cap_a.x1 = x1;
+        cap_a.x2 = x2;
+        cap_a.y1 = coords.y1 + (fft_bar_max_h_ - peak_h);
+        cap_a.y2 = cap_a.y1 + FFT_CAP_H - 1;
+        dsc.bg_color = fft_cap_color_[i];
+        lv_draw_rect(layer, &dsc, &cap_a);
+    }
+}
+
+void LcdDisplay::destroyFftBars() {
+    DisplayLockGuard lock(this);
+
+    if (fft_container_ != nullptr) {
+        lv_obj_del(fft_container_);
+        fft_container_ = nullptr;
+    }
+
+    fft_total_w_  = 0;
+    fft_origin_x_ = 0;
+    fft_origin_y_ = 0;
+    fft_bar_width_ = 0;
+    fft_bar_max_h_ = 0;
+
+    ESP_LOGI(TAG, "FFT bars destroyed");
+}
+
+void LcdDisplay::readAudioData() {
+    // 任意一个缓冲区为空就直接退出，确保懒分配/释放过程中不会段错误
+    if (audio_data_ == nullptr || fft_real_ == nullptr ||
+        fft_imag_ == nullptr || hanning_window_ == nullptr) {
+        return;
+    }
+
+    auto music = Board::GetInstance().GetMusic();
+    if (music == nullptr) return;
+
+    if (!music->CopyPcmForFft(audio_data_, FFT_SIZE)) {
+        return;
+    }
+
+    // 一帧 512 点 FFT 足够 24 条频谱；第二段会多占 ~1ms 且与 LVGL 同核抢 CPU1
+    for (int i = 0; i < FFT_SIZE / 2; i++) {
+        avg_power_spectrum_[i] = 0;
+    }
+
+    for (int i = 0; i < FFT_SIZE; i++) {
+        float sample = (float)audio_data_[i] / 32768.0f;
+        fft_real_[i] = sample * hanning_window_[i];
+        fft_imag_[i] = 0.0f;
+    }
+    computeFft(fft_real_, fft_imag_, FFT_SIZE, true);
+    for (int i = 0; i < FFT_SIZE / 2; i++) {
+        avg_power_spectrum_[i] = fft_real_[i] * fft_real_[i] + fft_imag_[i] * fft_imag_[i];
+    }
+
+    fft_data_ready_ = true;
+}
+
+void LcdDisplay::drawSpectrumIfReady() {
+    if (!fft_data_ready_) return;
+
+    // 确保 bar 对象已创建
+    if (fft_container_ == nullptr) {
+        lv_obj_t* parent = GetMusicCoverContainer();
+        if (parent == nullptr) parent = lv_scr_act();
+        createFftBars(parent);
+    }
+
+    if (fft_container_ == nullptr) return;
+
+    // 关键：计算每条的目标高度在持锁前完成（纯数学，~100us）
+    // 然后在持锁内只更新 24 个柱子 + 24 个峰值方块的 y/height
+    const int BARS_TOTAL = FFT_BAR_COUNT;
+    const int cap_room = FFT_CAP_H + FFT_CAP_GAP;
+    const int throw_air = std::max(16, fft_bar_max_h_ / 4);  // 帽可抛到柱顶之上的空域
+    const int BAR_MAX_HEIGHT = fft_bar_max_h_ > (cap_room + throw_air)
+        ? (fft_bar_max_h_ - cap_room - throw_air)
+        : (fft_bar_max_h_ > cap_room ? fft_bar_max_h_ - cap_room : fft_bar_max_h_);
+
+    float magnitude[BARS_TOTAL] = {0};
+    float max_magnitude = 0;
+
+    const float MIN_DB = -25.0f;
+    const float MAX_DB = 0.0f;
+
+    // 计算每个频段的幅度（avg_power_spectrum_ 已是功率，未开方）
+    for (int bin = 0; bin < BARS_TOTAL; bin++) {
+        int start = bin * (FFT_SIZE / 2 / BARS_TOTAL);
+        int end   = (bin + 1) * (FFT_SIZE / 2 / BARS_TOTAL);
+
+        magnitude[bin] = 0;
+        int count = 0;
+
+        for (int k = start; k < end; k++) {
+            if (k < FFT_SIZE / 2) {
+                // 这里才开方：24 次 vs 256 次，省 90% sqrtf 调用
+                magnitude[bin] += sqrtf(avg_power_spectrum_[k]);
+                count++;
+            }
+        }
+
+        if (count > 0) {
+            magnitude[bin] /= count;
+        }
+
+        if (magnitude[bin] > max_magnitude) {
+            max_magnitude = magnitude[bin];
+        }
+    }
+
+    // 频率加权：与参考 draw_spectrum 相同，压一点低频，柱子才不会黏在高位
+    if (BARS_TOTAL > 5) {
+        magnitude[1] *= 0.6f;
+        magnitude[2] *= 0.7f;
+        magnitude[3] *= 0.8f;
+        magnitude[4] *= 0.8f;
+        magnitude[5] *= 0.9f;
+    }
+
+    // 转换为 dB
+    for (int bin = 1; bin < BARS_TOTAL; bin++) {
+        if (magnitude[bin] > 0.0f && max_magnitude > 0.0f) {
+            magnitude[bin] = 20.0f * log10f(magnitude[bin] / max_magnitude + 1e-10f);
+        } else {
+            magnitude[bin] = MIN_DB;
+        }
+    }
+
+    // 计算每条最终目标高度
+    int target_heights[BARS_TOTAL];
+    for (int k = 0; k < BARS_TOTAL; k++) {
+        float mag;
+        if (k == 0) {
+            // 第 0 条对应低频，用第 1 条的值（避免 log10(0)）
+            mag = (magnitude[1] - MIN_DB) / (MAX_DB - MIN_DB);
+        } else {
+            mag = (magnitude[k] - MIN_DB) / (MAX_DB - MIN_DB);
+        }
+        mag = std::max(0.0f, std::min(1.0f, mag));
+        int h = (int)(mag * BAR_MAX_HEIGHT);
+        h = (h / FFT_BLOCK_STEP) * FFT_BLOCK_STEP;
+        target_heights[k] = h;
+    }
+
+    // 冲高/回落再慢一档；上冲时把帽多抛一段到柱顶之上。
+    const int BAR_RISE = std::max(FFT_BLOCK_STEP, BAR_MAX_HEIGHT / 7);
+    const int BAR_FALL = std::max(FFT_BLOCK_STEP, BAR_MAX_HEIGHT / 14);
+    const int CAP_FALL = std::max(2, BAR_MAX_HEIGHT / 40);
+    bool any_change = false;
+    for (int k = 0; k < BARS_TOTAL; k++) {
+        const int target = target_heights[k];
+        const int old_h = bar_heights_[k];
+        if (bar_heights_[k] < target) {
+            bar_heights_[k] += BAR_RISE;
+            if (bar_heights_[k] > target) bar_heights_[k] = target;
+        } else if (bar_heights_[k] > target) {
+            bar_heights_[k] -= BAR_FALL;
+            if (bar_heights_[k] < target) bar_heights_[k] = target;
+        }
+
+        int lift = bar_heights_[k] + cap_room;
+        if (bar_heights_[k] > old_h) {
+            lift += throw_air;
+        }
+        if (peak_heights_[k] < lift) {
+            peak_heights_[k] = lift;
+        } else {
+            peak_heights_[k] -= CAP_FALL;
+            if (peak_heights_[k] < cap_room) peak_heights_[k] = cap_room;
+        }
+        if (peak_heights_[k] > fft_bar_max_h_) peak_heights_[k] = fft_bar_max_h_;
+
+        if (bar_heights_[k] != last_draw_bar_h_[k] || peak_heights_[k] != last_draw_peak_h_[k]) {
+            any_change = true;
+        }
+    }
+
+    if (!any_change) {
+        return;
+    }
+
+    {
+        DisplayLockGuard lock(this);
+        if (fft_container_ == nullptr) {
+            return;
+        }
+        memcpy(draw_bar_h_, bar_heights_, sizeof(draw_bar_h_));
+        memcpy(draw_peak_h_, peak_heights_, sizeof(draw_peak_h_));
+        memcpy(last_draw_bar_h_, bar_heights_, sizeof(last_draw_bar_h_));
+        memcpy(last_draw_peak_h_, peak_heights_, sizeof(last_draw_peak_h_));
+        lv_obj_invalidate(fft_container_);
+    }
+}
+
+lv_color_t LcdDisplay::getBarColor() {
+    return lv_color_make(0xC9, 0xFF, 0x20);
+}
+
+lv_color_t LcdDisplay::getCapColor(int idx) {
+    // 参考图峰值方块：左红 → 橙 → 绿 → 青 → 蓝 → 紫
+    int hue = (idx * 270) / (FFT_BAR_COUNT - 1);
+    uint8_t region = hue / 60;
+    uint8_t remainder = (hue % 60) * 255 / 60;
+    uint8_t p = 0;
+    uint8_t q = 255 - remainder;
+    uint8_t t = remainder;
+    uint8_t r = 0, g = 0, b = 0;
+    switch (region) {
+        case 0: r = 255; g = t;   b = p; break;
+        case 1: r = q;   g = 255; b = p; break;
+        case 2: r = p;   g = 255; b = t; break;
+        case 3: r = p;   g = q;   b = 255; break;
+        default: r = t;  g = p;   b = 255; break;  // 蓝→紫
+    }
+    return lv_color_make(r, g, b);
+}
+
+void LcdDisplay::computeFft(float* real, float* imag, int n, bool forward) {
+    // 位反转排序
+    int j = 0;
+    for (int i = 0; i < n; i++) {
+        if (j > i) {
+            std::swap(real[i], real[j]);
+            std::swap(imag[i], imag[j]);
+        }
+        
+        int m = n >> 1;
+        while (m >= 1 && j >= m) {
+            j -= m;
+            m >>= 1;
+        }
+        j += m;
+    }
+    
+    // FFT 计算
+    for (int s = 1; s <= (int)log2f((float)n); s++) {
+        int m = 1 << s;
+        int m2 = m >> 1;
+        float w_real = 1.0f;
+        float w_imag = 0.0f;
+        float angle = (forward ? -2.0f : 2.0f) * M_PI / m;
+        float wm_real = cosf(angle);
+        float wm_imag = sinf(angle);
+        
+        for (int jj = 0; jj < m2; jj++) {
+            for (int k = jj; k < n; k += m) {
+                int k2 = k + m2;
+                float t_real = w_real * real[k2] - w_imag * imag[k2];
+                float t_imag = w_real * imag[k2] + w_imag * real[k2];
+                
+                real[k2] = real[k] - t_real;
+                imag[k2] = imag[k] - t_imag;
+                real[k] += t_real;
+                imag[k] += t_imag;
+            }
+            
+            float w_temp = w_real;
+            w_real = w_real * wm_real - w_imag * wm_imag;
+            w_imag = w_temp * wm_imag + w_imag * wm_real;
+        }
+    }
+    
+    // 正向变换需要缩放
+    if (forward) {
+        for (int i = 0; i < n; i++) {
+            real[i] /= n;
+            imag[i] /= n;
         }
     }
 }

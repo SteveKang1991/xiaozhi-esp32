@@ -12,6 +12,7 @@
 #include <vector>
 #include <algorithm>
 #include <string>
+#include <atomic>
 #include <font_awesome.h>
 #include <esp_log.h>
 #include <esp_err.h>
@@ -113,6 +114,7 @@ public:
             lv_obj_del(music_cover_container_);
             music_cover_container_ = nullptr;
         }
+        LcdDisplay::~LcdDisplay();
     }
 
     virtual void SetEmotion(const char* emotion) override {
@@ -281,6 +283,8 @@ public:
 
     void ShowMusicCover(bool show, const std::string& picture_url = "") override;
 
+    lv_obj_t* GetMusicCoverContainer() override { return music_cover_container_; }
+
 private:
     inline static bool s_system_ready_ = false;
 
@@ -312,12 +316,13 @@ private:
     std::unique_ptr<LvglAllocatedImage> music_cover_image_data_;
     std::string current_music_picture_url_;
     std::thread music_cover_download_thread_;
-    /* 下载线程只负责 HTTP → raw JPEG buffer，解码线程负责 jpeg_to_image。
-     * raw_jpeg_cover_data_ 保护 download 和 decode 之间的交接：download 持有 unique_ptr，
-     * decode thread 取走所有权后 unique_ptr 置空、decode 线程自己负责 free。 */
-    std::unique_ptr<uint8_t[]> raw_jpeg_cover_data_;
+    struct HeapCapsFree {
+        void operator()(uint8_t* p) const { if (p) heap_caps_free(p); }
+    };
+    std::unique_ptr<uint8_t, HeapCapsFree> raw_jpeg_cover_data_;
     size_t raw_jpeg_cover_size_ = 0;
     std::mutex raw_jpeg_cover_mutex_;
+    std::atomic<uint32_t> cover_job_id_{0};
     int32_t music_cover_scale_ = 256;               // 缩放因子 (256 = 1.0x)
     /* SetMusicProgress 去抖：避免每帧重复 lv_label_set_text / lv_bar_set_value。
      * last_progress_bar_update_ms_ 用于节流：进度条每 500ms 才刷一次。
@@ -857,12 +862,12 @@ inline void FanMIPI50Display::ClearChatMessages() {
  *
  * 容器内部布局（在 SetupMusicCoverUI 中创建）：
  *   - music_cover_bg_img_ : 从 SD 卡 /sdcard/Music/musicbg-480x816.bin 加载的默认背景图
- *   - music_cover_img_    : 运行时下载的专辑图，叠在背景上、距顶 142 居中（326x326）
- *   - music_lyric_label_  : 当前歌词（第 1 行，离左 45、距底 230，1.1x，白）
- *   - music_lyric_next_label_ : 下一句歌词（第 2 行，离左 45、距底 220，1x，#9d9183）
- *   - music_song_name_label_ / music_singer_label_ : 歌名 / 歌手（距底 155 / 120，左对齐）
- *   - music_progress_bar_ : 进度条（左右各 45，距底 75）
- *   - music_cur_time_label_ / music_total_time_label_ : 当前时间（左对齐）/ 总时间（右对齐）
+ *   - music_cover_img_    : 运行时下载的专辑图，叠在背景上、距顶 140 居中（330x330）
+ *   - music_lyric_label_  : 当前歌词（第 1 行，离左 70、距底 260，1.1x，白）
+ *   - music_lyric_next_label_ : 下一句歌词（第 2 行，离左 70、距底 250，1x，#9d9183）
+ *   - music_song_name_label_ / music_singer_label_ : 歌名（离顶 30，1.2x）/ 歌手（离顶 55，#dfd8d0）
+ *   - music_progress_bar_ : 进度条（左右各 70，距底 110）
+ *   - music_cur_time_label_ / music_total_time_label_ : 剩余时间（左）/ 总时间（右，距底 80）
  *
  * `show=true` 停止 MJPEG 播放并显示容器；封面图未下载完前音乐背景图仍可见。
  * `show=false` 隐藏容器并恢复 MJPEG 角色动画。
@@ -885,14 +890,18 @@ void FanMIPI50Display::ShowMusicCover(bool show, const std::string& picture_url)
         /* 显示容器（背景图立即可见，专辑图随后由下载线程设置） */
         lv_obj_remove_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
 
+        /* 启动 FFT 频谱显示（如果还没启动的话） */
+        EnableFft(true);
+
         if (!picture_url.empty() && picture_url != current_music_picture_url_) {
             current_music_picture_url_ = picture_url;
             std::string url_copy = picture_url;
+            const uint32_t job = cover_job_id_.fetch_add(1) + 1;
 
             if (music_cover_download_thread_.joinable()) {
                 music_cover_download_thread_.join();
             }
-            music_cover_download_thread_ = std::thread([this, url_copy]() {
+            music_cover_download_thread_ = std::thread([this, url_copy, job]() {
                 auto network = Board::GetInstance().GetNetwork();
                 auto http = network->CreateHttp(5);
                 if (!http->Open("GET", url_copy)) {
@@ -919,11 +928,21 @@ void FanMIPI50Display::ShowMusicCover(bool show, const std::string& picture_url)
                 }
                 size_t total = 0;
                 while (total < len) {
+                    if (cover_job_id_.load() != job) {
+                        heap_caps_free(data);
+                        http->Close();
+                        return;
+                    }
                     int r = http->Read((char*)data + total, len - total);
                     if (r <= 0) break;
                     total += r;
                 }
                 http->Close();
+
+                if (cover_job_id_.load() != job) {
+                    heap_caps_free(data);
+                    return;
+                }
 
                 ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "Music cover downloaded: %d bytes, spawning decode thread...", len);
 
@@ -940,7 +959,7 @@ void FanMIPI50Display::ShowMusicCover(bool show, const std::string& picture_url)
                     raw_jpeg_cover_size_ = len;
                 }
 
-                std::thread decode_thread([this]() {
+                std::thread decode_thread([this, job]() {
                     uint8_t* data_to_decode = nullptr;
                     size_t data_len = 0;
                     {
@@ -956,16 +975,28 @@ void FanMIPI50Display::ShowMusicCover(bool show, const std::string& picture_url)
                         ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "No JPEG data to decode");
                         return;
                     }
+                    if (cover_job_id_.load() != job) {
+                        heap_caps_free(data_to_decode);
+                        return;
+                    }
 
                     uint8_t* decoded = nullptr;
                     size_t decoded_len = 0, img_w = 0, img_h = 0, stride = 0;
                     esp_err_t ret = jpeg_to_image(data_to_decode, data_len, &decoded, &decoded_len, &img_w, &img_h, &stride);
                     heap_caps_free(data_to_decode);
 
+                    if (cover_job_id_.load() != job) {
+                        heap_caps_free(decoded);
+                        return;
+                    }
                     if (ret == ESP_OK && decoded && img_w > 0 && img_h > 0) {
                         ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "JPEG decoded: %ux%u", img_w, img_h);
 
                         DisplayLockGuard lock_inner(this);
+                        if (cover_job_id_.load() != job) {
+                            heap_caps_free(decoded);
+                            return;
+                        }
 
                         music_cover_image_data_.reset();
 
@@ -1007,9 +1038,17 @@ void FanMIPI50Display::ShowMusicCover(bool show, const std::string& picture_url)
         }
     } else {
         lv_obj_add_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
-        if (music_cover_download_thread_.joinable()) {
-            music_cover_download_thread_.join();
+
+        /* 停止 FFT 频谱显示 */
+        StopFft();
+
+        cover_job_id_.fetch_add(1);
+        {
+            std::lock_guard<std::mutex> lock(raw_jpeg_cover_mutex_);
+            raw_jpeg_cover_data_.reset();
+            raw_jpeg_cover_size_ = 0;
         }
+        /* 不在这里 join 封面下载线程：停播/失败路径常持有 DisplayLock，join 会卡死 LVGL。 */
         current_music_picture_url_.clear();
         music_cover_image_data_.reset();
         if (music_cover_img_) {
@@ -1117,8 +1156,7 @@ void FanMIPI50Display::SetupMusicCoverUI() {
         return lbl;
     };
 
-    /* 歌词：左对齐，离左 70、离底 230，文字 1.1x（box=内宽_按 1.1x 反算, scale_x/y=281, pivot 0,box_h）。
-     * NOTE: transform_scale_y 围绕 box 下边缘放大，视觉框比 layout box 高 ~5px。 */
+    /* 歌词：左对齐，离左 70、离底 260，文字 1.1x。 */
     {
         const int scale_num = 281;  // 1.1x = 256 * 1.1 (四舍五入)
         const lv_coord_t box_w = inner_w * 256 / scale_num;     // 340 * 256 / 281 ≈ 310
@@ -1127,64 +1165,67 @@ void FanMIPI50Display::SetupMusicCoverUI() {
         lv_obj_set_style_text_align(music_lyric_label_, LV_TEXT_ALIGN_LEFT, 0);
         lv_obj_set_style_transform_scale_x(music_lyric_label_, scale_num, 0);
         lv_obj_set_style_transform_scale_y(music_lyric_label_, scale_num, 0);
-        lv_obj_set_style_transform_pivot_x(music_lyric_label_, 0, 0);     // 左边缘
-        lv_obj_set_style_transform_pivot_y(music_lyric_label_, box_h, 0); // 下边缘
-        lv_obj_align(music_lyric_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -230);
+        lv_obj_set_style_transform_pivot_x(music_lyric_label_, 0, 0);
+        lv_obj_set_style_transform_pivot_y(music_lyric_label_, box_h, 0);
+        lv_obj_align(music_lyric_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -260);
     }
 
-    /* 歌词下一行（第 2 行）：左对齐，离左 70、离底 220，1x 不缩放。文字色 #9d9183（淡灰）。
-    * 放在 lyric（第 1 行）下面，预先占位；新一句歌词触发时才由 SetMusicProgress 写入。 */
+    /* 歌词下一行：离左 70、离底 250，1x，#9d9183。 */
     music_lyric_next_label_ = make_text_label(music_cover_container_, inner_w, 30);
     lv_obj_set_style_text_align(music_lyric_next_label_, LV_TEXT_ALIGN_LEFT, 0);
     lv_obj_set_style_text_color(music_lyric_next_label_, lv_color_hex(0x9d9183), 0);
-    lv_obj_align(music_lyric_next_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -220);
+    lv_obj_align(music_lyric_next_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -250);
 
 
-    /* 歌名：左对齐，距底 135，文字 1.2x（box=内宽_按 1.2x 反算, scale_x/y=307, pivot 0,box_h）。 */
+    /* 歌名：离左 70、离顶 30，1.2x，左对齐。 */
     {
-        const int scale_num = 307;  // 1.2x = 256 * 1.2 (四舍五入)
-        const lv_coord_t box_w = inner_w * 256 / scale_num;     // 340 * 256 / 307 ≈ 283
+        const int scale_num = 307;  // 1.2x = 256 * 1.2
+        const lv_coord_t box_w = inner_w * 256 / scale_num;
         const lv_coord_t box_h = 32;
         music_song_name_label_ = make_text_label(music_cover_container_, box_w, box_h);
         lv_obj_set_size(music_song_name_label_, box_w, box_h);
         lv_obj_set_style_text_align(music_song_name_label_, LV_TEXT_ALIGN_LEFT, 0);
         lv_obj_set_style_transform_scale_x(music_song_name_label_, scale_num, 0);
         lv_obj_set_style_transform_scale_y(music_song_name_label_, scale_num, 0);
-        lv_obj_set_style_transform_pivot_x(music_song_name_label_, 0, 0);     // 左边缘
-        lv_obj_set_style_transform_pivot_y(music_song_name_label_, box_h, 0); // 下边缘
-        lv_obj_align(music_song_name_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -135);
+        lv_obj_set_style_transform_pivot_x(music_song_name_label_, 0, 0);
+        lv_obj_set_style_transform_pivot_y(music_song_name_label_, 0, 0);
+        lv_obj_align(music_song_name_label_, LV_ALIGN_TOP_LEFT, side_pad, 30);
     }
 
-    /* 歌手：左对齐，距底 110，高度 30，1x 不缩放。文字色 #dfd8d0（淡米白）。 */
+    /* 歌手：离左 70、离顶 55，#dfd8d0。 */
     music_singer_label_ = make_text_label(music_cover_container_, inner_w, 30);
     lv_obj_set_style_text_align(music_singer_label_, LV_TEXT_ALIGN_LEFT, 0);
     lv_obj_set_style_text_color(music_singer_label_, lv_color_hex(0xdfd8d0), 0);
-    lv_obj_align(music_singer_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -110);
+    lv_obj_align(music_singer_label_, LV_ALIGN_TOP_LEFT, side_pad, 55);
 
-    /* 进度条：左右各 70，距底 75，高 6。 */
+    /* 进度条：左右各 70，距底 110。 */
     music_progress_bar_ = lv_bar_create(music_cover_container_);
     lv_obj_set_size(music_progress_bar_, inner_w, 6);
-    lv_obj_align(music_progress_bar_, LV_ALIGN_BOTTOM_LEFT, side_pad, -75);
-    lv_bar_set_range(music_progress_bar_, 0, 100);  // 单位：百分比；由 SetMusicProgress 写入
+    lv_obj_align(music_progress_bar_, LV_ALIGN_BOTTOM_LEFT, side_pad, -110);
+    lv_bar_set_range(music_progress_bar_, 0, 100);
     lv_bar_set_value(music_progress_bar_, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(music_progress_bar_, lv_color_hex(0x9d9183), LV_PART_MAIN);
     lv_obj_set_style_bg_color(music_progress_bar_, lv_color_white(), LV_PART_INDICATOR);
 
-    /* 当前时间：左对齐，距底 45，高度 22（避开进度条；bar 底在 741）。 */
-    music_cur_time_label_ = make_text_label(music_cover_container_, inner_w, 22);
+    /* 剩余时间：离左 70、距底 80。 */
+    music_cur_time_label_ = make_text_label(music_cover_container_, inner_w / 2 + 1, 30);
     lv_obj_set_style_text_align(music_cur_time_label_, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_align(music_cur_time_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -45);
+    lv_obj_align(music_cur_time_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, -80);
     lv_label_set_text(music_cur_time_label_, "00:00");
 
-    /* 总时间：右对齐，距右 70 / 距底 45。 */
+    /* 总时间：离右 70、距底 80。 */
     music_total_time_label_ = lv_label_create(music_cover_container_);
-    lv_obj_set_size(music_total_time_label_, inner_w / 2 + 1, 22);  // +1 防边界像素
+    lv_obj_set_size(music_total_time_label_, inner_w / 2 + 1, 30);
     lv_obj_set_style_bg_opa(music_total_time_label_, LV_OPA_TRANSP, 0);
     lv_obj_set_style_text_color(music_total_time_label_, lv_color_white(), 0);
     lv_obj_set_style_text_align(music_total_time_label_, LV_TEXT_ALIGN_RIGHT, 0);
     lv_label_set_long_mode(music_total_time_label_, LV_LABEL_LONG_CLIP);
-    lv_obj_align(music_total_time_label_, LV_ALIGN_BOTTOM_RIGHT, -side_pad, -45);
+    lv_obj_align(music_total_time_label_, LV_ALIGN_BOTTOM_RIGHT, -side_pad, -80);
     lv_label_set_text(music_total_time_label_, "00:00");
+
+    /* 频谱可视化：不在 SetupUI 中预创建，改为 EnableFft(true) 进入音乐模式时按需创建。
+     * 原因：避免开机阶段为不播放音乐的用户白白创建 24 个 lv_obj，
+     * 影响 AI 对话聊天的 UI 树大小与启动速度。 */
 }
 
 /* 从 SD 卡加载默认音乐背景图（/sdcard/Music/musicbg-480x816.bin，由
@@ -1382,7 +1423,6 @@ void FanMIPI50Display::SetMusicInfo(const char* song_name,
  * - 歌词（第 2 行）：仅当 lyric_next 非空且文字变化时更新
  */
 void FanMIPI50Display::SetMusicProgress(int current_ms, const char* lyric, const char* lyric_next) {
-    DisplayLockGuard lock(this);
     if (music_cover_container_ == nullptr) {
         return;
     }
@@ -1390,6 +1430,15 @@ void FanMIPI50Display::SetMusicProgress(int current_ms, const char* lyric, const
 
     int64_t now_ms = esp_log_timestamp();
     int cur_sec = current_ms / 1000;
+    bool need_time = (cur_sec != last_progress_sec_);
+    bool need_bar = (music_progress_bar_ && now_ms - last_progress_bar_update_ms_ > 500);
+    bool need_lyric = (lyric != nullptr);
+    bool need_next = (lyric_next != nullptr);
+    if (!need_time && !need_bar && !need_lyric && !need_next) {
+        return;
+    }
+
+    DisplayLockGuard lock(this);
 
     /* 时间标签：同一秒内不重复刷新 */
     if (cur_sec != last_progress_sec_) {
