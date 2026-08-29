@@ -595,6 +595,11 @@ esp_err_t Axp2101::EnableCharging(bool enable)
 
 esp_err_t Axp2101::SetChargeCurrent(Axp2101ChgCurr current)
 {
+    // Datasheet: ICHG range 0~1000mA (reg62H[4:0]). Values above CUR_1000MA
+    // wrap through the 5-bit mask (e.g. CUR_3000MA writes 100mA).
+    if (static_cast<uint8_t>(current) > static_cast<uint8_t>(Axp2101ChgCurr::CUR_1000MA)) {
+        current = Axp2101ChgCurr::CUR_1000MA;
+    }
     uint8_t val;
     if (ReadReg(AXP2101_CHG_SET, &val) != ESP_OK) return ESP_FAIL;
     val = (val & 0xE0) | (static_cast<uint8_t>(current) & 0x1F);
@@ -607,6 +612,32 @@ esp_err_t Axp2101::SetChargeTargetVoltage(Axp2101ChgVol voltage)
     if (ReadReg(AXP2101_CHG_VOL_SET, &val) != ESP_OK) return ESP_FAIL;
     val = (val & 0xF8) | (static_cast<uint8_t>(voltage) & 0x07);
     return WriteReg(AXP2101_CHG_VOL_SET, val);
+}
+
+esp_err_t Axp2101::SetVbusCurrentLimit(Axp2101VbusCurr current)
+{
+    uint8_t val;
+    if (ReadReg(AXP2101_VBUS_CUR_LIM, &val) != ESP_OK) return ESP_FAIL;
+    val = (val & 0xF8) | (static_cast<uint8_t>(current) & 0x07);
+    return WriteReg(AXP2101_VBUS_CUR_LIM, val);
+}
+
+esp_err_t Axp2101::SetVbusVoltageLimit(Axp2101VbusVol voltage)
+{
+    uint8_t val;
+    if (ReadReg(AXP2101_VBUS_VOL_LIM, &val) != ESP_OK) return ESP_FAIL;
+    val = (val & 0xF0) | (static_cast<uint8_t>(voltage) & 0x0F);
+    return WriteReg(AXP2101_VBUS_VOL_LIM, val);
+}
+
+esp_err_t Axp2101::DisableTsPinMeasure()
+{
+    // XPowersLib: no NTC -> TS as external ADC, do not affect charger.
+    uint8_t val;
+    if (ReadReg(AXP2101_TS_PIN_CTRL, &val) != ESP_OK) return ESP_FAIL;
+    val = (val & 0xF0) | 0x10;
+    if (WriteReg(AXP2101_TS_PIN_CTRL, val) != ESP_OK) return ESP_FAIL;
+    return ClrRegBit(AXP2101_ADC_CTRL, 1);
 }
 
 uint16_t Axp2101::GetBatteryVoltage()

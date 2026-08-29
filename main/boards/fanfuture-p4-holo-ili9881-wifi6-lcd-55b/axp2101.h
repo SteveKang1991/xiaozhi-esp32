@@ -59,6 +59,7 @@
 #define AXP2101_CHG_SET         0x62
 #define AXP2101_CHG_VOL_SET     0x64
 #define AXP2101_CHGLED_CTRL     0x69
+#define AXP2101_TS_PIN_CTRL     0x50
 
 /* 充电电流选项 */
 enum class Axp2101ChgCurr : uint8_t {
@@ -75,7 +76,7 @@ enum class Axp2101ChgCurr : uint8_t {
     CUR_700MA,
     CUR_800MA,
     CUR_900MA,
-    CUR_1000MA,
+    CUR_1000MA,  // datasheet max ICHG (reg62H[4:0])
     CUR_1100MA,
     CUR_1200MA,
     CUR_1300MA,
@@ -96,6 +97,27 @@ enum class Axp2101ChgCurr : uint8_t {
     CUR_2800MA,
     CUR_2900MA,
     CUR_3000MA,
+};
+
+/* VBUS 输入电流限制 IINLIM (reg16H[2:0]) */
+enum class Axp2101VbusCurr : uint8_t {
+    LIM_100MA = 0,
+    LIM_500MA,
+    LIM_900MA,
+    LIM_1000MA,
+    LIM_1500MA,
+    LIM_2000MA,
+};
+
+/* VBUS 输入电压限制 VINDPM (reg15H[3:0], 3.88V + N*80mV) */
+enum class Axp2101VbusVol : uint8_t {
+    VOL_3V88 = 0,
+    VOL_3V96,
+    VOL_4V04,
+    VOL_4V12,
+    VOL_4V20,
+    VOL_4V28,
+    VOL_4V36,
 };
 
 /* 充电目标电压 */
@@ -238,6 +260,9 @@ public:
     esp_err_t EnableCharging(bool enable);
     esp_err_t SetChargeCurrent(Axp2101ChgCurr current);
     esp_err_t SetChargeTargetVoltage(Axp2101ChgVol voltage);
+    esp_err_t SetVbusCurrentLimit(Axp2101VbusCurr current);
+    esp_err_t SetVbusVoltageLimit(Axp2101VbusVol voltage);
+    esp_err_t DisableTsPinMeasure();
 
     uint16_t GetBatteryVoltage();
     uint16_t GetVbusVoltage();
