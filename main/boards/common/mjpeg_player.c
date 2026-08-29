@@ -137,7 +137,7 @@ static void mjpeg_init_black_tile_buffer(int panel_width, int panel_height)
     int max_pillar_w = (panel_width > 240) ? ((panel_width - 240) / 2 + 16) : 16;
 
     s_mjpeg_black_tile_size = (size_t)panel_width * MJPEG_BLACK_TILE_H * sizeof(uint16_t);
-    s_mjpeg_black_tile = (uint8_t*)heap_caps_aligned_alloc(64, s_mjpeg_black_tile_size, MALLOC_CAP_DMA);
+    s_mjpeg_black_tile = (uint8_t*)heap_caps_aligned_alloc(64, s_mjpeg_black_tile_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_mjpeg_black_tile) {
         s_mjpeg_black_tile = (uint8_t*)malloc(s_mjpeg_black_tile_size);
     }
@@ -146,7 +146,7 @@ static void mjpeg_init_black_tile_buffer(int panel_width, int panel_height)
     }
 
     s_mjpeg_slab_size = (size_t)max_pillar_w * 2 * MJPEG_BLACK_TILE_H * sizeof(uint16_t);
-    s_mjpeg_slab = (uint8_t*)heap_caps_aligned_alloc(64, s_mjpeg_slab_size, MALLOC_CAP_DMA);
+    s_mjpeg_slab = (uint8_t*)heap_caps_aligned_alloc(64, s_mjpeg_slab_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_mjpeg_slab) {
         s_mjpeg_slab = (uint8_t*)malloc(s_mjpeg_slab_size);
     }
@@ -1010,10 +1010,8 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
             const size_t sz_al = (sz + 63u) & ~63u;
             const int fb_count = 2;
             for (int i = 0; i < fb_count; i++) {
-                s_cfg.fb[i] = heap_caps_aligned_alloc(64, sz_al, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-                if (!s_cfg.fb[i]) {
-                    s_cfg.fb[i] = heap_caps_aligned_alloc(64, sz_al, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                }
+                /* Do not try INTERNAL first: 656x1232x2 is ~1.6MB per fb. */
+                s_cfg.fb[i] = heap_caps_aligned_alloc(64, sz_al, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                 if (!s_cfg.fb[i]) {
                     s_cfg.fb[i] = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                 }

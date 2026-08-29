@@ -55,6 +55,9 @@ extern "C" {
 esp_err_t jpeg_to_image(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len, size_t* width,
                         size_t* height, size_t* stride);
 
+esp_err_t jpeg_to_image_fit(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len, size_t* width,
+                            size_t* height, size_t* stride, size_t max_side);
+
 #ifdef __cplusplus
 }
 #endif

@@ -105,9 +105,6 @@ public:
 
     ~FanMIPI50Display() override {
         StopMjpegIfRunning();
-        if (music_cover_download_thread_.joinable()) {
-            music_cover_download_thread_.join();
-        }
         music_cover_image_data_.reset();
         DisplayLockGuard lock(this);
         if (music_cover_container_) {
@@ -315,14 +312,7 @@ private:
     std::shared_ptr<LvglCBinImage> music_bg_image_;
     std::unique_ptr<LvglAllocatedImage> music_cover_image_data_;
     std::string current_music_picture_url_;
-    std::thread music_cover_download_thread_;
-    struct HeapCapsFree {
-        void operator()(uint8_t* p) const { if (p) heap_caps_free(p); }
-    };
-    std::unique_ptr<uint8_t, HeapCapsFree> raw_jpeg_cover_data_;
-    size_t raw_jpeg_cover_size_ = 0;
-    std::mutex raw_jpeg_cover_mutex_;
-    std::atomic<uint32_t> cover_job_id_{0};
+    void FetchMusicCoverSync(const std::string& url);
     int32_t music_cover_scale_ = 256;               // 缩放因子 (256 = 1.0x)
     /* SetMusicProgress 去抖：避免每帧重复 lv_label_set_text / lv_bar_set_value。
      * last_progress_bar_update_ms_ 用于节流：进度条每 500ms 才刷一次。
@@ -873,196 +863,114 @@ inline void FanMIPI50Display::ClearChatMessages() {
  * `show=false` 隐藏容器并恢复 MJPEG 角色动画。
  */
 void FanMIPI50Display::ShowMusicCover(bool show, const std::string& picture_url) {
-    DisplayLockGuard lock(this);
-
-    if (music_cover_container_ == nullptr) {
-        /* ShowMusicCover 在 SetupUI 之前调用了——理论上不会发生；保守起见不崩溃。 */
-        ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "ShowMusicCover before SetupUI; ignored");
-        return;
-    }
-
-    if (show) {
-        /* 停止 MJPEG 播放 */
-        if (mjpeg_player_is_running()) {
-            mjpeg_player_stop();
+    std::string fetch_url;
+    {
+        DisplayLockGuard lock(this);
+        if (music_cover_container_ == nullptr) {
+            ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "ShowMusicCover before SetupUI; ignored");
+            return;
         }
-
-        /* 显示容器（背景图立即可见，专辑图随后由下载线程设置） */
-        lv_obj_remove_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
-
-        /* 启动 FFT 频谱显示（如果还没启动的话） */
-        EnableFft(true);
-
-        if (!picture_url.empty() && picture_url != current_music_picture_url_) {
-            current_music_picture_url_ = picture_url;
-            std::string url_copy = picture_url;
-            const uint32_t job = cover_job_id_.fetch_add(1) + 1;
-
-            if (music_cover_download_thread_.joinable()) {
-                music_cover_download_thread_.join();
+        if (show) {
+            if (mjpeg_player_is_running()) {
+                mjpeg_player_stop();
             }
-            music_cover_download_thread_ = std::thread([this, url_copy, job]() {
-                auto network = Board::GetInstance().GetNetwork();
-                auto http = network->CreateHttp(5);
-                if (!http->Open("GET", url_copy)) {
-                    ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "Failed to open picture URL for music cover");
-                    return;
+            lv_obj_remove_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(music_cover_container_);
+            EnableFft(true);
+            if (!picture_url.empty() && picture_url != current_music_picture_url_) {
+                current_music_picture_url_ = picture_url;
+                music_cover_image_data_.reset();
+                if (music_cover_img_) {
+                    lv_img_set_src(music_cover_img_, (const void*)nullptr);
+                    lv_obj_add_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
                 }
-                int status = http->GetStatusCode();
-                if (status != 200) {
-                    ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "Music cover HTTP status: %d", status);
-                    http->Close();
-                    return;
-                }
-                size_t len = http->GetBodyLength();
-                if (len == 0) {
-                    ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "Music cover empty response (0 bytes)");
-                    http->Close();
-                    return;
-                }
-                uint8_t* data = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_8BIT);
-                if (!data) {
-                    ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "OOM for music cover picture (%d bytes)", len);
-                    http->Close();
-                    return;
-                }
-                size_t total = 0;
-                while (total < len) {
-                    if (cover_job_id_.load() != job) {
-                        heap_caps_free(data);
-                        http->Close();
-                        return;
-                    }
-                    int r = http->Read((char*)data + total, len - total);
-                    if (r <= 0) break;
-                    total += r;
-                }
-                http->Close();
-
-                if (cover_job_id_.load() != job) {
-                    heap_caps_free(data);
-                    return;
-                }
-
-                ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "Music cover downloaded: %d bytes, spawning decode thread...", len);
-
-                if (len < 3 || data[0] != 0xFF || data[1] != 0xD8 || data[2] != 0xFF) {
-                    heap_caps_free(data);
-                    return;
-                }
-
-                /* 把 raw JPEG 移交给 decode 线程，然后立即退出本线程。
-                 * download 线程不再阻塞在 decode 上，play 线程 / AFE 不会被打断。 */
-                {
-                    std::lock_guard<std::mutex> lock(raw_jpeg_cover_mutex_);
-                    raw_jpeg_cover_data_.reset(data);
-                    raw_jpeg_cover_size_ = len;
-                }
-
-                std::thread decode_thread([this, job]() {
-                    uint8_t* data_to_decode = nullptr;
-                    size_t data_len = 0;
-                    {
-                        std::lock_guard<std::mutex> lock(raw_jpeg_cover_mutex_);
-                        if (raw_jpeg_cover_data_) {
-                            data_to_decode = raw_jpeg_cover_data_.release();
-                            data_len = raw_jpeg_cover_size_;
-                            raw_jpeg_cover_size_ = 0;
-                        }
-                    }
-
-                    if (!data_to_decode) {
-                        ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "No JPEG data to decode");
-                        return;
-                    }
-                    if (cover_job_id_.load() != job) {
-                        heap_caps_free(data_to_decode);
-                        return;
-                    }
-
-                    uint8_t* decoded = nullptr;
-                    size_t decoded_len = 0, img_w = 0, img_h = 0, stride = 0;
-                    esp_err_t ret = jpeg_to_image(data_to_decode, data_len, &decoded, &decoded_len, &img_w, &img_h, &stride);
-                    heap_caps_free(data_to_decode);
-
-                    if (cover_job_id_.load() != job) {
-                        heap_caps_free(decoded);
-                        return;
-                    }
-                    if (ret == ESP_OK && decoded && img_w > 0 && img_h > 0) {
-                        ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "JPEG decoded: %ux%u", img_w, img_h);
-
-                        DisplayLockGuard lock_inner(this);
-                        if (cover_job_id_.load() != job) {
-                            heap_caps_free(decoded);
-                            return;
-                        }
-
-                        music_cover_image_data_.reset();
-
-                        try {
-                            music_cover_image_data_ = std::make_unique<LvglAllocatedImage>(
-                                decoded, decoded_len, img_w, img_h, stride, LV_COLOR_FORMAT_RGB565);
-
-                            if (music_cover_img_ && music_cover_container_) {
-                                lv_img_set_src(music_cover_img_, music_cover_image_data_->image_dsc());
-                                /* 计算缩放因子，让图片等比填满 326x326 框（5B 实际显示尺寸）。
-                                 * 取 width/height 缩放比的较小者（contain），保证图片完全可见，
-                                 * lv_image_set_inner_align(LV_IMAGE_ALIGN_COVER) 让其填满并裁剪超出。 */
-                                const int32_t cover_box = 330;
-                                int32_t scale_w = 256 * cover_box / (int32_t)img_w;
-                                int32_t scale_h = 256 * cover_box / (int32_t)img_h;
-                                music_cover_scale_ = (scale_w < scale_h) ? scale_w : scale_h;
-                                if (music_cover_scale_ < 32) music_cover_scale_ = 32;  // 下限：避免过小
-                                if (music_cover_scale_ > 256) music_cover_scale_ = 256;
-                                lv_image_set_scale(music_cover_img_, music_cover_scale_);
-                                lv_obj_remove_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
-                            }
-                        } catch (const std::exception& e) {
-                            ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "Music cover decode failed: %s", e.what());
-                            heap_caps_free(decoded);
-                        }
-                    } else {
-                        ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "JPEG decode failed: %s", esp_err_to_name(ret));
-                        heap_caps_free(decoded);  // 释放 jpeg_to_image 分配的缓冲区
-                    }
-                });
-                decode_thread.detach();
-            });
-        } else if (!picture_url.empty() && music_cover_image_data_) {
-            if (music_cover_img_) {
+                fetch_url = picture_url;
+            } else if (!picture_url.empty() && music_cover_image_data_ && music_cover_img_) {
                 lv_img_set_src(music_cover_img_, music_cover_image_data_->image_dsc());
                 lv_image_set_scale(music_cover_img_, music_cover_scale_);
                 lv_obj_remove_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
             }
+        } else {
+            lv_obj_add_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
+            StopFft();
+            current_music_picture_url_.clear();
+            music_cover_image_data_.reset();
+            if (music_cover_img_) {
+                lv_img_set_src(music_cover_img_, (const void*)nullptr);
+                lv_obj_add_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
+            }
+            last_progress_ms_ = -1;
+            last_progress_sec_ = -1;
+            last_progress_bar_update_ms_ = -1;
+            last_lyric_.clear();
+            last_lyric_next_.clear();
         }
-    } else {
-        lv_obj_add_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (!fetch_url.empty()) {
+        FetchMusicCoverSync(fetch_url);
+    }
+}
 
-        /* 停止 FFT 频谱显示 */
-        StopFft();
-
-        cover_job_id_.fetch_add(1);
-        {
-            std::lock_guard<std::mutex> lock(raw_jpeg_cover_mutex_);
-            raw_jpeg_cover_data_.reset();
-            raw_jpeg_cover_size_ = 0;
+void FanMIPI50Display::FetchMusicCoverSync(const std::string& url) {
+    auto network = Board::GetInstance().GetNetwork();
+    auto http = network->CreateHttp(5);
+    if (!http->Open("GET", url)) {
+        ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "Music cover download failed, play without cover");
+        return;
+    }
+    int status = http->GetStatusCode();
+    size_t len = http->GetBodyLength();
+    if (status != 200 || len == 0 || len > 256 * 1024) {
+        ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "Music cover skip status=%d len=%u", status, (unsigned)len);
+        http->Close();
+        return;
+    }
+    uint8_t* data = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!data) {
+        ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "OOM for music cover");
+        http->Close();
+        return;
+    }
+    size_t total = 0;
+    while (total < len) {
+        int r = http->Read((char*)data + total, len - total);
+        if (r <= 0) break;
+        total += r;
+    }
+    http->Close();
+    if (total < 3 || data[0] != 0xFF || data[1] != 0xD8 || data[2] != 0xFF) {
+        heap_caps_free(data);
+        return;
+    }
+    uint8_t* decoded = nullptr;
+    size_t decoded_len = 0, img_w = 0, img_h = 0, stride = 0;
+    esp_err_t ret = jpeg_to_image_fit(data, total, &decoded, &decoded_len, &img_w, &img_h, &stride, 256);
+    heap_caps_free(data);
+    if (ret != ESP_OK || !decoded || img_w == 0 || img_h == 0) {
+        ESP_LOGW(FAN_MIPI50_DISPLAY_TAG, "Music cover decode failed: %s", esp_err_to_name(ret));
+        heap_caps_free(decoded);
+        return;
+    }
+    ESP_LOGI(FAN_MIPI50_DISPLAY_TAG, "JPEG decoded: %ux%u", (unsigned)img_w, (unsigned)img_h);
+    DisplayLockGuard lock(this);
+    music_cover_image_data_.reset();
+    try {
+        music_cover_image_data_ = std::make_unique<LvglAllocatedImage>(
+            decoded, decoded_len, img_w, img_h, stride, LV_COLOR_FORMAT_RGB565);
+        if (music_cover_img_ && music_cover_container_) {
+            lv_img_set_src(music_cover_img_, music_cover_image_data_->image_dsc());
+            const int32_t cover_box = 330;
+            int32_t scale_w = 256 * cover_box / (int32_t)img_w;
+            int32_t scale_h = 256 * cover_box / (int32_t)img_h;
+            music_cover_scale_ = (scale_w < scale_h) ? scale_w : scale_h;
+            if (music_cover_scale_ < 32) music_cover_scale_ = 32;
+            if (music_cover_scale_ > 256) music_cover_scale_ = 256;
+            lv_image_set_scale(music_cover_img_, music_cover_scale_);
+            lv_obj_remove_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
         }
-        /* 不在这里 join 封面下载线程：停播/失败路径常持有 DisplayLock，join 会卡死 LVGL。 */
-        current_music_picture_url_.clear();
-        music_cover_image_data_.reset();
-        if (music_cover_img_) {
-            lv_img_set_src(music_cover_img_, (const void*)nullptr);
-            lv_obj_add_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
-        }
-        /* 重置进度去抖与缓存歌词，避免下次播放时残留旧值 */
-        last_progress_ms_ = -1;
-        last_progress_sec_ = -1;
-        last_progress_bar_update_ms_ = -1;
-        last_lyric_.clear();
-        last_lyric_next_.clear();
-        /* 不主动重置 music_total_interval_sec_ —— 下一首开始播放时
-         * SetMusicInfo(..., interval) 会覆盖它。 */
+    } catch (const std::exception& e) {
+        ESP_LOGE(FAN_MIPI50_DISPLAY_TAG, "Music cover apply failed: %s", e.what());
+        heap_caps_free(decoded);
     }
 }
 

@@ -1623,11 +1623,7 @@ void Application::HandleStateChangedEvent() {
             if (is_music_playing) {
                 // 音乐播放中：显示音乐封面（黑色背景 + 专辑图），停止 MJPEG 动画
                 display->SetStatus(Lang::Strings::MUSIC_PLAYING);
-                std::string pic_url;
-                if (music) {
-                    pic_url = music->GetPictureUrl();
-                }
-                display->ShowMusicCover(true, pic_url);
+                display->ShowMusicCover(true, "");
             } else {
                 // 非音乐播放：隐藏音乐封面，恢复 idle 角色动画
                 display->ShowMusicCover(false, "");

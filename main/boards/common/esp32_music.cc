@@ -371,7 +371,13 @@ bool Esp32Music::HandleMusicDetailsJson(cJSON* response_json, const std::string&
     ESP_LOGI(TAG, "Starting streaming playback for: %s (API=%s)",
              song_name.c_str(), is_backup_api ? "backup" : "primary");
     song_name_displayed_ = false;
-    StartStreaming(current_music_url_);
+
+    if (cJSON_IsString(picture) && picture->valuestring && strlen(picture->valuestring) > 0) {
+        current_picture_url_ = picture->valuestring;
+    } else {
+        current_picture_url_.clear();
+        ESP_LOGW(TAG, "No picture URL in music details response");
+    }
 
     // 下发歌名/歌手/时长到显示端
     {
@@ -412,21 +418,11 @@ bool Esp32Music::HandleMusicDetailsJson(cJSON* response_json, const std::string&
                 }
             }
             display->SetMusicInfo(name_str, singer_str, interval_sec);
-        }
-    }
-
-    if (cJSON_IsString(picture) && picture->valuestring && strlen(picture->valuestring) > 0) {
-        current_picture_url_ = picture->valuestring;
-    } else {
-        current_picture_url_.clear();
-        ESP_LOGW(TAG, "No picture URL in music details response");
-    }
-    {
-        auto display = Board::GetInstance().GetDisplay();
-        if (display) {
             display->ShowMusicCover(true, current_picture_url_);
         }
     }
+
+    StartStreaming(current_music_url_);
 
     // 处理歌词：优先使用内嵌 lrctxt，其次使用 lyric_url
     if (cJSON_IsString(lrctxt) && lrctxt->valuestring && strlen(lrctxt->valuestring) > 0) {
@@ -673,9 +669,6 @@ bool Esp32Music::StopStreaming()
     ESP_LOGI(TAG, "Stopping music streaming - current state: downloading=%d, playing=%d",
              is_downloading_.load(), is_playing_.load());
 
-    // 重置采样率到原始值
-    ResetSampleRate();
-
     // 检查是否有流式播放正在进行
     if (!is_playing_ && !is_downloading_)
     {
@@ -749,6 +742,8 @@ bool Esp32Music::StopStreaming()
         ESP_LOGI(TAG, "Play thread joined in StopStreaming");
     }
 
+    ResetSampleRate();
+
     StopLyricThread();
 
     ClearAudioBuffer();
@@ -807,6 +802,10 @@ void Esp32Music::DownloadAudioStream(const std::string &music_url)
         ESP_LOGE(TAG, "Failed to connect to music stream URL");
         http->Close();
         SignalPlaybackAbort();
+        return;
+    }
+    if (!is_playing_.load() || !is_downloading_.load()) {
+        http->Close();
         return;
     }
 
@@ -1066,6 +1065,15 @@ void Esp32Music::PlayAudioStream()
         ESP_LOGI(TAG, "Starting playback with buffer: %d bytes", (int)buffer_size_);
     }
 
+    {
+        auto& app = Application::GetInstance();
+        app.GetAudioService().ResetDecoder();
+        if (codec && codec->output_enabled() && silence_flush_) {
+            codec->OutputData(silence_flush_, 4096);
+            codec->OutputData(silence_flush_, 4096);
+        }
+    }
+
     if (!mp3_input_buffer || !pcm_buffer)
     {
         ESP_LOGE(TAG, "Decode buffers missing");
@@ -1281,10 +1289,7 @@ void Esp32Music::PlayAudioStream()
         }
         else
         {
-            // 解码失败
             ESP_LOGW(TAG, "MP3 decode failed with error: %d", decode_result);
-
-            // 跳过一些字节继续尝试
             if (bytes_left > 1)
             {
                 read_ptr++;

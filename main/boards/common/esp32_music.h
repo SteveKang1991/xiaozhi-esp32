@@ -77,7 +77,7 @@ private:
     int64_t download_start_time_ms_;  // 记录下载开始时间，用于超时检测
     static constexpr size_t MAX_BUFFER_SIZE = 256 * 1024;  // 256KB缓冲区（降低以减少brownout风险）
     static constexpr size_t MIN_BUFFER_SIZE = 32 * 1024;   // 32KB最小播放缓冲（降低以减少brownout风险）
-    static constexpr int64_t DOWNLOAD_TIMEOUT_MS = 3000;   // 3秒下载超时，防止死等
+    static constexpr int64_t DOWNLOAD_TIMEOUT_MS = 15000;  // QQ 音频 TLS 常 3–8s，过短会误杀播放
     
     // MP3解码器相关
     HMP3Decoder mp3_decoder_;
