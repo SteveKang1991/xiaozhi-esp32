@@ -591,8 +591,6 @@ bool Esp32Music::StartStreaming(const std::string &music_url)
         play_thread_.join();
     }
 
-    // 清空缓冲区
-    ClearAudioBuffer();
     if (!EnsureDecodeBuffers()) {
         suppress_play_exit_ui_ = false;
         is_downloading_ = false;
@@ -601,11 +599,8 @@ bool Esp32Music::StartStreaming(const std::string &music_url)
     }
     download_start_time_ms_ = esp_timer_get_time() / 1000;
 
-    // 初始化 MP3 解码器
-    if (!mp3_decoder_initialized_)
-    {
-        InitializeMp3Decoder();
-    }
+    // 旧歌已 join：清下载缓冲并重建 Helix。I2S 静音冲刷留给开播前那一次，避免叠两次静音拉长换歌间隔。
+    ResetCodecAndDecoderState(true, false);
 
     // 停止 MJPEG 动画（释放 MJPEG 占用的内存给音乐播放用）
     auto& board = Board::GetInstance();
@@ -746,8 +741,7 @@ bool Esp32Music::StopStreaming()
 
     StopLyricThread();
 
-    ClearAudioBuffer();
-    // MP3 解码器跨歌曲复用，避免 Helix 堆块反复 malloc/free 打碎片
+    ResetCodecAndDecoderState(true);
 
     current_song_name_.clear();
     current_picture_url_.clear();
@@ -1026,6 +1020,8 @@ void Esp32Music::PlayAudioStream()
     bool id3_processed = false;
     uint8_t *mp3_input_buffer = mp3_input_buffer_;
     int16_t *pcm_buffer = pcm_decode_buffer_;
+    int fade_in_remaining = 2048;  // 约 46ms@44.1k，压掉开播瞬间直流台阶
+    int warmup_frames_skip = 2;     // Helix 首帧 overlap 常带爆破音，丢掉再出声
 
     auto codec = Board::GetInstance().GetAudioCodec();
     if (!codec || !codec->output_enabled())
@@ -1065,14 +1061,8 @@ void Esp32Music::PlayAudioStream()
         ESP_LOGI(TAG, "Starting playback with buffer: %d bytes", (int)buffer_size_);
     }
 
-    {
-        auto& app = Application::GetInstance();
-        app.GetAudioService().ResetDecoder();
-        if (codec && codec->output_enabled() && silence_flush_) {
-            codec->OutputData(silence_flush_, 4096);
-            codec->OutputData(silence_flush_, 4096);
-        }
-    }
+    // 缓冲已够：重建解码器并冲 I2S，但不要清掉刚下好的 MP3
+    ResetCodecAndDecoderState(false, true);
 
     if (!mp3_input_buffer || !pcm_buffer)
     {
@@ -1219,6 +1209,11 @@ void Esp32Music::PlayAudioStream()
                 continue;
             }
 
+            if (warmup_frames_skip > 0) {
+                warmup_frames_skip--;
+                continue;
+            }
+
             // 用累计样本算播放时间，避免每帧 (samples*1000/rate) 整除把时钟越走越慢
             const int ch = mp3_frame_info_.nChans;
             const int rate = mp3_frame_info_.samprate;
@@ -1274,6 +1269,15 @@ void Esp32Music::PlayAudioStream()
 
                 PublishPcmForFft(final_pcm_data, final_sample_count);
 
+                if (fade_in_remaining > 0) {
+                    const int n = std::min(final_sample_count, fade_in_remaining);
+                    const int start = 2048 - fade_in_remaining;
+                    for (int i = 0; i < n; ++i) {
+                        final_pcm_data[i] = (int16_t)(((int32_t)final_pcm_data[i] * (start + i)) / 2048);
+                    }
+                    fade_in_remaining -= n;
+                }
+
                 ESP_LOGD(TAG, "Sending %d PCM samples (rate=%d, channels=%d->1) to Application",
                          final_sample_count, mp3_frame_info_.samprate, mp3_frame_info_.nChans);
 
@@ -1305,15 +1309,8 @@ void Esp32Music::PlayAudioStream()
 playback_cleanup:
     is_playing_ = false;
 
-    {
-        auto codec = Board::GetInstance().GetAudioCodec();
-        if (codec && codec->output_enabled() && silence_flush_)
-        {
-            codec->OutputData(silence_flush_, 4096);
-            codec->OutputData(silence_flush_, 4096);
-            ESP_LOGI(TAG, "Flushed residual PCM data from codec output");
-        }
-    }
+    // 切歌 / 自然结束都要清残留；换歌时 suppress_play_exit_ui_ 只跳 UI，不清音频
+    ResetCodecAndDecoderState(true);
 
     const bool do_exit_ui = !suppress_play_exit_ui_.load();
     if (do_exit_ui)
@@ -1341,7 +1338,6 @@ playback_cleanup:
         ResetSampleRate();
     }
 
-    ClearAudioBuffer();
     ESP_LOGI(TAG, "Audio stream playback finished, total played: %d bytes", total_played);
 }
 
@@ -1361,6 +1357,60 @@ void Esp32Music::ClearAudioBuffer()
     buffer_size_ = 0;
     TrimChunkPool();
     ESP_LOGI(TAG, "Audio buffer cleared");
+}
+
+void Esp32Music::FlushCodecSilence()
+{
+    auto codec = Board::GetInstance().GetAudioCodec();
+    if (!codec || !codec->output_enabled() || !silence_flush_) {
+        return;
+    }
+    codec->OutputData(silence_flush_, 4096);
+    codec->OutputData(silence_flush_, 4096);
+}
+
+void Esp32Music::ResetCodecAndDecoderState(bool clear_stream_buffer, bool flush_i2s)
+{
+    if (clear_stream_buffer) {
+        ClearAudioBuffer();
+    }
+
+    if (mp3_input_buffer_) {
+        memset(mp3_input_buffer_, 0, 8192);
+    }
+    if (pcm_decode_buffer_) {
+        memset(pcm_decode_buffer_, 0, 2304 * sizeof(int16_t));
+    }
+    if (!mono_buffer_.empty()) {
+        memset(mono_buffer_.data(), 0, mono_buffer_.size() * sizeof(int16_t));
+        mono_buffer_.clear();
+    }
+    memset(&mp3_frame_info_, 0, sizeof(mp3_frame_info_));
+
+    current_play_time_ms_ = 0;
+    played_pcm_samples_ = 0;
+    last_frame_time_ms_ = 0;
+    total_frames_decoded_ = 0;
+    song_name_displayed_ = false;
+    current_lyric_index_ = -1;
+
+    if (final_pcm_data_fft) {
+        memset(final_pcm_data_fft, 0, FFT_PCM_SAMPLES * sizeof(int16_t));
+        fft_pcm_samples_ = 0;
+        fft_pcm_seq_ = 0;
+    }
+
+    CleanupMp3Decoder();
+    if (!InitializeMp3Decoder()) {
+        ESP_LOGE(TAG, "Failed to reinitialize MP3 decoder after reset");
+    }
+
+    Application::GetInstance().GetAudioService().ResetDecoder();
+    if (flush_i2s) {
+        FlushCodecSilence();
+    }
+    ESP_LOGI(TAG, "Playback pipeline reset (clear_stream=%d flush_i2s=%d)",
+             (int)clear_stream_buffer, (int)flush_i2s);
 }
 
 void Esp32Music::SignalPlaybackAbort()

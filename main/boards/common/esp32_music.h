@@ -92,6 +92,10 @@ private:
     bool InitializeMp3Decoder();
     void CleanupMp3Decoder();
     void ResetSampleRate();  // 重置采样率到原始值
+    void FlushCodecSilence();
+    // 切歌 / 播完：清 PCM 残留、重建 Helix；flush_i2s 冲掉 DAC 里上一首歌。
+    // clear_stream_buffer=false：播放线程已等够缓冲、不能把刚下好的 MP3 清掉。
+    void ResetCodecAndDecoderState(bool clear_stream_buffer, bool flush_i2s = true);
     
     // 歌词相关私有方法
     bool DownloadLyrics(const std::string& lyric_url);
