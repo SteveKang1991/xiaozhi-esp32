@@ -360,8 +360,77 @@ void Application::ActivationTask() {
     // Sync emotion files (idle/listen/speak MJPEG) from server to SD card
     CheckEmotionFiles();
 
+    // 拉取设备信息，加载自定义唤醒词拼音
+    CheckDeviceWakeWord();
+
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+}
+
+void Application::CheckDeviceWakeWord() {
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGW(TAG, "No network, skip wake word fetch");
+        return;
+    }
+
+    auto http = network->CreateHttp(0);
+    if (http == nullptr) {
+        ESP_LOGE(TAG, "Failed to create HTTP for device info");
+        return;
+    }
+
+    std::string mac = SystemInfo::GetMacAddress();
+    std::string uuid = board.GetUuid();
+    std::string url = "https://ai.fanfuture.cn/api/device/info?hardware_id=" + mac;
+    http->SetHeader("Device-Id", mac.c_str());
+    http->SetHeader("Client-Id", uuid.c_str());
+
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(TAG, "Failed to open device info: %s", url.c_str());
+        return;
+    }
+    if (http->GetStatusCode() != 200) {
+        ESP_LOGE(TAG, "Device info HTTP %d", http->GetStatusCode());
+        http->Close();
+        return;
+    }
+
+    std::string response;
+    char buffer[512];
+    int read;
+    while ((read = http->Read(buffer, sizeof(buffer))) > 0) {
+        response.append(buffer, read);
+    }
+    http->Close();
+
+    cJSON* root = cJSON_Parse(response.c_str());
+    if (root == nullptr) {
+        ESP_LOGE(TAG, "Failed to parse device info JSON");
+        return;
+    }
+
+    cJSON* data = cJSON_GetObjectItem(root, "data");
+    if (!cJSON_IsObject(data)) {
+        cJSON_Delete(root);
+        ESP_LOGE(TAG, "Device info missing data object");
+        return;
+    }
+
+    cJSON* command_item = cJSON_GetObjectItem(data, "assistant_command");
+    cJSON* name_item = cJSON_GetObjectItem(data, "assistant_name");
+    std::string command = cJSON_IsString(command_item) ? command_item->valuestring : "";
+    std::string text = cJSON_IsString(name_item) ? name_item->valuestring : "";
+    cJSON_Delete(root);
+
+    if (command.empty()) {
+        ESP_LOGW(TAG, "Device info has empty assistant_command");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Device wake word: %s (%s)", command.c_str(), text.c_str());
+    audio_service_.UpdateCustomWakeWord(command, text);
 }
 
 void Application::CheckAssetsVersion() {

@@ -34,6 +34,7 @@
 #else
 #include "wake_words/esp_wake_word.h"
 #endif
+#include "settings.h"
 
 #define TAG "AudioService"
 
@@ -723,6 +724,23 @@ void AudioService::SetModelsList(srmodel_list_t* models_list) {
             }
         });
     }
+}
+
+void AudioService::UpdateCustomWakeWord(const std::string& command, const std::string& text) {
+    if (command.empty()) {
+        return;
+    }
+    {
+        Settings settings("wakeword", true);
+        settings.SetString("command", command);
+        settings.SetString("text", text);
+    }
+#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
+    auto* custom = dynamic_cast<CustomWakeWord*>(wake_word_.get());
+    if (custom != nullptr) {
+        custom->UpdateWakeCommand(command, text);
+    }
+#endif
 }
 
 bool AudioService::IsAfeWakeWord() {

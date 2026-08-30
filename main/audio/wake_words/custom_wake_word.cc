@@ -2,6 +2,7 @@
 #include "audio_service.h"
 #include "system_info.h"
 #include "assets.h"
+#include "settings.h"
 
 #include <esp_log.h>
 #include <esp_mn_iface.h>
@@ -10,12 +11,21 @@
 #include <cJSON.h>
 
 #define TAG "CustomWakeWord"
+#define DETECTION_RUNNING_EVENT 1
 
 CustomWakeWord::CustomWakeWord()
     : wake_word_pcm_(), wake_word_opus_() {
+    event_group_ = xEventGroupCreate();
 }
 
 CustomWakeWord::~CustomWakeWord() {
+    running_ = false;
+    if (event_group_ != nullptr) {
+        xEventGroupClearBits(event_group_, DETECTION_RUNNING_EVENT);
+    }
+    input_cv_.notify_all();
+    /* detection_task_ 与 AFE 一样常驻，不在这里 vTaskDelete（可能正阻塞在 cv 上） */
+
     if (multinet_model_data_ != nullptr && multinet_ != nullptr) {
         multinet_->destroy(multinet_model_data_);
         multinet_model_data_ = nullptr;
@@ -31,6 +41,10 @@ CustomWakeWord::~CustomWakeWord() {
 
     if (models_ != nullptr) {
         esp_srmodel_deinit(models_);
+    }
+    if (event_group_ != nullptr) {
+        vEventGroupDelete(event_group_);
+        event_group_ = nullptr;
     }
 }
 
@@ -98,6 +112,26 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
         ParseWakenetModelConfig();
     }
 
+    {
+        Settings settings("wakeword", false);
+        std::string nvs_command = settings.GetString("command");
+        std::string nvs_text = settings.GetString("text");
+        if (!nvs_command.empty()) {
+            commands_.clear();
+            if (nvs_text.empty()) {
+                nvs_text = nvs_command;
+            }
+            commands_.push_back({nvs_command, nvs_text, "wake"});
+            ESP_LOGI(TAG, "Loaded wake word from NVS: %s (%s)", nvs_command.c_str(), nvs_text.c_str());
+        }
+    }
+
+    if (commands_.empty()) {
+#ifdef CONFIG_CUSTOM_WAKE_WORD
+        commands_.push_back({CONFIG_CUSTOM_WAKE_WORD, CONFIG_CUSTOM_WAKE_WORD_DISPLAY, "wake"});
+#endif
+    }
+
     if (models_ == nullptr || models_->num == -1) {
         ESP_LOGE(TAG, "Failed to initialize wakenet model");
         return false;
@@ -125,7 +159,36 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
     esp_mn_commands_update();
     
     multinet_->print_active_speech_commands(multinet_model_data_);
+
+    /* MultiNet7 推理不能放在 AudioInputTask（CPU0 prio 8）里：
+     * 音乐会把播放钉在 CPU0 prio 6，input 里跑 detect() 会把解码/I2S 饿死。
+     * 和 AfeWakeWord 一样：Feed 只入队，推理放到 CPU1（prio 4，高于 FFT/LVGL 的 1）。 */
+    if (detection_task_ == nullptr) {
+        xTaskCreatePinnedToCore([](void* arg) {
+            auto this_ = (CustomWakeWord*)arg;
+            this_->DetectionTask();
+            vTaskDelete(NULL);
+        }, "mn_detect", 4096 * 4, this, 4, &detection_task_, 1);
+    }
     return true;
+}
+
+void CustomWakeWord::UpdateWakeCommand(const std::string& command, const std::string& text) {
+    if (command.empty()) {
+        return;
+    }
+    std::string display = text.empty() ? command : text;
+    commands_.clear();
+    commands_.push_back({command, display, "wake"});
+    ESP_LOGI(TAG, "Update wake command: %s (%s)", command.c_str(), display.c_str());
+
+    if (multinet_ == nullptr || multinet_model_data_ == nullptr) {
+        return;
+    }
+    esp_mn_commands_clear();
+    esp_mn_commands_add(1, command.c_str());
+    esp_mn_commands_update();
+    multinet_->print_active_speech_commands(multinet_model_data_);
 }
 
 void CustomWakeWord::OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback) {
@@ -134,53 +197,91 @@ void CustomWakeWord::OnWakeWordDetected(std::function<void(const std::string& wa
 
 void CustomWakeWord::Start() {
     running_ = true;
+    xEventGroupSetBits(event_group_, DETECTION_RUNNING_EVENT);
+    input_cv_.notify_all();
 }
 
 void CustomWakeWord::Stop() {
     running_ = false;
+    xEventGroupClearBits(event_group_, DETECTION_RUNNING_EVENT);
 
     std::lock_guard<std::mutex> lock(input_buffer_mutex_);
     input_buffer_.clear();
+    input_cv_.notify_all();
 }
 
 void CustomWakeWord::Feed(const std::vector<int16_t>& data) {
-    if (multinet_model_data_ == nullptr) {
+    if (multinet_model_data_ == nullptr || !running_) {
         return;
     }
 
     std::lock_guard<std::mutex> lock(input_buffer_mutex_);
-    // Check running state inside lock to avoid TOCTOU race with Stop()
     if (!running_) {
         return;
     }
 
-    // If input channels is 2, we need to fetch the left channel data
     if (codec_->input_channels() == 2) {
-        for (size_t i = 0; i < data.size(); i += 2) {
+        input_buffer_.reserve(input_buffer_.size() + data.size() / 2);
+        for (size_t i = 0; i + 1 < data.size(); i += 2) {
             input_buffer_.push_back(data[i]);
         }
     } else {
         input_buffer_.insert(input_buffer_.end(), data.begin(), data.end());
     }
-    
-    int chunksize = multinet_->get_samp_chunksize(multinet_model_data_);
-    while (input_buffer_.size() >= chunksize) {
-        std::vector<int16_t> chunk(input_buffer_.begin(), input_buffer_.begin() + chunksize);
+
+    /* 推理跟不上时丢掉旧数据，避免 SRAM 被 PCM 队列撑爆、唤醒也越来越滞后 */
+    constexpr size_t kMaxPendingSamples = 16000;  // 1s @ 16kHz mono
+    if (input_buffer_.size() > kMaxPendingSamples) {
+        input_buffer_.erase(input_buffer_.begin(),
+                            input_buffer_.begin() + (input_buffer_.size() - kMaxPendingSamples));
+    }
+    input_cv_.notify_one();
+}
+
+void CustomWakeWord::DetectionTask() {
+    ESP_LOGI(TAG, "MultiNet detection task started (CPU1, prio 4)");
+
+    while (true) {
+        xEventGroupWaitBits(event_group_, DETECTION_RUNNING_EVENT, pdFALSE, pdTRUE, portMAX_DELAY);
+        if (multinet_model_data_ == nullptr) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        const int chunksize = multinet_->get_samp_chunksize(multinet_model_data_);
+        std::vector<int16_t> chunk;
+        {
+            std::unique_lock<std::mutex> lock(input_buffer_mutex_);
+            input_cv_.wait(lock, [this, chunksize]() {
+                return !running_ || input_buffer_.size() >= (size_t)chunksize;
+            });
+            if (!running_) {
+                continue;
+            }
+            if (input_buffer_.size() < (size_t)chunksize) {
+                continue;
+            }
+            chunk.assign(input_buffer_.begin(), input_buffer_.begin() + chunksize);
+            input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + chunksize);
+        }
+
         StoreWakeWordData(chunk);
-        
         esp_mn_state_t mn_state = multinet_->detect(multinet_model_data_, chunk.data());
-        
+
         if (mn_state == ESP_MN_STATE_DETECTED) {
             esp_mn_results_t *mn_result = multinet_->get_results(multinet_model_data_);
             for (int i = 0; i < mn_result->num && running_; i++) {
-                ESP_LOGI(TAG, "Custom wake word detected: command_id=%d, string=%s, prob=%f", 
+                ESP_LOGI(TAG, "Custom wake word detected: command_id=%d, string=%s, prob=%f",
                         mn_result->command_id[i], mn_result->string, mn_result->prob[i]);
                 auto& command = commands_[mn_result->command_id[i] - 1];
                 if (command.action == "wake") {
                     last_detected_wake_word_ = command.text;
                     running_ = false;
-                    input_buffer_.clear();
-                    
+                    xEventGroupClearBits(event_group_, DETECTION_RUNNING_EVENT);
+                    {
+                        std::lock_guard<std::mutex> lock(input_buffer_mutex_);
+                        input_buffer_.clear();
+                    }
                     if (wake_word_detected_callback_) {
                         wake_word_detected_callback_(last_detected_wake_word_);
                     }
@@ -191,11 +292,6 @@ void CustomWakeWord::Feed(const std::vector<int16_t>& data) {
             ESP_LOGD(TAG, "Command word detection timeout, cleaning state");
             multinet_->clean(multinet_model_data_);
         }
-        
-        if (!running_) {
-            break;
-        }
-        input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + chunksize);
     }
 }
 
