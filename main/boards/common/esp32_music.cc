@@ -422,7 +422,9 @@ bool Esp32Music::HandleMusicDetailsJson(cJSON* response_json, const std::string&
         }
     }
 
-    StartStreaming(current_music_url_);
+    if (!StartStreaming(current_music_url_)) {
+        return false;
+    }
 
     // 处理歌词：优先使用内嵌 lrctxt，其次使用 lyric_url
     if (cJSON_IsString(lrctxt) && lrctxt->valuestring && strlen(lrctxt->valuestring) > 0) {
@@ -449,6 +451,12 @@ bool Esp32Music::HandleMusicDetailsJson(cJSON* response_json, const std::string&
 }
 bool Esp32Music::Download(const std::string &song_name, const std::string &artist_name)
 {
+    if (is_playing_) {
+        ESP_LOGW(TAG, "Already in playback mode, skip: %s", song_name.c_str());
+        return false;
+    }
+    is_playing_ = true;
+
     ESP_LOGI(TAG, "Starting to get music details for: %s", song_name.c_str());
 
     last_downloaded_data_.clear();
@@ -549,6 +557,7 @@ bool Esp32Music::Download(const std::string &song_name, const std::string &artis
         }
     }
 
+    is_playing_ = false;
     return false;
 }
 
@@ -568,17 +577,13 @@ bool Esp32Music::StartStreaming(const std::string &music_url)
 
     ESP_LOGD(TAG, "Starting streaming for URL: %s", music_url.c_str());
 
-    // 换歌：join 旧 play 时禁止它切 Listening / 拆封面（新歌马上还要用）
-    suppress_play_exit_ui_ = true;
-    SignalPlaybackAbort();
-    StopLyricThread();
-
-    // 等待之前的线程完全结束
+    // 上一首歌线程若已结束但未 join，这里收尸。不要 SignalPlaybackAbort：
+    // 那会清掉 Download 刚置上的 is_playing_，也会把正在播的歌掐掉再开第二首。
     if (download_thread_.joinable())
     {
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            buffer_cv_.notify_all(); // 通知线程退出
+            buffer_cv_.notify_all();
         }
         download_thread_.join();
     }
@@ -586,10 +591,11 @@ bool Esp32Music::StartStreaming(const std::string &music_url)
     {
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            buffer_cv_.notify_all(); // 通知线程退出
+            buffer_cv_.notify_all();
         }
         play_thread_.join();
     }
+    StopLyricThread();
 
     if (!EnsureDecodeBuffers()) {
         suppress_play_exit_ui_ = false;

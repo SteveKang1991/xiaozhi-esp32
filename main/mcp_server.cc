@@ -125,6 +125,7 @@ void McpServer::AddCommonTools() {
     if (music) {
              AddTool("self.music.play_song",
              "播放指定的歌曲。当用户要求播放音乐时使用此工具，会自动获取歌曲详情并开始流式播放。\n"
+             "若当前已有歌曲在播放，不要再次调用本工具。\n"
              "参数:\n"
              "  `song_name`: 要播放的歌曲名称（必需）。\n"
              "  `artist_name`: 要播放的歌曲艺术家名称（可选，默认为空字符串）。\n"
@@ -138,9 +139,19 @@ void McpServer::AddCommonTools() {
                 auto song_name = properties["song_name"].value<std::string>();
                 auto artist_name = properties["artist_name"].value<std::string>();
 
-                // 获取当前状态
                 auto& app = Application::GetInstance();
                 DeviceState current_state = app.GetDeviceState();
+
+                // idle 且正在出声：拒绝叠第二首。聊天态（listening/speaking）音乐已挂起，
+                // 允许先停再放新歌。
+                if (music->IsPlaying()) {
+                    if (current_state == kDeviceStateIdle) {
+                        ESP_LOGW(TAG, "play_song ignored, already playing: %s", song_name.c_str());
+                        return "{\"success\": false, \"message\": \"已有歌曲在播放\"}";
+                    }
+                    ESP_LOGI(TAG, "Stop paused music before playing: %s", song_name.c_str());
+                    music->StopStreaming();
+                }
 
                 // 如果当前在 speaking/listening，先切换到 idle 让音乐可以播放
                 if (current_state == kDeviceStateSpeaking ||
