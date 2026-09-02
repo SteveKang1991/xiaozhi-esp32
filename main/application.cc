@@ -233,6 +233,9 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
+                if (ShouldDropWakeStageAudio()) {
+                    continue;
+                }
                 if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
                     break;
                 }
@@ -1509,6 +1512,7 @@ void Application::HandleToggleChatEvent() {
             });
             return;
         }
+        play_popup_on_listening_ = true;
         SetListeningMode(mode);
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
@@ -1525,10 +1529,12 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
+            SetDeviceState(kDeviceStateIdle);
             return;
         }
     }
 
+    play_popup_on_listening_ = true;
     SetListeningMode(mode);
 }
 
@@ -1565,6 +1571,7 @@ void Application::HandleStartListeningEvent() {
             });
             return;
         }
+        play_popup_on_listening_ = true;
         SetListeningMode(kListeningModeManualStop);
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
@@ -1650,25 +1657,43 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
             audio_service_.EnableWakeWordDetection(true);
+            SetDeviceState(kDeviceStateIdle);
             return;
         }
     }
 
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
-#if CONFIG_SEND_WAKE_WORD_DATA
-    // Encode and send the wake word data to the server
-    while (auto packet = audio_service_.PopWakeWordPacket()) {
-        protocol_->SendAudio(std::move(packet));
+    // 只上报唤醒事件。本地缓存的唤醒词 Opus / 尾音不得当聊天发给服务端，
+    // 否则相近音节（如「星黎」→「心灵」）会被 ASR 成第二轮对话。
+    while (audio_service_.PopWakeWordPacket()) {
     }
-    // Set the chat state to wake word detected
+    while (audio_service_.PopPacketFromSendQueue()) {
+    }
+    audio_service_.ClearSendAndEncodeQueues();
+    BeginWakeAudioHold();
     protocol_->SendWakeWordDetected(wake_word);
-    SetListeningMode(GetDefaultListeningMode());
-#else
-    // Set flag to play popup sound after state changes to listening
-    // (PlaySound here would be cleared by ResetDecoder in EnableVoiceProcessing)
     play_popup_on_listening_ = true;
     SetListeningMode(GetDefaultListeningMode());
-#endif
+}
+
+void Application::BeginWakeAudioHold() {
+    hold_wake_audio_upload_ = true;
+    hold_wake_audio_until_us_ = esp_timer_get_time() + 1500000;
+}
+
+bool Application::ShouldDropWakeStageAudio() {
+    if (!hold_wake_audio_upload_) {
+        return false;
+    }
+    if (GetDeviceState() == kDeviceStateSpeaking) {
+        hold_wake_audio_upload_ = false;
+        return false;
+    }
+    if (esp_timer_get_time() >= hold_wake_audio_until_us_) {
+        hold_wake_audio_upload_ = false;
+        return false;
+    }
+    return true;
 }
 
 void Application::HandleStateChangedEvent() {
@@ -1702,6 +1727,7 @@ void Application::HandleStateChangedEvent() {
             /* 任何回到 idle 的转场都清空字幕(也包括音乐播放路径,
              * 否则播放恢复后仍能看到上一次 AI 句子末段的残留)。 */
             display->ClearChatMessages();
+            hold_wake_audio_upload_ = false;
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             // 主动确保 codec input 已启用（唤醒词检测需要录音）
@@ -1735,6 +1761,9 @@ void Application::HandleStateChangedEvent() {
                 // Send the start listening command
                 protocol_->SendStartListening(listening_mode_);
                 audio_service_.EnableVoiceProcessing(true);
+                if (hold_wake_audio_upload_) {
+                    audio_service_.ClearSendAndEncodeQueues();
+                }
             }
 
 #ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
@@ -1752,6 +1781,7 @@ void Application::HandleStateChangedEvent() {
             }
             break;
         case kDeviceStateSpeaking:
+            hold_wake_audio_upload_ = false;
             display->SetStatus(Lang::Strings::SPEAKING);
             display->SetRoleAnimation("speak");
 

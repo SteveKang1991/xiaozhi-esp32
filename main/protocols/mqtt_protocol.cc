@@ -149,7 +149,7 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         return false;
     }
-    mqtt_->Subscribe(subscribe_topic_.c_str(), 0);
+    mqtt_->Subscribe(subscribe_topic_.c_str(), 1);
     SendText(R"({"session_id":"3144dff0","type":"goodbye"})");
     //发布一个暂停的
     ESP_LOGI(TAG, "Connected to endpoint");
@@ -234,17 +234,31 @@ bool MqttProtocol::OpenAudioChannel() {
     }
 
     error_occurred_ = false;
-    session_id_ = "";
-    xEventGroupClearBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
 
-    auto message = GetHelloMessage();
-    if (!SendText(message)) {
-        return false;
+    constexpr int kMaxHelloAttempts = 2;
+    constexpr int kHelloTimeoutMs = 2000;
+    bool got_hello = false;
+    for (int attempt = 1; attempt <= kMaxHelloAttempts; ++attempt) {
+        session_id_ = "";
+        xEventGroupClearBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
+
+        auto message = GetHelloMessage();
+        if (!SendText(message)) {
+            ESP_LOGW(TAG, "Failed to send hello, retry %d/%d", attempt, kMaxHelloAttempts);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
+        EventBits_t bits = xEventGroupWaitBits(
+            event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE,
+            pdMS_TO_TICKS(kHelloTimeoutMs));
+        if (bits & MQTT_PROTOCOL_SERVER_HELLO_EVENT) {
+            got_hello = true;
+            break;
+        }
+        ESP_LOGW(TAG, "Failed to receive server hello, retry %d/%d", attempt, kMaxHelloAttempts);
     }
-
-    // 等待服务器响应
-    EventBits_t bits = xEventGroupWaitBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
-    if (!(bits & MQTT_PROTOCOL_SERVER_HELLO_EVENT)) {
+    if (!got_hello) {
         ESP_LOGE(TAG, "Failed to receive server hello");
         SetError(Lang::Strings::SERVER_TIMEOUT);
         return false;

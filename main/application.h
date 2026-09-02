@@ -160,6 +160,13 @@ private:
     volatile bool tts_stop_grace_accept_audio_ = false;
     esp_timer_handle_t tts_stop_grace_timer_ = nullptr;
 
+    // 唤醒词音频及其尾音不得作为聊天上传；仅发送 listen detect。
+    bool hold_wake_audio_upload_ = false;
+    int64_t hold_wake_audio_until_us_ = 0;
+
+    void BeginWakeAudioHold();
+    bool ShouldDropWakeStageAudio();
+
 
     // Event handlers
     void HandleStateChangedEvent();

@@ -529,6 +529,13 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
     return packet;
 }
 
+void AudioService::ClearSendAndEncodeQueues() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    audio_send_queue_.clear();
+    audio_encode_queue_.clear();
+    audio_queue_cv_.notify_all();
+}
+
 void AudioService::EncodeWakeWord() {
     if (wake_word_) {
         wake_word_->EncodeWakeWordData();
