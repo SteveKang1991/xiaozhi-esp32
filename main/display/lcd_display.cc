@@ -1356,8 +1356,35 @@ void LcdDisplay::SetHideSubtitle(bool hide) {
 // FFT 音乐频谱显示实现
 // ============================================================================
 
+void LcdDisplay::ResetFftVisual() {
+    fft_data_ready_ = false;
+    memset(avg_power_spectrum_, 0, sizeof(avg_power_spectrum_));
+    memset(bar_heights_, 0, sizeof(bar_heights_));
+    memset(peak_heights_, 0, sizeof(peak_heights_));
+    memset(draw_bar_h_, 0, sizeof(draw_bar_h_));
+    memset(draw_peak_h_, 0, sizeof(draw_peak_h_));
+    memset(last_draw_bar_h_, 0xFF, sizeof(last_draw_bar_h_));
+    memset(last_draw_peak_h_, 0xFF, sizeof(last_draw_peak_h_));
+    if (audio_data_ != nullptr) {
+        memset(audio_data_, 0, sizeof(int16_t) * 1152);
+    }
+    // 已显示时立刻重画空柱，否则 DRAW_MAIN 仍用上一曲的 draw_bar_h_
+    if (fft_container_ != nullptr && fft_enabled_) {
+        DisplayLockGuard lock(this);
+        if (fft_container_ != nullptr) {
+            lv_obj_invalidate(fft_container_);
+        }
+    }
+}
+
 void LcdDisplay::EnableFft(bool enable) {
-    if (enable && !fft_enabled_) {
+    if (enable) {
+        if (fft_enabled_) {
+            ResetFftVisual();
+            setFftBarsVisible(true);
+            return;
+        }
+
         ESP_LOGI(TAG, "Enabling FFT display");
 
         if (!ensureFftBuffers()) {
@@ -1376,13 +1403,8 @@ void LcdDisplay::EnableFft(bool enable) {
             setFftBarsVisible(true);
         }
 
-        memset(avg_power_spectrum_, 0, sizeof(avg_power_spectrum_));
-        memset(bar_heights_, 0, sizeof(bar_heights_));
-        memset(peak_heights_, 0, sizeof(peak_heights_));
-        memset(last_draw_bar_h_, 0xFF, sizeof(last_draw_bar_h_));
-        memset(last_draw_peak_h_, 0xFF, sizeof(last_draw_peak_h_));
-        fft_data_ready_ = false;
         fft_enabled_ = true;
+        ResetFftVisual();
 
         if (fft_task_handle_ == nullptr) {
             fft_task_should_stop_ = false;
@@ -1397,7 +1419,7 @@ void LcdDisplay::EnableFft(bool enable) {
             );
             ESP_LOGI(TAG, "FFT task started (pinned CPU1, priority 1)");
         }
-    } else if (!enable && fft_enabled_) {
+    } else if (fft_enabled_) {
         ESP_LOGI(TAG, "Disabling FFT display (hide & park, keep buffers)");
         StopFft();
     }
@@ -1412,10 +1434,7 @@ void LcdDisplay::StopFft() {
     // ShowMusicCover(false) 持有 DisplayLock 时调用本函数，若再等 FFT 任务
     //（任务里也要抢同一把锁）会死锁，LVGL 卡死。
     fft_enabled_ = false;
-    fft_data_ready_ = false;
-    memset(avg_power_spectrum_, 0, sizeof(avg_power_spectrum_));
-    memset(bar_heights_, 0, sizeof(bar_heights_));
-    memset(peak_heights_, 0, sizeof(peak_heights_));
+    ResetFftVisual();
     setFftBarsVisible(false);
     ESP_LOGI(TAG, "FFT parked (buffers and bars retained)");
 }

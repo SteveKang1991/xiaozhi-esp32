@@ -110,6 +110,7 @@ protected:
 public:
     virtual void EnableFft(bool enable) override;
     void StopFft() override;
+    void ResetFftVisual() override;
 
 protected:
     // Add protected constructor

@@ -1405,6 +1405,12 @@ void Esp32Music::ResetCodecAndDecoderState(bool clear_stream_buffer, bool flush_
         fft_pcm_samples_ = 0;
         fft_pcm_seq_ = 0;
     }
+    {
+        auto display = Board::GetInstance().GetDisplay();
+        if (display) {
+            display->ResetFftVisual();
+        }
+    }
 
     CleanupMp3Decoder();
     if (!InitializeMp3Decoder()) {

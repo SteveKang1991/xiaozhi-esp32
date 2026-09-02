@@ -100,6 +100,11 @@ public:
     virtual void StopFft() {}
 
     /**
+     * 把频谱柱/帽打回初始高度并清计算缓存。切歌打断或一曲结束时调用，
+     * 避免下一曲开头仍画着上一曲最后一帧。 */
+    virtual void ResetFftVisual() {}
+
+    /**
      * 获取音乐封面容器对象，用于 FFT canvas 的父对象。
      * 返回 nullptr 表示音乐封面未激活。
      * 默认实现为空。 */
