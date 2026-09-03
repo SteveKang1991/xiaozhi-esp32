@@ -534,8 +534,7 @@ void Application::CheckNewVersion() {
         // Reboot after first OTA check following BluFi provisioning
         if (first_boot_after_blufi_) {
             ESP_LOGI(TAG, "First OTA check after BluFi completed, rebooting device...");
-            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second before reboot
-            esp_restart();
+            Reboot();
         }
 
         if (ota_->HasNewVersion()) {
@@ -1832,18 +1831,29 @@ ListeningMode Application::GetDefaultListeningMode() const {
 
 void Application::Reboot() {
     ESP_LOGI(TAG, "Rebooting...");
-    // 关闭背光,避免重启瞬间显示垃圾数据导致蓝屏闪烁
-    if (Backlight* bl = Board::GetInstance().GetBacklight()) {
+    auto& board = Board::GetInstance();
+    Display* display = board.GetDisplay();
+    if (display != nullptr) {
+        display->PrepareForReboot();
+        // 等 MIPI 把黑帧刷完，避免关背光时还停在上一帧
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    Backlight* bl = board.GetBacklight();
+    int fade_ms = 400;
+    if (bl != nullptr) {
+        fade_ms = static_cast<int>(bl->brightness()) * 5;
+        if (fade_ms < 200) {
+            fade_ms = 200;
+        }
         bl->SetBrightness(0, false);
     }
-    // Disconnect the audio channel
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         protocol_->CloseAudioChannel();
     }
     protocol_.reset();
     audio_service_.Stop();
 
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(fade_ms + 100));
     esp_restart();
 }
 

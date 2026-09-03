@@ -262,6 +262,11 @@ public:
         }
     }
 
+    void PrepareForReboot() override {
+        StopMjpegIfRunning();
+        LvglDisplay::PrepareForReboot();
+    }
+
     /* 完整歌名 / 歌手 / 总时长 元数据，子控件显示在 music_cover_container_ 内，
      * 不写到 chat_message_label_（那是 AI 聊天字幕专用）。
      * song_name/singer 为 nullptr/empty 表示对应字段清空；interval < 0 表示

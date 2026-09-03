@@ -48,6 +48,11 @@ public:
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
+    /**
+     * 重启前：铺满黑屏，避免 MIPI 残留画面在复位时显示成蓝屏。
+     * 子类可先停 MJPEG 等叠加层，再调用基类。
+     */
+    virtual void PrepareForReboot() {}
     virtual void SetupUI() { 
         setup_ui_called_ = true;
     }

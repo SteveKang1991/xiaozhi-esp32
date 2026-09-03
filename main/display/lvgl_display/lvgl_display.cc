@@ -231,6 +231,24 @@ void LvglDisplay::SetPowerSaveMode(bool on) {
     }
 }
 
+void LvglDisplay::PrepareForReboot() {
+    DisplayLockGuard lock(this);
+    lv_obj_t* blackout = lv_obj_create(lv_screen_active());
+    if (blackout == nullptr) {
+        return;
+    }
+    lv_obj_set_size(blackout, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(blackout, 0, 0);
+    lv_obj_set_style_bg_color(blackout, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(blackout, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(blackout, 0, 0);
+    lv_obj_set_style_radius(blackout, 0, 0);
+    lv_obj_set_style_pad_all(blackout, 0, 0);
+    lv_obj_remove_flag(blackout, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(blackout);
+    lv_refr_now(display_);
+}
+
 bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
 #if CONFIG_LV_USE_SNAPSHOT
     DisplayLockGuard lock(this);
