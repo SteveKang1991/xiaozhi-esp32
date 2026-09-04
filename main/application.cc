@@ -1728,6 +1728,9 @@ void Application::HandleStateChangedEvent() {
             display->ClearChatMessages();
             hold_wake_audio_upload_ = false;
             audio_service_.EnableVoiceProcessing(false);
+            if (is_music_playing) {
+                audio_service_.ClearSendAndEncodeQueues();
+            }
             audio_service_.EnableWakeWordDetection(true);
             // 主动确保 codec input 已启用（唤醒词检测需要录音）
             // 这对于音乐播放中尤其重要，避免 wake word 收不到数据
