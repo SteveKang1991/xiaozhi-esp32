@@ -271,6 +271,12 @@ void Application::Run() {
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
             }
+            if (clock_ticks_ % 10 == 0) {
+                xTaskCreate([](void* arg) {
+                    static_cast<Application*>(arg)->ReportDeviceInfo();
+                    vTaskDelete(NULL);
+                }, "online_hb", 4096, this, 1, nullptr);
+            }
         }
     }
 }
@@ -364,13 +370,14 @@ void Application::ActivationTask() {
     CheckEmotionFiles();
 
     // 拉取设备信息，加载自定义唤醒词拼音
-    CheckDeviceWakeWord();
+    CheckDeviceInfo();
+    ReportDeviceInfo();
 
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
 }
 
-void Application::CheckDeviceWakeWord() {
+void Application::CheckDeviceInfo() {
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
     if (network == nullptr) {
@@ -434,6 +441,63 @@ void Application::CheckDeviceWakeWord() {
 
     ESP_LOGI(TAG, "Device wake word: %s (%s)", command.c_str(), text.c_str());
     audio_service_.UpdateCustomWakeWord(command, text);
+}
+
+void Application::ReportDeviceInfo() {
+    auto state = GetDeviceState();
+    if (state == kDeviceStateWifiConfiguring || state == kDeviceStateStarting ||
+        state == kDeviceStateUnknown) {
+        return;
+    }
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    if (network == nullptr) {
+        return;
+    }
+    auto http = network->CreateHttp(0);
+    if (http == nullptr) {
+        return;
+    }
+
+    int battery = -1;
+    bool charging = false;
+    bool discharging = false;
+    if (!board.GetBatteryLevel(battery, charging, discharging)) {
+        battery = -1;
+        charging = false;
+    }
+    int volume = 0;
+    if (auto codec = board.GetAudioCodec()) {
+        volume = codec->output_volume();
+    }
+    int brightness = -1;
+    if (auto backlight = board.GetBacklight()) {
+        brightness = backlight->brightness();
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "battery", battery);
+    cJSON_AddBoolToObject(root, "charging", charging);
+    cJSON_AddNumberToObject(root, "volume", volume);
+    cJSON_AddNumberToObject(root, "brightness", brightness);
+    char* printed = cJSON_PrintUnformatted(root);
+    std::string body = printed ? printed : "{}";
+    if (printed) {
+        cJSON_free(printed);
+    }
+    cJSON_Delete(root);
+
+    std::string mac = SystemInfo::GetMacAddress();
+    std::string url = "https://ai.fanfuture.cn/api/hardware/heartbeat";
+    http->SetHeader("Device-Id", mac.c_str());
+    http->SetHeader("Client-Id", board.GetUuid().c_str());
+    http->SetHeader("Content-Type", "application/json");
+    http->SetContent(std::move(body));
+    if (!http->Open("POST", url)) {
+        return;
+    }
+    (void)http->GetStatusCode();
+    http->Close();
 }
 
 void Application::CheckAssetsVersion() {

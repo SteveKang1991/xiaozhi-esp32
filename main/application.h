@@ -203,7 +203,8 @@ private:
     void CheckSDAssetsFiles();
     bool DownloadSDAssetsFile(const std::string& url, const std::string& local_path,
                               DownloadProgressCallback progress_cb = nullptr);
-    void CheckDeviceWakeWord();
+    void CheckDeviceInfo();
+    void ReportDeviceInfo();
     
     // State change handler called by state machine
     void OnStateChanged(DeviceState old_state, DeviceState new_state);
