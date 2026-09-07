@@ -151,6 +151,9 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
 
     multinet_ = esp_mn_handle_from_name(mn_name_);
     multinet_model_data_ = multinet_->create(mn_name_, duration_);
+#ifdef CONFIG_CUSTOM_WAKE_WORD
+    threshold_ = CONFIG_CUSTOM_WAKE_WORD_THRESHOLD / 100.0f;
+#endif
     multinet_->set_det_threshold(multinet_model_data_, threshold_);
     esp_mn_commands_clear();
     for (int i = 0; i < commands_.size(); i++) {
@@ -162,13 +165,13 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
 
     /* MultiNet7 推理不能放在 AudioInputTask（CPU0 prio 8）里：
      * 音乐会把播放钉在 CPU0 prio 6，input 里跑 detect() 会把解码/I2S 饿死。
-     * 和 AfeWakeWord 一样：Feed 只入队，推理放到 CPU1（prio 4，高于 FFT/LVGL 的 1）。 */
+     * 和 AfeWakeWord 一样：Feed 只入队，推理放到 CPU1（prio 6，高于 mjpeg_read 的 4）。 */
     if (detection_task_ == nullptr) {
         xTaskCreatePinnedToCore([](void* arg) {
             auto this_ = (CustomWakeWord*)arg;
             this_->DetectionTask();
             vTaskDelete(NULL);
-        }, "mn_detect", 4096 * 4, this, 4, &detection_task_, 1);
+        }, "mn_detect", 4096 * 4, this, 6, &detection_task_, 1);
     }
     return true;
 }

@@ -82,7 +82,10 @@ void LvglDisplay::SetStatus(const char* status) {
     }
     lv_label_set_text(status_label_, status);
     lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+    if (notification_label_ != nullptr) {
+        lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_invalidate(status_label_);
 
     last_status_update_time_ = std::chrono::system_clock::now();
 }

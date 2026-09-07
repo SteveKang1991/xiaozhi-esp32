@@ -50,7 +50,7 @@ private:
     char* mn_name_ = nullptr;
     std::string language_ = "cn";
     int duration_ = 3000;
-    float threshold_ = 0.1;
+    float threshold_ = 0.2;
     std::deque<Command> commands_;
  
     std::function<void(const std::string& wake_word)> wake_word_detected_callback_;

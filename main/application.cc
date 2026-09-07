@@ -271,11 +271,15 @@ void Application::Run() {
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
             }
-            if (clock_ticks_ % 10 == 0) {
-                xTaskCreate([](void* arg) {
-                    static_cast<Application*>(arg)->ReportDeviceInfo();
-                    vTaskDelete(NULL);
-                }, "online_hb", 4096, this, 1, nullptr);
+            {
+                auto st = GetDeviceState();
+                int hb_sec = (st == kDeviceStateListening || st == kDeviceStateSpeaking) ? 60 : 10;
+                if (clock_ticks_ % hb_sec == 0) {
+                    xTaskCreate([](void* arg) {
+                        static_cast<Application*>(arg)->ReportDeviceInfo();
+                        vTaskDelete(NULL);
+                    }, "online_hb", 4096, this, 1, nullptr);
+                }
             }
         }
     }

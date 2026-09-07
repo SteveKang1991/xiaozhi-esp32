@@ -666,10 +666,10 @@ private:
 
         chat_message_inner_label_ = lv_label_create(chat_message_label_);
         lv_label_set_text(chat_message_inner_label_, "");
-        /* 宽 30 (字宽 = font_puhui_basic_30_4 字宽 20)，高度跟随内容。 */
         lv_obj_set_width(chat_message_inner_label_, 30);
-        /* inner label 透明即可 — 外层 container 已经是不透明背景负责清屏。 */
-        lv_obj_set_style_bg_opa(chat_message_inner_label_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_min_height(chat_message_inner_label_, (lv_coord_t)(height_ - 300), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(chat_message_inner_label_, lv_color_black(), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(chat_message_inner_label_, LV_OPA_COVER, LV_PART_MAIN);
         lv_label_set_long_mode(chat_message_inner_label_, LV_LABEL_LONG_WRAP);
         lv_obj_set_style_text_align(chat_message_inner_label_, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(chat_message_inner_label_, lvgl_theme->text_color(), 0);
@@ -720,6 +720,8 @@ inline void FanMIPI55Display::SetChatMessage(const char* role, const char* conte
         if (bottom_bar_ != nullptr) {
             lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
         }
+        lv_obj_invalidate(chat_message_label_);
+        lv_refr_now(nullptr);
         return;
     }
     if (last_chat_content_ == content) {
@@ -776,6 +778,8 @@ inline void FanMIPI55Display::SetChatMessage(const char* role, const char* conte
         if (bottom_bar_ != nullptr && !hide_subtitle_) {
             lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
         }
+        lv_obj_invalidate(chat_message_label_);
+        lv_refr_now(nullptr);
         return;
     }
 
@@ -788,12 +792,9 @@ inline void FanMIPI55Display::SetChatMessage(const char* role, const char* conte
     int total_chars = content_h / 20;
     int extra_chars = total_chars - chars_per_screen;
     if (extra_chars < 1) extra_chars = 1;
-    /* 总时长根据像素距离线性计算,20px/s 的速度。
-     * 之前 400ms/字符导致单次滚动最多 60s,期间每帧都触发 layout。
-     * 用像素距离算时长使得时长正比于实际滚动距离,减少动画总帧数。 */
-    uint32_t duration_ms = (uint32_t)(scroll_range_px * 1000 / 20);  // 20px/s
+    uint32_t duration_ms = (uint32_t)(scroll_range_px * 1000 / 40);
     if (duration_ms < 2000) duration_ms = 2000;
-    if (duration_ms > 30000) duration_ms = 30000;
+    if (duration_ms > 16000) duration_ms = 16000;
 
     /* 先归零：若之前在滚动,确保从 0 开始。 */
     lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
@@ -817,6 +818,8 @@ inline void FanMIPI55Display::SetChatMessage(const char* role, const char* conte
     if (bottom_bar_ != nullptr && !hide_subtitle_) {
         lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
     }
+    lv_obj_invalidate(chat_message_label_);
+    lv_refr_now(nullptr);
 }
 
 /* 清空纵向字幕：基类 ClearChatMessages 默认调 lv_label_set_text(chat_message_label_, "")，
@@ -832,6 +835,7 @@ inline void FanMIPI55Display::ClearChatMessages() {
         static lv_anim_t s_scroll_anim;
         lv_anim_delete(&s_scroll_anim, nullptr);
         lv_obj_scroll_to_y(chat_message_label_, 0, LV_ANIM_OFF);
+        lv_obj_invalidate(chat_message_label_);
     }
     last_chat_content_.clear();
     if (bottom_bar_ != nullptr) {
