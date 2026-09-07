@@ -237,7 +237,9 @@ bool MqttProtocol::OpenAudioChannel() {
 
     session_id_ = "";
     xEventGroupClearBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
+    waiting_for_server_hello_ = true;
     if (!SendText(GetHelloMessage())) {
+        waiting_for_server_hello_ = false;
         ESP_LOGE(TAG, "Failed to send hello");
         SetError(Lang::Strings::SERVER_ERROR);
         return false;
@@ -245,6 +247,7 @@ bool MqttProtocol::OpenAudioChannel() {
     EventBits_t bits = xEventGroupWaitBits(
         event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE,
         pdMS_TO_TICKS(2000));
+    waiting_for_server_hello_ = false;
     if (!(bits & MQTT_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");
         SetError(Lang::Strings::SERVER_TIMEOUT);
@@ -325,6 +328,10 @@ std::string MqttProtocol::GetHelloMessage() {
 }
 
 void MqttProtocol::ParseServerHello(const cJSON* root) {
+    if (!waiting_for_server_hello_) {
+        ESP_LOGW(TAG, "Ignore late server hello");
+        return;
+    }
     auto transport = cJSON_GetObjectItem(root, "transport");
     if (transport == nullptr || strcmp(transport->valuestring, "udp") != 0) {
         ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);

@@ -1339,7 +1339,8 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
-        board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        // connecting 已切 PERFORMANCE，这里再设一次会重复打日志
+        // board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
             ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
                 protocol_->server_sample_rate(), codec->output_sample_rate());
@@ -1810,6 +1811,7 @@ void Application::HandleStateChangedEvent() {
             }
             break;
         case kDeviceStateConnecting:
+            board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
             display->SetStatus(Lang::Strings::CONNECTING);
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");

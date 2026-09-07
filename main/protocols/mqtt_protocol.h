@@ -55,6 +55,7 @@ private:
     uint32_t remote_sequence_;
     esp_timer_handle_t reconnect_timer_;
     std::string subscribe_topic_;
+    std::atomic<bool> waiting_for_server_hello_{false};
     
     bool StartMqttClient(bool report_error=false);
     void ParseServerHello(const cJSON* root);
