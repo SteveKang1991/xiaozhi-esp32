@@ -41,7 +41,7 @@ set(SOURCES "audio/audio_codec.cc"
             "utils/md5.cc"
             )
 
-set(INCLUDE_DIRS "." "display" "display/upgrade_screen" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "utils")
+set(INCLUDE_DIRS "." "display" "display/fan_holo" "display/upgrade_screen" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "utils")
 
 # Add board common files
 list(APPEND SOURCES
@@ -816,6 +816,16 @@ if(CONFIG_BOARD_TYPE_FANFUTURE_P4_JD9165_WiFI6_TOUCH_LCD_7B OR CONFIG_BOARD_TYPE
     list(APPEND SOURCES
         "boards/common/sd_scanner.c"
         "boards/common/mjpeg_player.c"
+    )
+endif()
+
+if(CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ST7701_WiFI6_LCD_5B OR CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ILI9881_WiFI6_LCD_55B)
+    list(APPEND SOURCES
+        "display/fan_holo/fan_holo_display.cc"
+        "display/fan_holo/fan_holo_status_bar.cc"
+        "display/fan_holo/fan_holo_idle_page.cc"
+        "display/fan_holo/fan_holo_chat_page.cc"
+        "display/fan_holo/fan_holo_music_page.cc"
     )
 endif()
 

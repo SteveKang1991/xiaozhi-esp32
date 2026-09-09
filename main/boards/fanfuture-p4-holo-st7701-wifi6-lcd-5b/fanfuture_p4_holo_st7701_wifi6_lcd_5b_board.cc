@@ -1,6 +1,8 @@
 #include "codecs/box_audio_codec.h"
 #include "application.h"
-#include "fan_mipi50_display.h"
+#include "fan_holo_display.h"
+#include "settings.h"
+#include "assets/lang_config.h"
 #include "esp_lcd_st7701.h"
 #include "button.h"
 #include "led/single_led.h"
@@ -297,8 +299,9 @@ private:
         ESP_LOGI(TAG, "   分辨率: %dx%d", DISPLAY_WIDTH, DISPLAY_HEIGHT);
         ESP_LOGI(TAG, "   DPI时钟: %d MHz", dpi_config.dpi_clock_freq_mhz);
 
-        display_ = new FanMIPI50Display(io, disp_panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
-                                      DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+        display_ = new FanHoloDisplay(io, disp_panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
+                                      DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY,
+                                      FanHoloMetrics::For50B());
         ESP_LOGI(TAG, "✅ ST7701 LCD (HS5IPS 480x854) 初始化完成");
     }
 

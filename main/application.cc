@@ -272,9 +272,7 @@ void Application::Run() {
                 SystemInfo::PrintHeapStats();
             }
             {
-                auto st = GetDeviceState();
-                int hb_sec = (st == kDeviceStateListening || st == kDeviceStateSpeaking) ? 60 : 10;
-                if (clock_ticks_ % hb_sec == 0) {
+                if (clock_ticks_ % 60 == 0) {
                     xTaskCreate([](void* arg) {
                         static_cast<Application*>(arg)->ReportDeviceInfo();
                         vTaskDelete(NULL);

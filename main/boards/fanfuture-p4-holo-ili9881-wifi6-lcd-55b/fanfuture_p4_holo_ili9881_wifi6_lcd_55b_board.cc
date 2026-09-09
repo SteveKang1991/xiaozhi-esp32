@@ -1,6 +1,8 @@
 #include "codecs/box_audio_codec.h"
 #include "application.h"
-#include "fan_mipi55_display.h"
+#include "fan_holo_display.h"
+#include "settings.h"
+#include "assets/lang_config.h"
 #include "esp_lcd_ili9881c.h"
 #include "button.h"
 #include "led/single_led.h"
@@ -292,8 +294,9 @@ private:
         ESP_LOGI(TAG, "   分辨率: %dx%d", DISPLAY_WIDTH, DISPLAY_HEIGHT);
         ESP_LOGI(TAG, "   DPI时钟: %d MHz", dpi_config.dpi_clock_freq_mhz);
 
-        display_ = new FanMIPI55Display(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
-                                      DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+        display_ = new FanHoloDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
+                                      DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY,
+                                      FanHoloMetrics::For55B());
         ESP_LOGI(TAG, "✅ ILI9881C LCD (5.5寸 720x1280) 初始化完成");
     }
 
