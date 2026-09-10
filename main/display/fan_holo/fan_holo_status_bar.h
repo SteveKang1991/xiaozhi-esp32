@@ -5,9 +5,11 @@
 
 class FanHoloDisplay;
 
-/* 三页各自一份相同样式的顶栏。切页时 Bind 到 LvglDisplay 指针，
- * 让 SetStatus / UpdateStatusBar 继续写当前页。 */
+/* Idle：完整顶栏（状态 + 静音/网络/电池）。
+ * Chat / Music：只有左侧状态文字，不要右侧图标。 */
 struct FanHoloStatusBar {
+    enum class Kind { IdleFull, StatusLeft };
+
     lv_obj_t* top_bar = nullptr;
     lv_obj_t* status_label = nullptr;
     lv_obj_t* notification_label = nullptr;
@@ -17,9 +19,9 @@ struct FanHoloStatusBar {
     lv_obj_t* low_battery_popup = nullptr;
     lv_obj_t* low_battery_label = nullptr;
 
-    void Create(lv_obj_t* screen, FanHoloDisplay& host);
+    void Create(lv_obj_t* screen, FanHoloDisplay& host, Kind kind);
     void Bind(FanHoloDisplay& host) const;
-    void CopyVisualFrom(const FanHoloStatusBar& other);
+    void SetStatusText(const char* status);
     void ApplyTextFont(const lv_font_t* font, lv_color_t color);
 };
 

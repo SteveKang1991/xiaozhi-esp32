@@ -26,6 +26,7 @@ public:
     void SetRoleAnimation(const char* state) override;
     void SetChatMessage(const char* role, const char* content) override;
     void ClearChatMessages() override;
+    void SetStatus(const char* status) override;
     void SetSystemReady() override;
     void PrepareForReboot() override;
     void SetMusicInfo(const char* song_name, const char* singer, int interval) override;

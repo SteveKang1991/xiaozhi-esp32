@@ -6,7 +6,7 @@ void FanHoloIdlePage::Create(FanHoloDisplay& host) {
     container_ = FanHoloCreateFullBleedContainer(screen_, host);
     role_.Create(screen_, host);
     preview_image_ = FanHoloCreatePreviewImage(screen_, host);
-    status_bar_.Create(screen_, host);
+    status_bar_.Create(screen_, host, FanHoloStatusBar::Kind::IdleFull);
     /* 时钟 / 天气 / 相册控件后续在本页 Create，不要放到 chat/music。 */
 }
 

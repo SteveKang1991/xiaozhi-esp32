@@ -855,6 +855,10 @@ static void mjpeg_decode_task(void *arg)
         }
         consecutive_errors = 0;
 
+        if (!s_running || s_cfg.fb[fb_idx] == NULL) {
+            break;
+        }
+
         const bool has_letterbox = !s_embed_lvgl && !s_panel_roi_blit
             && (s_panel_height > s_cfg.mjpeg_video_height);
         if (has_letterbox) {
@@ -1216,8 +1220,23 @@ void mjpeg_player_stop(void)
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    /* 给 idle hook 回收 read_task 的栈 + TCB */
-    vTaskDelay(pdMS_TO_TICKS(15));
+
+    /* decode_task 可能正卡在 jpeg_decoder_process / cache_msync / DSI blit。
+     * 必须等它退出后再释放 fb/DMA，否则会 msync 空指针并 abort。 */
+    deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
+    while (s_decode_task) {
+        if (xTaskGetTickCount() > deadline) {
+            ESP_LOGW(TAG, "⚠️ decode_task 退出超时，强制删除");
+            if (s_decode_task) {
+                vTaskDelete(s_decode_task);
+                s_decode_task = NULL;
+            }
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    /* 给 idle hook 回收 TCB/栈，并让 DPI 上一帧 draw 收尾 */
+    vTaskDelay(pdMS_TO_TICKS(20));
 
     /* 立即释放 DMA 输入缓冲区和 ROI frame buffers：
      * - DMA buffers (2×64KB) 在 stop 时应立即归还 heap，不等下次 start 才做延迟清理。
@@ -1243,7 +1262,7 @@ void mjpeg_player_stop(void)
         }
     }
 
-    /* decode_task 退出较慢（持锁 blit），且不占大块堆，异步退出即可 */
+    /* 队列 / preload / lvgl_port_resume 仍放到下次 start 前的 deferred cleanup */
     s_deferred_cleanup = true;
 }
 

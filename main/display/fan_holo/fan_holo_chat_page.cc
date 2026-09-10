@@ -8,7 +8,7 @@ void FanHoloChatPage::Create(FanHoloDisplay& host) {
     container_ = FanHoloCreateFullBleedContainer(screen_, host);
     role_.Create(screen_, host);
     preview_image_ = FanHoloCreatePreviewImage(screen_, host);
-    status_bar_.Create(screen_, host);
+    status_bar_.Create(screen_, host, FanHoloStatusBar::Kind::StatusLeft);
 
     const auto& metrics = host.metrics();
     auto* theme = host.GetLvglTheme();

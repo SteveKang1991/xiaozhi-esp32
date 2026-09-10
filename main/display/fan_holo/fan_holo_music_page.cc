@@ -1,6 +1,7 @@
 #include "fan_holo_music_page.h"
 #include "fan_holo_display.h"
 #include "board.h"
+#include "assets/lang_config.h"
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -16,7 +17,8 @@ extern "C" {
 void FanHoloMusicPage::Create(FanHoloDisplay& host) {
     screen_ = FanHoloCreateScreen(host);
     root_container_ = FanHoloCreateFullBleedContainer(screen_, host);
-    status_bar_.Create(screen_, host);
+    status_bar_.Create(screen_, host, FanHoloStatusBar::Kind::StatusLeft);
+    status_bar_.SetStatusText(Lang::Strings::MUSIC_PLAYING);
     SetupCoverUI(host);
     LoadBackgroundImage(host);
 }

@@ -152,32 +152,54 @@ void FanHoloDisplay::NullBoundWidgets() {
 }
 
 void FanHoloDisplay::SwitchTo(Page page) {
-    FanHoloStatusBar* prev = nullptr;
-    switch (current_page_) {
-        case Page::Idle: prev = &idle_page_.status_bar(); break;
-        case Page::Chat: prev = &chat_page_.status_bar(); break;
-        case Page::Music: prev = &music_page_.status_bar(); break;
+    lv_obj_t* want = nullptr;
+    switch (page) {
+        case Page::Idle: want = idle_page_.screen(); break;
+        case Page::Chat: want = chat_page_.screen(); break;
+        case Page::Music: want = music_page_.screen(); break;
+    }
+    if (page == current_page_ && want != nullptr && lv_screen_active() == want) {
+        return;
     }
 
     current_page_ = page;
-    FanHoloStatusBar* now = nullptr;
     switch (page) {
         case Page::Idle:
             idle_page_.Show(*this);
-            now = &idle_page_.status_bar();
             break;
         case Page::Chat:
             chat_page_.Show(*this);
-            now = &chat_page_.status_bar();
             break;
         case Page::Music:
             music_page_.Show(*this);
-            now = &music_page_.status_bar();
             break;
     }
-    if (prev && now && prev != now) {
-        now->CopyVisualFrom(*prev);
+}
+
+void FanHoloDisplay::SetStatus(const char* status) {
+    if (status == nullptr) {
+        return;
     }
+    DisplayLockGuard lock(this);
+    const bool chat_status =
+        (strcmp(status, Lang::Strings::CONNECTING) == 0) ||
+        (strcmp(status, Lang::Strings::LISTENING) == 0) ||
+        (strcmp(status, Lang::Strings::SPEAKING) == 0);
+    const bool music_status = (strcmp(status, Lang::Strings::MUSIC_PLAYING) == 0);
+
+    if (music_status) {
+        music_page_.status_bar().SetStatusText(status);
+        return;
+    }
+    if (chat_status) {
+        chat_page_.status_bar().SetStatusText(status);
+        if (strcmp(status, Lang::Strings::CONNECTING) == 0) {
+            SwitchTo(Page::Chat);
+        }
+        return;
+    }
+    idle_page_.status_bar().SetStatusText(status);
+    last_status_update_time_ = std::chrono::system_clock::now();
 }
 
 void FanHoloDisplay::SetEmotion(const char* emotion) {
@@ -270,6 +292,9 @@ void FanHoloDisplay::SetRoleAnimation(const char* state) {
         return;
     }
 
+    /* 先停 MJPEG，再切 LVGL screen。否则 idle→chat 的 lv_screen_load 会跟
+     * 正在进行的 DSI blit 抢 dpi_panel_draw_bitmap，stop 时还会把 decode 仍在用的 fb 释放掉。 */
+    StopMjpegIfRunning();
     {
         DisplayLockGuard lock(this);
         SwitchTo((strcmp(clip, "idle") == 0) ? Page::Idle : Page::Chat);
