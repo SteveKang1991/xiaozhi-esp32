@@ -15,6 +15,8 @@
 #include <string>
 #include <chrono>
 
+#include "fan_holo_weather.h"
+
 class Theme {
 public:
     Theme(const std::string& name) : name_(name) {}
@@ -103,6 +105,7 @@ public:
      * 停止 FFT 显示（隐藏并暂停；不释放 arena / 不删 24 个 bar）。
      * 默认实现为空，由具体 display 子类重写。 */
     virtual void StopFft() {}
+    virtual void SetIdleWeather(const IdleWeatherView& weather) { (void)weather; }
 
     /**
      * 把频谱柱/帽打回初始高度并清计算缓存。切歌打断或一曲结束时调用，

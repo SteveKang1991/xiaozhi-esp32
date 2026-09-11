@@ -12,6 +12,7 @@
 #include "settings.h"
 #include "utils/md5.h"
 #include "boards/common/mjpeg_player.h"
+#include "fan_holo_weather.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -278,6 +279,12 @@ void Application::Run() {
                         vTaskDelete(NULL);
                     }, "online_hb", 4096, this, 1, nullptr);
                 }
+                if (clock_ticks_ > 0 && clock_ticks_ % 3600 == 0) {
+                    xTaskCreate([](void* arg) {
+                        static_cast<Application*>(arg)->RefreshIdleWeather();
+                        vTaskDelete(NULL);
+                    }, "weather", 8192, this, 1, nullptr);
+                }
             }
         }
     }
@@ -434,7 +441,22 @@ void Application::CheckDeviceInfo() {
     cJSON* name_item = cJSON_GetObjectItem(data, "assistant_name");
     std::string command = cJSON_IsString(command_item) ? command_item->valuestring : "";
     std::string text = cJSON_IsString(name_item) ? name_item->valuestring : "";
+
+    cJSON* addr_item = cJSON_GetObjectItem(data, "address");
+    std::string address = (cJSON_IsString(addr_item) && addr_item->valuestring != nullptr)
+                              ? addr_item->valuestring : "";
     cJSON_Delete(root);
+
+    if (!address.empty()) {
+        weather_city_ = address;
+        ESP_LOGI(TAG, "Device address: %s", weather_city_.c_str());
+        xTaskCreate([](void* arg) {
+            static_cast<Application*>(arg)->RefreshIdleWeather();
+            vTaskDelete(NULL);
+        }, "weather", 8192, this, 1, nullptr);
+    } else {
+        ESP_LOGW(TAG, "Device info has no address");
+    }
 
     if (command.empty()) {
         ESP_LOGW(TAG, "Device info has empty assistant_command");
@@ -443,6 +465,21 @@ void Application::CheckDeviceInfo() {
 
     ESP_LOGI(TAG, "Device wake word: %s (%s)", command.c_str(), text.c_str());
     audio_service_.UpdateCustomWakeWord(command, text);
+}
+
+void Application::RefreshIdleWeather() {
+    if (weather_city_.empty()) {
+        return;
+    }
+    IdleWeatherView view;
+    if (!FanHoloFetchWeather(weather_city_, &view)) {
+        ESP_LOGW(TAG, "Fetch weather failed for %s", weather_city_.c_str());
+        return;
+    }
+    auto display = Board::GetInstance().GetDisplay();
+    if (display != nullptr) {
+        display->SetIdleWeather(view);
+    }
 }
 
 void Application::ReportDeviceInfo() {

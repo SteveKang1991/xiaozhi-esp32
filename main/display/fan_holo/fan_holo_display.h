@@ -36,6 +36,7 @@ public:
     void SetTheme(Theme* theme) override;
     void UpdateStatusBar(bool update_all = false) override;
     void ShowNotification(const char* notification, int duration_ms = 3000) override;
+    void SetIdleWeather(const IdleWeatherView& weather) override;
 
     void ShowIdlePage() { SetRoleAnimation("idle"); }
     void ShowChatPage(const char* state) { SetRoleAnimation(state); }

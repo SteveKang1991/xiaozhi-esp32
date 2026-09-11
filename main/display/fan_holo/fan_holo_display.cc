@@ -438,6 +438,11 @@ void FanHoloDisplay::RaiseCurrentOverlays() {
     }
 }
 
+void FanHoloDisplay::SetIdleWeather(const IdleWeatherView& weather) {
+    DisplayLockGuard lock(this);
+    idle_page_.ApplyWeather(weather);
+}
+
 void FanHoloDisplay::UpdateStatusBar(bool update_all) {
     const bool popup_was_hidden =
         (low_battery_popup_ == nullptr) || lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);

@@ -39,6 +39,7 @@ set(SOURCES "audio/audio_codec.cc"
             "assets.cc"
             "main.cc"
             "utils/md5.cc"
+            "display/fan_holo/fan_holo_weather.cc"
             )
 
 set(INCLUDE_DIRS "." "display" "display/fan_holo" "display/upgrade_screen" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "utils")

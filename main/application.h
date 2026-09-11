@@ -149,6 +149,7 @@ private:
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     bool first_boot_after_blufi_ = false;   // Flag to reboot after first OTA check following BluFi provisioning
     int clock_ticks_ = 0;
+    std::string weather_city_;
     TaskHandle_t activation_task_handle_ = nullptr;
     /* 关键修复:tts stop (MQTT) 与 UDP 末帧走不同通道、不同任务、不同延迟。
      * 服务器按"播放时长 + 网络延迟"估算 stop 发送时机,实际可能早到几十~几百 ms,
@@ -205,6 +206,7 @@ private:
                               DownloadProgressCallback progress_cb = nullptr);
     void CheckDeviceInfo();
     void ReportDeviceInfo();
+    void RefreshIdleWeather();
     
     // State change handler called by state machine
     void OnStateChanged(DeviceState old_state, DeviceState new_state);

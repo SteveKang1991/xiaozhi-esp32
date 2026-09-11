@@ -688,7 +688,8 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
     const int pill_r = (pill_h >= 36) ? 10 : 8;
 
     const int clock_y = kDateRowY + pill_h + kClockBelowDate;
-    const int header_h = metrics.idle_clock_h;
+    /* idle_clock_h 含时钟下方大块留白；占位层用实际时钟下沿，避免盖住城市名。 */
+    int header_h = clock_y + dh;
 
     bar->top_bar = lv_obj_create(screen);
     lv_obj_remove_style_all(bar->top_bar);
@@ -774,6 +775,9 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
     }
     if (clock_style == FanHoloMetrics::kIdleClockLed7Seg) {
         CreateIdleLedClock(bar, pill_h, dw, dh);
+        const int hm_h = dh * 88 / 100;
+        const int card_h = hm_h + 32;
+        lv_obj_set_height(bar->top_bar, clock_y + card_h);
     } else {
         lv_obj_t* clock_row = lv_obj_create(bar->top_bar);
         lv_obj_remove_style_all(clock_row);
