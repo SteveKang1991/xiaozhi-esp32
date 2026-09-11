@@ -31,6 +31,12 @@
 #define MJPEG_HAVE_ESP_PTR_EXTERNAL_RAM 0
 #endif
 #include "driver/jpeg_decode.h"
+#if __has_include("driver/ppa.h")
+#include "driver/ppa.h"
+#define MJPEG_HAVE_PPA 1
+#else
+#define MJPEG_HAVE_PPA 0
+#endif
 #include "lvgl.h"
 #include "esp_lvgl_port.h"
 
@@ -109,6 +115,17 @@ static void mjpeg_cache_c2m_cpu_tight(const void *ptr, size_t nbytes)
 
 static uint8_t* s_mjpeg_black_tile = NULL;
 static uint8_t* s_mjpeg_slab = NULL;
+static uint16_t* s_roi_crop_strip = NULL;
+static int s_roi_crop_strip_w = 0;
+#if MJPEG_HAVE_PPA
+static ppa_client_handle_t s_ppa = NULL;
+#endif
+static uint16_t *s_scale_out = NULL;
+static size_t s_scale_out_sz = 0;
+static int s_scale_out_w = 0;
+static int s_scale_out_h = 0;
+static uint8_t s_ppa_scale_n = 0;
+static const int MJPEG_ROI_CROP_STRIP_H = 12;
 static size_t s_mjpeg_slab_max_w = 0;
 static size_t s_mjpeg_black_tile_size = 0;
 static size_t s_mjpeg_slab_size = 0;
@@ -177,6 +194,127 @@ static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int
     return ret;
 }
 
+static void mjpeg_ppa_release(void)
+{
+#if MJPEG_HAVE_PPA
+    if (s_ppa) {
+        ppa_unregister_client(s_ppa);
+        s_ppa = NULL;
+    }
+#endif
+    if (s_scale_out) {
+        heap_caps_free(s_scale_out);
+        s_scale_out = NULL;
+    }
+    s_scale_out_sz = 0;
+    s_scale_out_w = 0;
+    s_scale_out_h = 0;
+    s_ppa_scale_n = 0;
+}
+
+static bool mjpeg_ppa_prepare(int out_w, int out_h)
+{
+    mjpeg_ppa_release();
+    if (out_w < 2 || out_h < 2) {
+        return false;
+    }
+#if !MJPEG_HAVE_PPA
+    return false;
+#else
+    ppa_client_config_t c = {
+        .oper_type = PPA_OPERATION_SRM,
+        .max_pending_trans_num = 1,
+    };
+    if (ppa_register_client(&c, &s_ppa) != ESP_OK || s_ppa == NULL) {
+        return false;
+    }
+    s_scale_out_sz = ((size_t)out_w * (size_t)out_h * sizeof(uint16_t) + 63u) & ~63u;
+    s_scale_out = (uint16_t *)heap_caps_aligned_alloc(64, s_scale_out_sz,
+                                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_scale_out == NULL) {
+        ppa_unregister_client(s_ppa);
+        s_ppa = NULL;
+        return false;
+    }
+    s_scale_out_w = out_w;
+    s_scale_out_h = out_h;
+    return true;
+#endif
+}
+
+static bool mjpeg_ppa_scale_blit(esp_lcd_panel_handle_t panel, const uint16_t *src, int src_w, int src_h,
+                                 int block_x, int block_y, int block_w, int block_h, int dx, int dy)
+{
+#if !MJPEG_HAVE_PPA
+    (void)panel;
+    (void)src;
+    (void)src_w;
+    (void)src_h;
+    (void)block_x;
+    (void)block_y;
+    (void)block_w;
+    (void)block_h;
+    (void)dx;
+    (void)dy;
+    return false;
+#else
+    if (panel == NULL || s_ppa == NULL || s_scale_out == NULL || src == NULL) {
+        return false;
+    }
+    if (block_w < 2 || block_h < 2) {
+        return false;
+    }
+    if (block_x < 0) {
+        block_x = 0;
+    }
+    if (block_y < 0) {
+        block_y = 0;
+    }
+    if (block_x + block_w > src_w) {
+        block_w = src_w - block_x;
+    }
+    if (block_y + block_h > src_h) {
+        block_h = src_h - block_y;
+    }
+    block_w &= ~1;
+    block_h &= ~1;
+    if (block_w < 2 || block_h < 2) {
+        return false;
+    }
+    ppa_srm_oper_config_t srm = {};
+    srm.in.buffer = (void *)src;
+    srm.in.pic_w = (uint32_t)src_w;
+    srm.in.pic_h = (uint32_t)src_h;
+    srm.in.block_w = (uint32_t)block_w;
+    srm.in.block_h = (uint32_t)block_h;
+    srm.in.block_offset_x = (uint32_t)block_x;
+    srm.in.block_offset_y = (uint32_t)block_y;
+    srm.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+    srm.out.buffer = s_scale_out;
+    srm.out.buffer_size = s_scale_out_sz;
+    srm.out.pic_w = (uint32_t)s_scale_out_w;
+    srm.out.pic_h = (uint32_t)s_scale_out_h;
+    srm.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+    if (s_ppa_scale_n > 0 && s_ppa_scale_n <= 16) {
+        srm.scale_x = (float)s_ppa_scale_n / 16.0f;
+        srm.scale_y = srm.scale_x;
+    } else {
+        srm.scale_x = (float)s_scale_out_w / (float)block_w;
+        srm.scale_y = (float)s_scale_out_h / (float)block_h;
+    }
+    srm.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+    srm.mode = PPA_TRANS_MODE_BLOCKING;
+    if (ppa_do_scale_rotate_mirror(s_ppa, &srm) != ESP_OK) {
+        return false;
+    }
+    if (((uintptr_t)s_scale_out & 63u) == 0 && s_scale_out_sz >= 64u) {
+        esp_cache_msync(s_scale_out, s_scale_out_sz, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+    }
+    return mjpeg_panel_draw_bitmap_retry(panel, dx, dy,
+                                        dx + s_scale_out_w, dy + s_scale_out_h, s_scale_out) == ESP_OK;
+#endif
+}
+
 /** 全宽水平黑条 (y0..y0+band_h)，分片 draw_bitmap，不经手写 memcpy 进帧缓冲 */
 static void mjpeg_h_band_black(esp_lcd_panel_handle_t panel, int y0, int band_h, int panel_w)
 {
@@ -216,9 +354,16 @@ static void mjpeg_pillar_bands(esp_lcd_panel_handle_t panel, int x0, int col_w, 
 
 /** 顶/底 + 中栏左右黑边（与视频、UI 不重叠时可在无 lvgl 锁下调用） */
 static void mjpeg_roi_letterbox_draw(esp_lcd_panel_handle_t panel, int panel_w, int panel_h, int rx, int ry, int rw,
-                                    int rh)
+                                    int rh, int protect_top)
 {
-    mjpeg_h_band_black(panel, 0, ry, panel_w);
+    int top0 = protect_top;
+    if (top0 < 0) {
+        top0 = 0;
+    }
+    if (top0 > ry) {
+        top0 = ry;
+    }
+    mjpeg_h_band_black(panel, top0, ry - top0, panel_w);
     mjpeg_pillar_bands(panel, 0, rx, ry, rh);
     mjpeg_pillar_bands(panel, rx + rw, panel_w - (rx + rw), ry, rh);
     mjpeg_h_band_black(panel, ry + rh, panel_h - (ry + rh), panel_w);
@@ -905,20 +1050,100 @@ static void mjpeg_decode_task(void *arg)
         } else if (s_panel_roi_blit && s_cfg.panel) {
             const int draw_x0 = (int)s_cfg.panel_roi_x;
             const int draw_y0 = (int)s_cfg.panel_roi_y;
-            const int w = (int)s_cfg.mjpeg_video_width;
-            const int h = (int)s_cfg.mjpeg_video_height;
+            const int src_w = (int)s_cfg.mjpeg_video_width;
+            const int src_h = (int)s_cfg.mjpeg_video_height;
+            int src_x = (int)s_cfg.panel_roi_src_x;
+            int src_y = (int)s_cfg.panel_roi_src_y;
+            int w = (s_cfg.panel_roi_w > 0) ? (int)s_cfg.panel_roi_w : src_w;
+            int h = (s_cfg.panel_roi_h > 0) ? (int)s_cfg.panel_roi_h : src_h;
+            if (src_x < 0) {
+                src_x = 0;
+            }
+            if (src_y < 0) {
+                src_y = 0;
+            }
+            if (src_x >= src_w) {
+                src_x = 0;
+            }
+            if (src_y >= src_h) {
+                src_y = 0;
+            }
+            if (src_x + w > src_w) {
+                w = src_w - src_x;
+            }
+            if (src_y + h > src_h) {
+                h = src_h - src_y;
+            }
+            if (w < 1) {
+                w = src_w;
+                src_x = 0;
+            }
+            if (h < 1) {
+                h = src_h;
+                src_y = 0;
+            }
             /* 用户确认：mjpeg ROI 区域与 LVGL label 字幕区不重叠，DSI panel 的 ROI 区域
              * 与 LVGL flush 范围天然无竞争，无需持 LVGL 锁。直接 blit 全靠 mjpeg_panel_draw_bitmap_retry
              * 自带的 panel 忙重试保证（DMA2D 引擎互斥）。 */
             if (MJPEG_ROI_DRAW_LETTERBOX_ONCE && !s_roi_letterbox_drawn) {
-                mjpeg_roi_letterbox_draw(s_cfg.panel, s_panel_width, s_panel_height, draw_x0, draw_y0, w, h);
+                mjpeg_roi_letterbox_draw(s_cfg.panel, s_panel_width, s_panel_height, draw_x0, draw_y0, w, h,
+                                         (int)s_cfg.panel_protect_top);
                 s_roi_letterbox_drawn = true;
             }
-            /* y1 = draw_y0 + video_h（视频区紧贴屏底：ry=panel_height-video_h → y1=panel_height）。 */
-            const int draw_y1 = draw_y0 + (int)s_cfg.mjpeg_video_height;
-            esp_err_t blit = mjpeg_panel_draw_bitmap_retry(s_cfg.panel, draw_x0, draw_y0, draw_x0 + w, draw_y1, s_cfg.fb[fb_idx]);
-            if (blit != ESP_OK) {
-                ESP_LOGW(TAG, "⚠️ ROI draw失败: %s", esp_err_to_name(blit));
+            const uint16_t *src = (const uint16_t *)s_cfg.fb[fb_idx];
+            if (s_scale_out != NULL && s_scale_out_w > 0 && s_scale_out_h > 0) {
+                /* 输出缓冲右下角对齐面板物理分辨率，与 LVGL 顶栏同一套 0..w / 0..h。 */
+                int dx = s_panel_width - s_scale_out_w;
+                int dy = s_panel_height - s_scale_out_h;
+                if (dx < 0) {
+                    dx = 0;
+                }
+                if (dy < 0) {
+                    dy = 0;
+                }
+                int block_w = (s_cfg.panel_src_w > 0) ? (int)s_cfg.panel_src_w : src_w;
+                int block_h = (s_cfg.panel_src_h > 0) ? (int)s_cfg.panel_src_h : src_h;
+                if (!mjpeg_ppa_scale_blit(s_cfg.panel, src, src_w, src_h,
+                                          src_x, src_y, block_w, block_h, dx, dy)) {
+                    ESP_LOGW(TAG, "⚠️ PPA scale blit失败");
+                }
+            } else if (w == src_w && src_x == 0 && src_y == 0) {
+                const int draw_y1 = draw_y0 + h;
+                esp_err_t blit = mjpeg_panel_draw_bitmap_retry(s_cfg.panel, draw_x0, draw_y0, draw_x0 + w, draw_y1, s_cfg.fb[fb_idx]);
+                if (blit != ESP_OK) {
+                    ESP_LOGW(TAG, "⚠️ ROI draw失败: %s", esp_err_to_name(blit));
+                }
+            } else {
+                /* 目标宽 != 解码宽时必须按行取出，否则 draw_bitmap 会按错误 stride 花屏。 */
+                const size_t strip_px = (size_t)w * (size_t)MJPEG_ROI_CROP_STRIP_H;
+                if (s_roi_crop_strip == NULL || s_roi_crop_strip_w != w) {
+                    if (s_roi_crop_strip) {
+                        heap_caps_free(s_roi_crop_strip);
+                        s_roi_crop_strip = NULL;
+                    }
+                    s_roi_crop_strip = (uint16_t *)heap_caps_malloc(strip_px * sizeof(uint16_t),
+                                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                    s_roi_crop_strip_w = w;
+                }
+                if (s_roi_crop_strip == NULL) {
+                    ESP_LOGW(TAG, "⚠️ ROI crop strip alloc failed");
+                } else {
+                    for (int y = 0; y < h; y += MJPEG_ROI_CROP_STRIP_H) {
+                        const int ch = ((h - y) < MJPEG_ROI_CROP_STRIP_H) ? (h - y) : MJPEG_ROI_CROP_STRIP_H;
+                        for (int r = 0; r < ch; r++) {
+                            memcpy(s_roi_crop_strip + (size_t)r * (size_t)w,
+                                   src + (size_t)(src_y + y + r) * (size_t)src_w + (size_t)src_x,
+                                   (size_t)w * sizeof(uint16_t));
+                        }
+                        mjpeg_cache_c2m_cpu_tight(s_roi_crop_strip, (size_t)w * (size_t)ch * sizeof(uint16_t));
+                        esp_err_t blit = mjpeg_panel_draw_bitmap_retry(s_cfg.panel, draw_x0, draw_y0 + y,
+                                                                      draw_x0 + w, draw_y0 + y + ch, s_roi_crop_strip);
+                        if (blit != ESP_OK) {
+                            ESP_LOGW(TAG, "⚠️ ROI crop draw失败: %s", esp_err_to_name(blit));
+                            break;
+                        }
+                    }
+                }
             }
         } else if (s_cfg.panel) {
             esp_err_t blit = mjpeg_panel_draw_bitmap_retry(s_cfg.panel, 0, 0,
@@ -992,6 +1217,17 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
     s_embed_lvgl = (s_cfg.lv_video_canvas != NULL);
     s_panel_roi_blit = s_cfg.panel_blit_roi;
     s_roi_letterbox_drawn = false;
+    if (s_cfg.panel_out_w > 0 && s_cfg.panel_out_h > 0 &&
+        (s_cfg.panel_out_w != s_cfg.mjpeg_video_width ||
+         s_cfg.panel_out_h != s_cfg.mjpeg_video_height)) {
+        if (!mjpeg_ppa_prepare((int)s_cfg.panel_out_w, (int)s_cfg.panel_out_h)) {
+            ESP_LOGE(TAG, "PPA 缩放初始化失败");
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        s_ppa_scale_n = s_cfg.panel_scale_n;
+    } else {
+        mjpeg_ppa_release();
+    }
 
     int panel_w = (s_cfg.panel_width > 0) ? s_cfg.panel_width : s_cfg.mjpeg_video_width;
     int panel_h = (s_cfg.panel_height > 0) ? s_cfg.panel_height : s_cfg.mjpeg_video_height;
@@ -1029,6 +1265,7 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
                              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+                    mjpeg_ppa_release();
                     return ESP_ERR_NO_MEM;
                 }
             }
@@ -1196,6 +1433,12 @@ static void mjpeg_do_deferred_cleanup(void)
             (void)lvgl_port_resume();
             s_panel_roi_blit = false;
         }
+        if (s_roi_crop_strip) {
+            heap_caps_free(s_roi_crop_strip);
+            s_roi_crop_strip = NULL;
+            s_roi_crop_strip_w = 0;
+        }
+        mjpeg_ppa_release();
     } else {
         (void)lvgl_port_resume();
     }

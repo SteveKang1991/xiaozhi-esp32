@@ -32,7 +32,7 @@ void FanHoloChatPage::Create(FanHoloDisplay& host) {
     lv_label_set_long_mode(chat_inner_label_, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(chat_inner_label_, theme->text_font()->font(), 0);
     lv_obj_set_style_text_align(chat_inner_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(chat_inner_label_, theme->text_color(), 0);
+    lv_obj_set_style_text_color(chat_inner_label_, lv_color_hex(0xC9FF20), 0);
 }
 
 void FanHoloChatPage::Destroy() {
@@ -63,6 +63,7 @@ void FanHoloChatPage::Show(FanHoloDisplay& host) {
     }
     Bind(host);
     lv_screen_load(screen_);
+    status_bar_.RaiseOverlays();
 }
 
 void FanHoloChatPage::HideRole() {
@@ -85,7 +86,7 @@ void FanHoloChatPage::ApplyTextFont(const lv_font_t* font, lv_color_t color) {
     }
     if (chat_inner_label_) {
         lv_obj_set_style_text_font(chat_inner_label_, font, 0);
-        lv_obj_set_style_text_color(chat_inner_label_, color, 0);
+        lv_obj_set_style_text_color(chat_inner_label_, lv_color_hex(0xC9FF20), 0);
     }
     status_bar_.ApplyTextFont(font, color);
 }

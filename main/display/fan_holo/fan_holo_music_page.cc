@@ -58,6 +58,7 @@ void FanHoloMusicPage::Show(FanHoloDisplay& host) {
     }
     Bind(host);
     lv_screen_load(screen_);
+    status_bar_.RaiseOverlays();
 }
 
 void FanHoloMusicPage::ApplyTextFont(const lv_font_t* font, lv_color_t color) {
@@ -90,6 +91,8 @@ void FanHoloMusicPage::ApplyTextFont(const lv_font_t* font, lv_color_t color) {
 
 void FanHoloMusicPage::ShowCover(FanHoloDisplay& host, bool show, const std::string& picture_url) {
     std::string fetch_url;
+    bool go_music = false;
+    bool go_chat = false;
     {
         DisplayLockGuard lock(&host);
         if (music_cover_container_ == nullptr) {
@@ -97,11 +100,7 @@ void FanHoloMusicPage::ShowCover(FanHoloDisplay& host, bool show, const std::str
             return;
         }
         if (show) {
-            host.StopMjpegIfRunning();
-            host.SwitchTo(FanHoloDisplay::Page::Music);
-            lv_obj_remove_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_move_foreground(music_cover_container_);
-            host.EnableFft(true);
+            go_music = true;
             if (!picture_url.empty() && picture_url != current_music_picture_url_) {
                 current_music_picture_url_ = picture_url;
                 music_cover_image_data_.reset();
@@ -110,10 +109,6 @@ void FanHoloMusicPage::ShowCover(FanHoloDisplay& host, bool show, const std::str
                     lv_obj_add_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
                 }
                 fetch_url = picture_url;
-            } else if (!picture_url.empty() && music_cover_image_data_ && music_cover_img_) {
-                lv_img_set_src(music_cover_img_, music_cover_image_data_->image_dsc());
-                lv_image_set_scale(music_cover_img_, music_cover_scale_);
-                lv_obj_remove_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
             }
         } else {
             host.StopFft();
@@ -128,8 +123,22 @@ void FanHoloMusicPage::ShowCover(FanHoloDisplay& host, bool show, const std::str
             last_progress_bar_update_ms_ = -1;
             last_lyric_.clear();
             last_lyric_next_.clear();
-            host.SwitchTo(FanHoloDisplay::Page::Idle);
+            go_chat = (host.current_page_ == FanHoloDisplay::Page::Music);
         }
+    }
+    if (go_music) {
+        host.PreparePage(FanHoloDisplay::Page::Music);
+        DisplayLockGuard lock(&host);
+        lv_obj_remove_flag(music_cover_container_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(music_cover_container_);
+        host.EnableFft(true);
+        if (fetch_url.empty() && !picture_url.empty() && music_cover_image_data_ && music_cover_img_) {
+            lv_img_set_src(music_cover_img_, music_cover_image_data_->image_dsc());
+            lv_image_set_scale(music_cover_img_, music_cover_scale_);
+            lv_obj_remove_flag(music_cover_img_, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else if (go_chat) {
+        host.PreparePage(FanHoloDisplay::Page::Chat);
     }
     if (!fetch_url.empty()) {
         FetchCoverSync(host, fetch_url);
@@ -177,6 +186,11 @@ void FanHoloMusicPage::FetchCoverSync(FanHoloDisplay& host, const std::string& u
         return;
     }
     ESP_LOGI(host.metrics().tag, "JPEG decoded: %ux%u", (unsigned)img_w, (unsigned)img_h);
+    if (host.current_page_ != FanHoloDisplay::Page::Music ||
+        url != current_music_picture_url_) {
+        heap_caps_free(decoded);
+        return;
+    }
     DisplayLockGuard lock(&host);
     music_cover_image_data_.reset();
     try {

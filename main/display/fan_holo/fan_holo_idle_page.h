@@ -5,8 +5,7 @@
 
 class FanHoloDisplay;
 
-/* 待命页：独立 LVGL screen。自建 statusbar + 角色 GIF/图标。
- * 时钟 / 天气 / 相册后续在本页扩展。
+/* 待命页：顶栏翻页时钟 + 左侧天气占位 + 右下角缩小角色。
  * 与 chat、music 通过 lv_screen_load 互切，不共用控件树。 */
 class FanHoloIdlePage {
 public:
@@ -15,6 +14,7 @@ public:
     void Show(FanHoloDisplay& host);
     void Bind(FanHoloDisplay& host) const;
     void HideRole();
+    void Tick();
     void ApplyTextFont(const lv_font_t* font, lv_color_t color);
     FanHoloRoleWidgets& role_widgets() { return role_; }
 

@@ -1220,11 +1220,13 @@ void LcdDisplay::SetTheme(Theme* theme) {
     lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
 
     // Set background image
-    if (lvgl_theme->background_image() != nullptr) {
-        lv_obj_set_style_bg_image_src(container_, lvgl_theme->background_image()->image_dsc(), 0);
-    } else {
-        lv_obj_set_style_bg_image_src(container_, nullptr, 0);
-        lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
+    if (container_ != nullptr) {
+        if (lvgl_theme->background_image() != nullptr) {
+            lv_obj_set_style_bg_image_src(container_, lvgl_theme->background_image()->image_dsc(), 0);
+        } else {
+            lv_obj_set_style_bg_image_src(container_, nullptr, 0);
+            lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
+        }
     }
     
     // Update top bar background color with 50% opacity
@@ -1328,7 +1330,9 @@ void LcdDisplay::SetTheme(Theme* theme) {
 #endif
     
     // Update low battery popup
-    lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
+    if (low_battery_popup_ != nullptr) {
+        lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
+    }
 
     // No errors occurred. Save theme to settings
     Display::SetTheme(lvgl_theme);

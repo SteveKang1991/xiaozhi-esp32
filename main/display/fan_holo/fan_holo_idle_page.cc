@@ -4,10 +4,14 @@
 void FanHoloIdlePage::Create(FanHoloDisplay& host) {
     screen_ = FanHoloCreateScreen(host);
     container_ = FanHoloCreateFullBleedContainer(screen_, host);
-    role_.Create(screen_, host);
+    lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(container_, lv_color_black(), 0);
+    role_.Create(screen_, host, true);
     preview_image_ = FanHoloCreatePreviewImage(screen_, host);
+
     status_bar_.Create(screen_, host, FanHoloStatusBar::Kind::IdleFull);
-    /* 时钟 / 天气 / 相册控件后续在本页 Create，不要放到 chat/music。 */
+    lv_obj_set_pos(status_bar_.top_bar, 0, 0);
+    status_bar_.RaiseOverlays();
 }
 
 void FanHoloIdlePage::Destroy() {
@@ -34,11 +38,18 @@ void FanHoloIdlePage::Show(FanHoloDisplay& host) {
         return;
     }
     Bind(host);
+    lv_obj_set_pos(status_bar_.top_bar, 0, 0);
     lv_screen_load(screen_);
+    status_bar_.RaiseOverlays();
+    status_bar_.Tick();
 }
 
 void FanHoloIdlePage::HideRole() {
     role_.Hide();
+}
+
+void FanHoloIdlePage::Tick() {
+    status_bar_.Tick();
 }
 
 void FanHoloIdlePage::ApplyTextFont(const lv_font_t* font, lv_color_t color) {

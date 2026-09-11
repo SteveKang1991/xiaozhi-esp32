@@ -153,7 +153,13 @@ void McpServer::AddCommonTools() {
                     music->StopStreaming();
                 }
 
-                // 如果当前在 speaking/listening，先切换到 idle 让音乐可以播放
+                /* AEC 实时模式下 speaking 不会关 AFE。play_song 在主线程 Schedule
+                 * 里同步 Download，会堵住 Run() 处理 MAIN_EVENT_STATE_CHANGED，
+                 * EnableVoiceProcessing(false) 要等 HTTP/封面结束才执行。
+                 * input 任务继续 feed、fetch 被饿死 → AFE(FEED) is full。先立刻停 AFE。 */
+                app.GetAudioService().EnableVoiceProcessing(false);
+                app.GetAudioService().ClearSendAndEncodeQueues();
+
                 if (current_state == kDeviceStateSpeaking ||
                     current_state == kDeviceStateListening) {
                     app.SetDeviceState(kDeviceStateIdle);

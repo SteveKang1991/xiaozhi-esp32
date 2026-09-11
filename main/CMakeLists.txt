@@ -826,6 +826,9 @@ if(CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ST7701_WiFI6_LCD_5B OR CONFIG_BOARD_TYPE_
         "display/fan_holo/fan_holo_idle_page.cc"
         "display/fan_holo/fan_holo_chat_page.cc"
         "display/fan_holo/fan_holo_music_page.cc"
+        "display/fan_holo/fan_holo_lunar.cc"
+        "display/fan_holo/fan_holo_font7_digits.c"
+        "display/fan_holo/font_puhui_number_120_4.c"
     )
 endif()
 

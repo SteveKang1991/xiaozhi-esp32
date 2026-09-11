@@ -1780,25 +1780,22 @@ void Application::HandleStateChangedEvent() {
             /* 系统启动阶段，不走角色动画——开机/下载/告警仍由 SetEmotion 走主题 GIF / 内置图标 */
             break;
         case kDeviceStateIdle:
-            if (is_music_playing) {
-                // 音乐播放中：显示音乐封面（黑色背景 + 专辑图），停止 MJPEG 动画
-                display->SetStatus(Lang::Strings::MUSIC_PLAYING);
-                display->ShowMusicCover(true, "");
-            } else {
-                // 非音乐播放：隐藏音乐封面，恢复 idle 角色动画
-                display->ShowMusicCover(false, "");
-                display->SetStatus(Lang::Strings::STANDBY);
-                display->SetRoleAnimation("idle");
-            }
-            /* 任何回到 idle 的转场都清空字幕(也包括音乐播放路径,
-             * 否则播放恢复后仍能看到上一次 AI 句子末段的残留)。 */
-            display->ClearChatMessages();
+            /* 先停 AFE 再动 UI：AEC 实时态 speaking 仍在 feed，MJPEG/封面会饿死 fetch。 */
             hold_wake_audio_upload_ = false;
             audio_service_.EnableVoiceProcessing(false);
             if (is_music_playing) {
                 audio_service_.ClearSendAndEncodeQueues();
             }
             audio_service_.EnableWakeWordDetection(true);
+            if (is_music_playing) {
+                display->SetStatus(Lang::Strings::MUSIC_PLAYING);
+                display->ShowMusicCover(true, "");
+            } else {
+                display->ShowMusicCover(false, "");
+                display->SetStatus(Lang::Strings::STANDBY);
+                display->SetRoleAnimation("idle");
+            }
+            display->ClearChatMessages();
             // 主动确保 codec input 已启用（唤醒词检测需要录音）
             // 这对于音乐播放中尤其重要，避免 wake word 收不到数据
             {

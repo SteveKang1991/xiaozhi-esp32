@@ -31,6 +31,20 @@ struct FanHoloMetrics {
     lv_coord_t bar_bottom;
     lv_coord_t time_bottom;
 
+    uint16_t idle_clock_h;
+    uint16_t idle_weather_w;
+    uint16_t idle_mjpeg_h; /* idle 角色顶部再留空，避免盖住时钟；贴图仍贴右下角 */
+    uint16_t idle_digit_w;
+    uint16_t idle_digit_h;
+    uint16_t idle_digit_radius;
+    uint16_t idle_pill_h;
+    uint16_t idle_role_scale; /* 256=1.0，仅 idle 角色 GIF */
+    /* 1=翻页普惠字体  2=圆角框七段数码管（DesktopClock Font7） */
+    uint8_t idle_clock_style;
+
+    static constexpr uint8_t kIdleClockFlipPuhui = 1;
+    static constexpr uint8_t kIdleClockLed7Seg = 2;
+
     static constexpr FanHoloMetrics For55B() {
         return FanHoloMetrics{
             "FanMIPI55Display",
@@ -38,6 +52,8 @@ struct FanHoloMetrics {
             720, 1232, 48, "/sdcard/Music/musicbg-720x1232.bin",
             160, 200, 30,
             486, 224, 110, -420, -385, 90, 150, -310, -265,
+            300, 200, 56, 90, 136, 10, 36, 56,
+            kIdleClockFlipPuhui,
         };
     }
 
@@ -48,6 +64,8 @@ struct FanHoloMetrics {
             480, 816, 38, "/sdcard/Music/musicbg-480x816.bin",
             100, 140, 24,
             330, 140, 70, -260, -250, 30, 55, -110, -80,
+            220, 140, 44, 58, 94, 7, 28, 56,
+            kIdleClockFlipPuhui,
         };
     }
 };

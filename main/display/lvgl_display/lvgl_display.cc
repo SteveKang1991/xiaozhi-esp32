@@ -162,14 +162,19 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             icon = FONT_AWESOME_BATTERY_BOLT;
         } else {
             const char* levels[] = {
-                FONT_AWESOME_BATTERY_EMPTY, // 0-19%
-                FONT_AWESOME_BATTERY_QUARTER,    // 20-39%
-                FONT_AWESOME_BATTERY_HALF,    // 40-59%
-                FONT_AWESOME_BATTERY_THREE_QUARTERS,    // 60-79%
-                FONT_AWESOME_BATTERY_FULL, // 80-99%
+                FONT_AWESOME_BATTERY_EMPTY, // 0-9%
+                FONT_AWESOME_BATTERY_QUARTER,    // 10-19%
+                FONT_AWESOME_BATTERY_QUARTER,    // 20-29%
+                FONT_AWESOME_BATTERY_QUARTER,    // 30-39%
+                FONT_AWESOME_BATTERY_HALF,    // 40-49%
+                FONT_AWESOME_BATTERY_HALF,    // 50-59%
+                FONT_AWESOME_BATTERY_THREE_QUARTERS,    // 60-69%
+                FONT_AWESOME_BATTERY_THREE_QUARTERS,    // 70-79%
+                FONT_AWESOME_BATTERY_THREE_QUARTERS,    // 80-89%
+                FONT_AWESOME_BATTERY_FULL, // 90-99%
                 FONT_AWESOME_BATTERY_FULL, // 100%
             };
-            icon = levels[battery_level / 20];
+            icon = levels[battery_level / 10];
         }
         DisplayLockGuard lock(this);
         if (battery_label_ != nullptr && battery_icon_ != icon) {
