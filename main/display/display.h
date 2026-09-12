@@ -118,6 +118,16 @@ public:
      * 默认实现为空。 */
     virtual lv_obj_t* GetMusicCoverContainer() { return nullptr; }
 
+    virtual void GetRoleMjpegSize(const char* type, int* width, int* height) const {
+        if (width) {
+            *width = 240;
+        }
+        if (height) {
+            *height = 290;
+        }
+        (void)type;
+    }
+
     inline int width() const { return width_; }
     inline int height() const { return height_; }
     inline bool IsSetupUICalled() const { return setup_ui_called_; }

@@ -10,6 +10,8 @@ struct FanHoloMetrics {
 
     uint16_t mjpeg_w;
     uint16_t mjpeg_h;
+    uint16_t mjpeg_idle_w;
+    uint16_t mjpeg_idle_h;
     uint8_t mjpeg_fps;
 
     uint16_t music_cover_w;
@@ -48,11 +50,11 @@ struct FanHoloMetrics {
     static constexpr FanHoloMetrics For55B() {
         return FanHoloMetrics{
             "FanMIPI55Display",
-            656, 1232, 24,
+            656, 1232, 480, 896, 24,
             720, 1232, 48, "/sdcard/Music/musicbg-720x1232.bin",
             160, 200, 30,
             486, 224, 110, -420, -385, 90, 150, -310, -265,
-            300, 200, 56, 90, 136, 10, 36, 56,
+            300, 240, 56, 90, 136, 10, 36, 56,
             kIdleClockFlipPuhui,
         };
     }
@@ -60,11 +62,11 @@ struct FanHoloMetrics {
     static constexpr FanHoloMetrics For50B() {
         return FanHoloMetrics{
             "FanMIPI50Display",
-            416, 816, 24,
+            416, 816, 288, 560, 24,
             480, 816, 38, "/sdcard/Music/musicbg-480x816.bin",
             100, 140, 24,
             330, 140, 70, -260, -250, 30, 55, -110, -80,
-            220, 140, 44, 58, 94, 7, 28, 56,
+            220, 192, 44, 58, 94, 7, 28, 56,
             kIdleClockFlipPuhui,
         };
     }

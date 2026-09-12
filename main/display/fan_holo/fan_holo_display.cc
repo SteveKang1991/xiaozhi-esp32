@@ -622,43 +622,66 @@ bool FanHoloDisplay::FileExists(const std::string& path) {
     return stat(path.c_str(), &st) == 0;
 }
 
+void FanHoloDisplay::MjpegResForClip(const char* clip, unsigned* w, unsigned* h) const {
+    const bool idle = (clip != nullptr && strcmp(clip, "idle") == 0);
+    unsigned iw = metrics_.mjpeg_idle_w ? metrics_.mjpeg_idle_w : metrics_.mjpeg_w;
+    unsigned ih = metrics_.mjpeg_idle_h ? metrics_.mjpeg_idle_h : metrics_.mjpeg_h;
+    if (w) {
+        *w = idle ? iw : metrics_.mjpeg_w;
+    }
+    if (h) {
+        *h = idle ? ih : metrics_.mjpeg_h;
+    }
+}
+
+void FanHoloDisplay::GetRoleMjpegSize(const char* type, int* width, int* height) const {
+    unsigned w = 0;
+    unsigned h = 0;
+    MjpegResForClip(type, &w, &h);
+    if (width) {
+        *width = static_cast<int>(w);
+    }
+    if (height) {
+        *height = static_cast<int>(h);
+    }
+}
+
+static bool ParseMjpegResFromPath(const char* path, uint16_t* w, uint16_t* h) {
+    if (path == nullptr || w == nullptr || h == nullptr) {
+        return false;
+    }
+    const char* dash = strrchr(path, '-');
+    if (dash == nullptr) {
+        return false;
+    }
+    unsigned tw = 0;
+    unsigned th = 0;
+    if (sscanf(dash, "-%ux%u", &tw, &th) != 2 || tw == 0 || th == 0) {
+        return false;
+    }
+    *w = static_cast<uint16_t>(tw);
+    *h = static_cast<uint16_t>(th);
+    return true;
+}
+
 std::string FanHoloDisplay::FindRoleAnimation(const char* state) {
-    const char* clips[2] = { state, "idle" };
-    for (int i = 0; i < 2; i++) {
-        char path[128];
-        snprintf(path, sizeof(path), "/sdcard/Emotion/%s-%ux%u.mjpeg", clips[i],
-                 (unsigned)metrics_.mjpeg_w, (unsigned)metrics_.mjpeg_h);
-        if (FileExists(path)) {
-            ESP_LOGI(metrics_.tag, "FindRoleAnimation: found %s", path);
-            return path;
-        }
+    if (state == nullptr || state[0] == '\0') {
+        state = "idle";
+    }
+    unsigned cw = 0;
+    unsigned ch = 0;
+    MjpegResForClip(state, &cw, &ch);
+    char path[128];
+    snprintf(path, sizeof(path), "/sdcard/Emotion/%s-%ux%u.mjpeg", state, cw, ch);
+    if (FileExists(path)) {
+        ESP_LOGI(metrics_.tag, "FindRoleAnimation: found %s", path);
+        return path;
     }
 
-    bool user_has_any = false;
-    const char* all_clips[3] = { "idle", "listen", "speak" };
-    for (int i = 0; i < 3; i++) {
-        char test_path[128];
-        snprintf(test_path, sizeof(test_path), "/sdcard/Emotion/%s-%ux%u.mjpeg",
-                 all_clips[i], (unsigned)metrics_.mjpeg_w, (unsigned)metrics_.mjpeg_h);
-        if (FileExists(test_path)) {
-            user_has_any = true;
-            break;
-        }
-    }
-
-    if (user_has_any) {
-        ESP_LOGW(metrics_.tag, "FindRoleAnimation: user has role animation but no %s, skip", state);
-        return "";
-    }
-
-    for (int i = 0; i < 2; i++) {
-        char path[128];
-        snprintf(path, sizeof(path), "/sdcard/Emotion/default-%s-%ux%u.mjpeg", clips[i],
-                 (unsigned)metrics_.mjpeg_w, (unsigned)metrics_.mjpeg_h);
-        if (FileExists(path)) {
-            ESP_LOGI(metrics_.tag, "FindRoleAnimation: found default %s", path);
-            return path;
-        }
+    snprintf(path, sizeof(path), "/sdcard/Emotion/default-%s-%ux%u.mjpeg", state, cw, ch);
+    if (FileExists(path)) {
+        ESP_LOGI(metrics_.tag, "FindRoleAnimation: found default %s", path);
+        return path;
     }
 
     ESP_LOGW(metrics_.tag, "FindRoleAnimation: no animation for state=%s", state);
@@ -707,66 +730,34 @@ bool FanHoloDisplay::StartMjpegEmotion(const char* full_path, bool idle_layout) 
     uint16_t out_h = 0;
     uint16_t protect_top = 0;
     uint8_t scale_n = 0;
+    uint16_t vid_w = idle_layout
+        ? (metrics_.mjpeg_idle_w ? metrics_.mjpeg_idle_w : metrics_.mjpeg_w)
+        : metrics_.mjpeg_w;
+    uint16_t vid_h = idle_layout
+        ? (metrics_.mjpeg_idle_h ? metrics_.mjpeg_idle_h : metrics_.mjpeg_h)
+        : metrics_.mjpeg_h;
+    uint16_t file_w = 0;
+    uint16_t file_h = 0;
+    if (ParseMjpegResFromPath(full_path, &file_w, &file_h)) {
+        vid_w = file_w;
+        vid_h = file_h;
+    }
     if (idle_layout) {
-        /* 整帧等比缩小，不裁源图；输出矩形右下角对齐屏幕 (width_, height_)。 */
-        const int src_w = static_cast<int>(metrics_.mjpeg_w);
-        const int src_h = static_cast<int>(metrics_.mjpeg_h);
-        const int clock_h = static_cast<int>(metrics_.idle_clock_h);
-        const int top_gap = static_cast<int>(metrics_.idle_mjpeg_h);
-        /* PPA 缩放步进是 1/16，输出尺寸必须按这个算，否则会报 scale does not fit in the out pic */
-        int max_h = screen_h - clock_h - top_gap;
-        int max_w = screen_w;
-        if (max_h < 2) {
-            max_h = 2;
+        rx = screen_w - static_cast<int>(vid_w);
+        ry = screen_h - static_cast<int>(vid_h);
+        if (ry > 0) {
+            protect_top = static_cast<uint16_t>(ry);
         }
-        int frag = (max_h * 16) / src_h;
-        const int frag_w = (max_w * 16) / src_w;
-        if (frag_w < frag) {
-            frag = frag_w;
-        }
-        if (frag < 1) {
-            frag = 1;
-        }
-        if (frag > 16) {
-            frag = 16;
-        }
-        int scaled_w = src_w * frag / 16;
-        int scaled_h = src_h * frag / 16;
-        /* 缓冲取偶且不小于硬件输出，贴图仍用缓冲右下对齐屏幕 */
-        int pic_w = (scaled_w + 1) & ~1;
-        int pic_h = (scaled_h + 1) & ~1;
-        if (pic_w < 2) {
-            pic_w = 2;
-        }
-        if (pic_h < 2) {
-            pic_h = 2;
-        }
-        while (frag > 1 && pic_h > max_h) {
-            --frag;
-            scaled_w = src_w * frag / 16;
-            scaled_h = src_h * frag / 16;
-            pic_w = (scaled_w + 1) & ~1;
-            pic_h = (scaled_h + 1) & ~1;
-        }
-        out_w = static_cast<uint16_t>(pic_w);
-        out_h = static_cast<uint16_t>(pic_h);
-        rx = screen_w - pic_w;
-        ry = screen_h - pic_h;
-        protect_top = static_cast<uint16_t>(clock_h);
-        scale_n = static_cast<uint8_t>(frag);
-        ESP_LOGI(metrics_.tag,
-                 "idle MJPEG scale %d/16 %dx%d -> hw %dx%d pic %dx%d blit (%d,%d)-(%d,%d)",
-                 frag, src_w, src_h, scaled_w, scaled_h, pic_w, pic_h,
-                 rx, ry, rx + pic_w, ry + pic_h);
+        ESP_LOGI(metrics_.tag, "idle MJPEG dest=(%d,%d) %ux%u protect_top=%u",
+                 rx, ry, vid_w, vid_h, protect_top);
     } else {
-        rx = (screen_w - static_cast<int>(metrics_.mjpeg_w)) / 2;
-        ry = screen_h - static_cast<int>(metrics_.mjpeg_h);
-        /* 视频从 y=ry 起；顶栏在 ry 以上，letterbox 不要从 y=0 刷黑盖住状态圆角条。 */
+        rx = (screen_w - static_cast<int>(vid_w)) / 2;
+        ry = screen_h - static_cast<int>(vid_h);
         if (ry > 0) {
             protect_top = static_cast<uint16_t>(ry);
         }
         ESP_LOGI(metrics_.tag, "chat MJPEG dest=(%d,%d) %ux%u protect_top=%u",
-                 rx, ry, metrics_.mjpeg_w, metrics_.mjpeg_h, protect_top);
+                 rx, ry, vid_w, vid_h, protect_top);
     }
     if (rx < 0) {
         rx = 0;
@@ -783,8 +774,8 @@ bool FanHoloDisplay::StartMjpegEmotion(const char* full_path, bool idle_layout) 
     cfg.panel = panel_;
     cfg.fb[0] = nullptr;
     cfg.fb[1] = nullptr;
-    cfg.mjpeg_video_width = metrics_.mjpeg_w;
-    cfg.mjpeg_video_height = metrics_.mjpeg_h;
+    cfg.mjpeg_video_width = vid_w;
+    cfg.mjpeg_video_height = vid_h;
     cfg.panel_width = static_cast<uint16_t>(screen_w);
     cfg.panel_height = static_cast<uint16_t>(screen_h);
     cfg.target_fps = metrics_.mjpeg_fps;

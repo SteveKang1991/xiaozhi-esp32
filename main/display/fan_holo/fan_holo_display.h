@@ -52,6 +52,7 @@ public:
     bool StartMjpegEmotion(const char* full_path, bool idle_layout);
     void StopMjpegIfRunning();
     std::string FindRoleAnimation(const char* state);
+    void GetRoleMjpegSize(const char* type, int* width, int* height) const override;
     static const char* MapRoleStateToClip(const char* state);
     void NullBoundWidgets();
     void ApplyStatusBar(const FanHoloStatusBar& bar);
@@ -72,6 +73,7 @@ private:
     friend struct FanHoloRoleWidgets;
 
     static bool FileExists(const std::string& path);
+    void MjpegResForClip(const char* clip, unsigned* w, unsigned* h) const;
     void ShowVolumeSlider(int volume, int duration_ms);
     void HideVolumeSlider();
     void HideVolumeOverlay(lv_obj_t* overlay);
