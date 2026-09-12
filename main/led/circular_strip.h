@@ -22,6 +22,7 @@ public:
     virtual ~CircularStrip();
 
     void OnStateChanged() override;
+    void OnMusicSpectrum(const int* bar_h, int bar_count, int bar_max_h) override;
     void SetBrightness(uint8_t default_brightness, uint8_t low_brightness);
     void SetAllColor(StripColor color);
     void SetSingleColor(uint8_t index, StripColor color);

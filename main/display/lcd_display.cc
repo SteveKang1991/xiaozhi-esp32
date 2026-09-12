@@ -1409,6 +1409,7 @@ void LcdDisplay::EnableFft(bool enable) {
 
         fft_enabled_ = true;
         ResetFftVisual();
+        Board::GetInstance().GetLed()->OnStateChanged();
 
         if (fft_task_handle_ == nullptr) {
             fft_task_should_stop_ = false;
@@ -1440,6 +1441,7 @@ void LcdDisplay::StopFft() {
     fft_enabled_ = false;
     ResetFftVisual();
     setFftBarsVisible(false);
+    Board::GetInstance().GetLed()->OnStateChanged();
     ESP_LOGI(TAG, "FFT parked (buffers and bars retained)");
 }
 
@@ -1844,6 +1846,8 @@ void LcdDisplay::drawSpectrumIfReady() {
     if (!any_change) {
         return;
     }
+
+    Board::GetInstance().GetLed()->OnMusicSpectrum(bar_heights_, BARS_TOTAL, BAR_MAX_HEIGHT);
 
     {
         DisplayLockGuard lock(this);

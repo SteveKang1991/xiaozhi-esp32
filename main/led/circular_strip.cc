@@ -268,6 +268,62 @@ void CircularStrip::StartStripTask(int interval_ms, std::function<void()> cb) {
     esp_timer_start_periodic(strip_timer_, interval_ms * 1000);
 }
 
+void CircularStrip::OnMusicSpectrum(const int* bar_h, int bar_count, int bar_max_h) {
+    if (led_strip_ == nullptr || bar_h == nullptr || bar_count <= 0 || bar_max_h <= 0) {
+        return;
+    }
+    auto music = Board::GetInstance().GetMusic();
+    if (music == nullptr || !music->IsPlaying()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (strip_callback_ != nullptr) {
+        esp_timer_stop(strip_timer_);
+        strip_callback_ = nullptr;
+    }
+
+    const int n = max_leds_;
+    bool changed = false;
+    for (int i = 0; i < n; i++) {
+        const int bi = (n <= 1) ? 0 : (i * bar_count / n);
+        int h = bar_h[bi];
+        if (h < 0) {
+            h = 0;
+        } else if (h > bar_max_h) {
+            h = bar_max_h;
+        }
+        int level = (h * static_cast<int>(default_brightness_)) / bar_max_h;
+        if (h > 0 && level < static_cast<int>(low_brightness_)) {
+            level = low_brightness_;
+        }
+
+        const int hue = (i * 270) / (n > 1 ? (n - 1) : 1);
+        const uint8_t region = static_cast<uint8_t>(hue / 60);
+        const uint8_t rem = static_cast<uint8_t>((hue % 60) * 255 / 60);
+        uint8_t r = 0, g = 0, b = 0;
+        switch (region) {
+            case 0: r = 255; g = rem; b = 0; break;
+            case 1: r = static_cast<uint8_t>(255 - rem); g = 255; b = 0; break;
+            case 2: r = 0; g = 255; b = rem; break;
+            case 3: r = 0; g = static_cast<uint8_t>(255 - rem); b = 255; break;
+            default: r = rem; g = 0; b = 255; break;
+        }
+        r = static_cast<uint8_t>((r * level) / 255);
+        g = static_cast<uint8_t>((g * level) / 255);
+        b = static_cast<uint8_t>((b * level) / 255);
+
+        if (colors_[i].red != r || colors_[i].green != g || colors_[i].blue != b) {
+            colors_[i] = {r, g, b};
+            led_strip_set_pixel(led_strip_, i, r, g, b);
+            changed = true;
+        }
+    }
+    if (changed) {
+        led_strip_refresh(led_strip_);
+    }
+}
+
 void CircularStrip::SetBrightness(uint8_t default_brightness, uint8_t low_brightness) {
     default_brightness_ = default_brightness;
     low_brightness_ = low_brightness;
@@ -295,15 +351,19 @@ void CircularStrip::OnStateChanged() {
             auto music = board.GetMusic();
             if (music && music->IsPlaying()) {
                 // 音乐播放中：随机选择一种炫彩效果，烘托音乐氛围
-                int effect = esp_random() % 2;
-                
-                if (effect == 0) {
-                    // RGB 彩虹循环效果（整体变色）
-                    RainbowCycle(10);
-                } else {
-                    // 五彩斑斓随机颜色滚动效果（亮块移动）
-                    RandomColorScroll(5, 80);
-                }
+                // int effect = esp_random() % 2;
+                //
+                // if (effect == 0) {
+                //     // RGB 彩虹循环效果（整体变色）
+                //     RainbowCycle(10);
+                // } else {
+                //     // 五彩斑斓随机颜色滚动效果（亮块移动）
+                //     RandomColorScroll(5, 80);
+                // }
+                /* 改由 FFT 频谱同一拍驱动，见 OnMusicSpectrum */
+                std::lock_guard<std::mutex> lock(mutex_);
+                esp_timer_stop(strip_timer_);
+                strip_callback_ = nullptr;
             }
             else {
                 FadeOut(50);
