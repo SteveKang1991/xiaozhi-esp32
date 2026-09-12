@@ -169,6 +169,7 @@ void FanHoloDisplay::ApplyStatusBar(const FanHoloStatusBar& bar) {
     low_battery_popup_ = bar.low_battery_popup;
     low_battery_label_ = bar.low_battery_label;
     ApplyVolumeBar(bar.volume_bar, bar.volume_overlay, bar.volume_label);
+    last_battery_icon_color_ = 0;
     ApplyIdleBatteryIconColor();
     if (low_battery_popup_ != nullptr) {
         if (low_battery_alert_) {
@@ -307,6 +308,10 @@ void FanHoloDisplay::ApplyIdleBatteryIconColor() {
     } else if (battery_icon_ != nullptr && strcmp(battery_icon_, FONT_AWESOME_BATTERY_EMPTY) == 0) {
         color = kBatteryLowColor;
     }
+    if (color == last_battery_icon_color_) {
+        return;
+    }
+    last_battery_icon_color_ = color;
     lv_obj_set_style_text_color(battery_label_, lv_color_hex(color), 0);
 }
 
@@ -439,7 +444,9 @@ void FanHoloDisplay::UpdateStatusBar(bool update_all) {
         (low_battery_popup_ == nullptr) || lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
     LvglDisplay::UpdateStatusBar(update_all);
     DisplayLockGuard lock(this);
-    idle_page_.Tick();
+    if (current_page_ == Page::Idle) {
+        idle_page_.Tick();
+    }
     ApplyIdleBatteryIconColor();
     if (low_battery_popup_ != nullptr) {
         low_battery_alert_ = !lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);

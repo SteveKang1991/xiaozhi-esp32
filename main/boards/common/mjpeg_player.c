@@ -263,14 +263,17 @@ static void mjpeg_on_lvgl_invalidate_area(lv_event_t *e)
     const int rh = (s_cfg.panel_roi_h > 0) ? (int)s_cfg.panel_roi_h : (int)s_cfg.mjpeg_video_height;
     const int rx1 = rx0 + rw - 1;
     const int ry1 = ry0 + rh - 1;
+    const int protect_top = (s_cfg.panel_protect_top > 0) ? (int)s_cfg.panel_protect_top : ry0;
     if (a->x2 < rx0 || a->x1 > rx1 || a->y2 < ry0 || a->y1 > ry1) {
         return;
     }
+    /* 视频区内的脏区直接丢掉，禁止 LVGL 盖住 MJPEG。 */
     if (a->x1 >= rx0 && a->x2 <= rx1 && a->y1 >= ry0 && a->y2 <= ry1) {
         a->x2 = (lv_coord_t)(a->x1 - 1);
         return;
     }
 
+    const int32_t orig_y1 = a->y1;
     int32_t bx1 = a->x1, by1 = a->y1, bx2 = a->x1 - 1, by2 = a->y1 - 1;
     int32_t best = 0;
     const int32_t cands[4][4] = {
@@ -304,6 +307,11 @@ static void mjpeg_on_lvgl_invalidate_area(lv_event_t *e)
             bx2 = x2;
             by2 = y2;
         }
+    }
+    /* 天气/字幕等脏区切掉 ROI 后，最大剩余经常是整条顶栏。顶栏内容没变，不能每帧重画。 */
+    if (best > 0 && by2 < protect_top && orig_y1 >= protect_top) {
+        a->x2 = (lv_coord_t)(a->x1 - 1);
+        return;
     }
     if (best <= 0) {
         a->x2 = (lv_coord_t)(a->x1 - 1);
@@ -1219,9 +1227,11 @@ static void mjpeg_decode_task(void *arg)
                 h = src_h;
                 src_y = 0;
             }
-            /* 用户确认：mjpeg ROI 区域与 LVGL label 字幕区不重叠，DSI panel 的 ROI 区域
-             * 与 LVGL flush 范围天然无竞争，无需持 LVGL 锁。直接 blit 全靠 mjpeg_panel_draw_bitmap_retry
-             * 自带的 panel 忙重试保证（DMA2D 引擎互斥）。 */
+            /* 与 LVGL flush 串行，避免 DSI 半帧交错把顶栏/日期栏刷花。抢不到锁就丢这一帧。 */
+            if (!lvgl_port_lock(MJPEG_LVGL_LOCK_TIMEOUT_MS)) {
+                fb_idx = 1 - fb_idx;
+                continue;
+            }
             if (MJPEG_ROI_DRAW_LETTERBOX_ONCE && !s_roi_letterbox_drawn) {
                 mjpeg_roi_letterbox_draw(s_cfg.panel, s_panel_width, s_panel_height, draw_x0, draw_y0, w, h,
                                          (int)s_cfg.panel_protect_top);
@@ -1282,6 +1292,7 @@ static void mjpeg_decode_task(void *arg)
                     }
                 }
             }
+            lvgl_port_unlock();
         } else if (s_cfg.panel) {
             esp_err_t blit = mjpeg_panel_draw_bitmap_retry(s_cfg.panel, 0, 0,
                                       s_cfg.mjpeg_video_width, s_cfg.mjpeg_video_height,

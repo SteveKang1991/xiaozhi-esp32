@@ -88,6 +88,7 @@ private:
     int last_volume_ = 0;
     bool volume_visible_ = false;
     bool low_battery_alert_ = false;
+    uint32_t last_battery_icon_color_ = 0;
 
     Page current_page_ = Page::Boot;
     inline static bool s_system_ready_ = false;

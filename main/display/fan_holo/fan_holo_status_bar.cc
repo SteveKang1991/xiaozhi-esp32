@@ -957,7 +957,7 @@ void FanHoloStatusBar::Create(lv_obj_t* screen, FanHoloDisplay& host, Kind kind)
     top_bar = lv_obj_create(screen);
     lv_obj_set_size(top_bar, LV_HOR_RES, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(top_bar, 0, 0);
-    lv_obj_set_style_bg_opa(top_bar, LV_OPA_50, 0);
+    lv_obj_set_style_bg_opa(top_bar, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(top_bar, theme->background_color(), 0);
     lv_obj_set_style_border_width(top_bar, 0, 0);
     lv_obj_set_style_pad_all(top_bar, 0, 0);
