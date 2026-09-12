@@ -40,8 +40,8 @@ constexpr uint32_t kColonColor = 0xD8D8D8;
 constexpr uint32_t kFlipDurationMs = 480;
 constexpr int kDigitCount = 6;
 constexpr int kPairGap = 6;
-constexpr int kDateRowY = 40;
-constexpr int kClockBelowDate = 50;
+constexpr int kDateRowY = 0;
+constexpr int kClockBelowDate = 40;
 /* 图1：卡片深灰可见；时分亮冰青；秒青色。 */
 constexpr uint32_t kLedCardBg = 0x1A4854;
 constexpr uint32_t kLedCardBorder = 0x3A6A78;

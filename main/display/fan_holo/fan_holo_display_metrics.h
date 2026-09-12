@@ -53,7 +53,7 @@ struct FanHoloMetrics {
             160, 200, 30,
             486, 224, 110, -420, -385, 90, 150, -310, -265,
             300, 200, 56, 90, 136, 10, 36, 56,
-            kIdleClockLed7Seg,
+            kIdleClockFlipPuhui,
         };
     }
 

@@ -283,7 +283,7 @@ void Application::Run() {
                     xTaskCreate([](void* arg) {
                         static_cast<Application*>(arg)->RefreshIdleWeather();
                         vTaskDelete(NULL);
-                    }, "weather", 8192, this, 1, nullptr);
+                    }, "weather", 24576, this, 1, nullptr);
                 }
             }
         }
@@ -453,7 +453,7 @@ void Application::CheckDeviceInfo() {
         xTaskCreate([](void* arg) {
             static_cast<Application*>(arg)->RefreshIdleWeather();
             vTaskDelete(NULL);
-        }, "weather", 8192, this, 1, nullptr);
+        }, "weather", 24576, this, 1, nullptr);
     } else {
         ESP_LOGW(TAG, "Device info has no address");
     }
@@ -476,6 +476,7 @@ void Application::RefreshIdleWeather() {
         ESP_LOGW(TAG, "Fetch weather failed for %s", weather_city_.c_str());
         return;
     }
+    FanHoloPrepareWeatherIcons(view);
     auto display = Board::GetInstance().GetDisplay();
     if (display != nullptr) {
         display->SetIdleWeather(view);

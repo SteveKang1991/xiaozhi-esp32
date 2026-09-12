@@ -2,9 +2,15 @@
 #include "board.h"
 
 #include <cJSON.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_lvgl_port.h>
+#include <freertos/FreeRTOS.h>
+#include <lvgl.h>
+#include "src/draw/lv_image_decoder_private.h"
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -142,6 +148,151 @@ unsigned int FanHoloWeatherIconColor(int id) {
     return 0xA0A8B0;
 }
 
+void FanHoloWeatherIconSdPath(int icon_id, char* dst, size_t dst_len) {
+    if (dst == nullptr || dst_len == 0) {
+        return;
+    }
+    int code = icon_id;
+    if (code < 0 || (code > 38 && code != 99)) {
+        code = 99;
+    }
+    snprintf(dst, dst_len, "S:/sdcard/Weather/%d.png", code);
+}
+
+struct WeatherIconSlot {
+    int code = -1;
+    int max_w = 0;
+    int max_h = 0;
+    lv_image_dsc_t dsc{};
+    uint8_t* pixels = nullptr;
+};
+
+static WeatherIconSlot s_icon_slots[4];
+
+static void FreeWeatherIconSlot(WeatherIconSlot* slot) {
+    if (slot == nullptr) {
+        return;
+    }
+    if (slot->pixels != nullptr) {
+        heap_caps_free(slot->pixels);
+        slot->pixels = nullptr;
+    }
+    memset(&slot->dsc, 0, sizeof(slot->dsc));
+    slot->code = -1;
+    slot->max_w = 0;
+    slot->max_h = 0;
+}
+
+static bool FillWeatherIconSlot(WeatherIconSlot* slot, int code, int max_w, int max_h) {
+    if (slot == nullptr) {
+        return false;
+    }
+    if (slot->code == code && slot->pixels != nullptr &&
+        slot->max_w == max_w && slot->max_h == max_h) {
+        return true;
+    }
+    FreeWeatherIconSlot(slot);
+
+    char path[64];
+    FanHoloWeatherIconSdPath(code, path, sizeof(path));
+    lv_image_decoder_args_t args{};
+    args.no_cache = true;
+    lv_image_decoder_dsc_t dec{};
+    if (lv_image_decoder_open(&dec, path, &args) != LV_RESULT_OK ||
+        dec.decoded == nullptr || dec.decoded->data == nullptr) {
+        lv_image_decoder_close(&dec);
+        ESP_LOGW(TAG, "decode weather png failed: %s", path);
+        return false;
+    }
+
+    const lv_draw_buf_t* buf = dec.decoded;
+    const int sw = static_cast<int>(buf->header.w);
+    const int sh = static_cast<int>(buf->header.h);
+    const uint32_t sstride = buf->header.stride;
+    int dw = sw;
+    int dh = sh;
+    if (dw > max_w || dh > max_h) {
+        const int sx = max_w * 256 / dw;
+        const int sy = max_h * 256 / dh;
+        const int s = sx < sy ? sx : sy;
+        dw = (dw * s + 128) / 256;
+        dh = (dh * s + 128) / 256;
+        if (dw < 1) {
+            dw = 1;
+        }
+        if (dh < 1) {
+            dh = 1;
+        }
+    }
+    const uint32_t dstride = static_cast<uint32_t>(dw) * 4u;
+    const size_t nbytes = static_cast<size_t>(dstride) * static_cast<size_t>(dh);
+    uint8_t* pixels = static_cast<uint8_t*>(
+        heap_caps_malloc(nbytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (pixels == nullptr) {
+        pixels = static_cast<uint8_t*>(malloc(nbytes));
+    }
+    if (pixels == nullptr) {
+        lv_image_decoder_close(&dec);
+        ESP_LOGW(TAG, "weather icon alloc failed %dx%d", dw, dh);
+        return false;
+    }
+
+    const uint8_t* src = buf->data;
+    for (int y = 0; y < dh; ++y) {
+        const int syi = (dh == sh) ? y : (y * sh) / dh;
+        const uint8_t* srow = src + static_cast<size_t>(syi) * sstride;
+        uint8_t* drow = pixels + static_cast<size_t>(y) * dstride;
+        if (dw == sw && sstride >= dstride) {
+            memcpy(drow, srow, dstride);
+        } else {
+            for (int x = 0; x < dw; ++x) {
+                const int sxi = (dw == sw) ? x : (x * sw) / dw;
+                memcpy(drow + x * 4, srow + sxi * 4, 4);
+            }
+        }
+    }
+    lv_image_decoder_close(&dec);
+
+    slot->pixels = pixels;
+    slot->code = code;
+    slot->max_w = max_w;
+    slot->max_h = max_h;
+    memset(&slot->dsc, 0, sizeof(slot->dsc));
+    slot->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    slot->dsc.header.cf = LV_COLOR_FORMAT_ARGB8888;
+    slot->dsc.header.w = static_cast<uint32_t>(dw);
+    slot->dsc.header.h = static_cast<uint32_t>(dh);
+    slot->dsc.header.stride = dstride;
+    slot->dsc.data = pixels;
+    slot->dsc.data_size = nbytes;
+    return true;
+}
+
+void FanHoloPrepareWeatherIcons(const IdleWeatherView& view) {
+    if (!view.valid) {
+        return;
+    }
+    const int codes[4] = {
+        view.icon, view.days[0].icon, view.days[1].icon, view.days[2].icon};
+    const int max_w[4] = {96, 62, 62, 62};
+    const int max_h[4] = {96, 62, 62, 62};
+    for (int i = 0; i < 4; ++i) {
+        if (!lvgl_port_lock(pdMS_TO_TICKS(3000))) {
+            ESP_LOGW(TAG, "prepare weather icons: lvgl lock timeout");
+            return;
+        }
+        FillWeatherIconSlot(&s_icon_slots[i], codes[i], max_w[i], max_h[i]);
+        lvgl_port_unlock();
+    }
+}
+
+const lv_image_dsc_t* FanHoloWeatherIconDsc(int slot) {
+    if (slot < 0 || slot > 3 || s_icon_slots[slot].pixels == nullptr) {
+        return nullptr;
+    }
+    return &s_icon_slots[slot].dsc;
+}
+
 static void FillDay(cJSON* day, IdleWeatherDay* out, const char* title) {
     CopyText(out->title, sizeof(out->title), title);
     cJSON* date = cJSON_GetObjectItem(day, "date");
@@ -150,6 +301,12 @@ static void FillDay(cJSON* day, IdleWeatherDay* out, const char* title) {
                  date->valuestring + 5, date->valuestring + 8);
     }
     out->icon = JsonInt(cJSON_GetObjectItem(day, "code_day"));
+    cJSON* text_day = cJSON_GetObjectItem(day, "text_day");
+    if (cJSON_IsString(text_day) && text_day->valuestring != nullptr) {
+        CopyText(out->text, sizeof(out->text), text_day->valuestring);
+    } else {
+        CopyText(out->text, sizeof(out->text), FanHoloWeatherIconLabel(out->icon));
+    }
     out->temp_max = JsonInt(cJSON_GetObjectItem(day, "high"));
     out->temp_min = JsonInt(cJSON_GetObjectItem(day, "low"));
     out->humidity = JsonInt(cJSON_GetObjectItem(day, "humidity"));
@@ -242,6 +399,6 @@ bool FanHoloFetchWeather(const std::string& city, IdleWeatherView* out) {
     cJSON_Delete(d_root);
 
     out->valid = true;
-    ESP_LOGI(TAG, "weather %s now %dC %s", out->city, out->temp, out->text);
+    ESP_LOGI(TAG, "weather %s now %d %s", out->city, out->temp, out->text);
     return true;
 }

@@ -25,7 +25,7 @@ public:
 
 private:
     void CreateWeather(FanHoloDisplay& host);
-    void StyleWeatherIcon(lv_obj_t* icon, lv_obj_t* mark, int icon_id);
+    void StyleWeatherIcon(lv_obj_t* icon, int slot);
 
     lv_obj_t* screen_ = nullptr;
     lv_obj_t* container_ = nullptr;
@@ -39,14 +39,17 @@ private:
     lv_obj_t* temp_label_ = nullptr;
     lv_obj_t* text_label_ = nullptr;
     lv_obj_t* today_icon_ = nullptr;
-    lv_obj_t* today_icon_mark_ = nullptr;
     lv_obj_t* detail_label_ = nullptr;
+    char detail_line0_[96]{};
+    char detail_line1_[80]{};
+    uint8_t detail_line_ = 0;
+    int64_t detail_swap_ms_ = 0;
 
     lv_obj_t* forecast_box_ = nullptr;
     lv_obj_t* day_title_[3]{};
     lv_obj_t* day_date_[3]{};
+    lv_obj_t* day_text_[3]{};
     lv_obj_t* day_icon_[3]{};
-    lv_obj_t* day_icon_mark_[3]{};
     lv_obj_t* day_temp_[3]{};
     lv_obj_t* day_hum_[3]{};
     lv_obj_t* day_precip_[3]{};
