@@ -109,6 +109,8 @@ FanHoloDisplay::FanHoloDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
         ESP_LOGE(metrics_.tag, "Failed to add display");
         return;
     }
+    mjpeg_attach_panel_draw_guard(panel);
+    mjpeg_attach_lvgl_inv_guard(display_);
 
     ESP_LOGI(metrics_.tag, "LVGL native resolution: %dx%d",
              (int)lv_display_get_horizontal_resolution(display_),
@@ -237,15 +239,8 @@ void FanHoloDisplay::HideVolumeOverlay(lv_obj_t* overlay) {
     if (overlay == nullptr) {
         return;
     }
-    lv_obj_t* parent = lv_obj_get_parent(overlay);
     lv_obj_invalidate(overlay);
-    if (parent != nullptr) {
-        lv_obj_invalidate(parent);
-    }
     lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
-    if (parent != nullptr) {
-        lv_obj_invalidate(parent);
-    }
 }
 
 void FanHoloDisplay::HideVolumeSlider() {
@@ -344,10 +339,6 @@ void FanHoloDisplay::PreparePage(Page page) {
     StopMjpegIfRunning();
     DisplayLockGuard lock(this);
     SwitchTo(page);
-    lv_obj_t* scr = lv_screen_active();
-    if (scr != nullptr) {
-        lv_obj_invalidate(scr);
-    }
 }
 
 void FanHoloDisplay::SwitchTo(Page page) {

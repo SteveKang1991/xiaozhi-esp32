@@ -277,8 +277,8 @@ void SegDigitSet(FanHoloSegDigit* g, char ch) {
     if (ch != g->current) {
         g->current = ch;
         lv_obj_set_user_data(g->box, reinterpret_cast<void*>(static_cast<intptr_t>(ch - '0')));
+        lv_obj_invalidate(g->box);
     }
-    lv_obj_invalidate(g->box);
 }
 
 void FlipDigitSetChar(lv_obj_t* lbl, char ch) {
@@ -968,6 +968,7 @@ void FanHoloStatusBar::Create(lv_obj_t* screen, FanHoloDisplay& host, Kind kind)
     lv_obj_set_flex_flow(top_bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top_bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollbar_mode(top_bar, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_max_height(top_bar, metrics.music_cover_top, 0);
     lv_obj_align(top_bar, LV_ALIGN_TOP_MID, 0, 0);
 
     lv_obj_t* left_status = lv_obj_create(top_bar);

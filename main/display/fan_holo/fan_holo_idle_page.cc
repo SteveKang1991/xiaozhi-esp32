@@ -54,7 +54,7 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
     lv_obj_add_flag(weather_root_, LV_OBJ_FLAG_FLOATING);
     lv_obj_add_flag(weather_root_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_pos(weather_root_, 0, clock_h - 55);
-    lv_obj_set_size(weather_root_, host.screen_width(), LV_SIZE_CONTENT);
+    lv_obj_set_size(weather_root_, card_w, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(weather_root_, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(weather_root_, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_left(weather_root_, 0, 0);
@@ -130,18 +130,19 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
     lv_obj_set_style_translate_y(today_icon_, -10, 0);
     NoScroll(today_icon_);
 
-    lv_obj_t* detail_card = lv_obj_create(weather_root_);
-    lv_obj_remove_style_all(detail_card);
-    lv_obj_add_flag(detail_card, LV_OBJ_FLAG_FLOATING);
-    lv_obj_add_flag(detail_card, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_obj_add_flag(detail_card, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
-    lv_obj_set_pos(detail_card, card_w, font->line_height + 12);
-    lv_obj_set_size(detail_card, host.screen_width() - card_w, font->line_height);
-    StyleLedCard(detail_card);
-    lv_obj_set_style_pad_left(detail_card, 18, 0);
-    NoScroll(detail_card);
+    detail_card_ = lv_obj_create(screen_);
+    lv_obj_remove_style_all(detail_card_);
+    lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_FLOATING);
+    lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_pos(detail_card_, card_w, clock_h - 55 + font->line_height + 12);
+    lv_obj_set_size(detail_card_, host.screen_width() - card_w, font->line_height);
+    StyleLedCard(detail_card_);
+    lv_obj_set_style_pad_left(detail_card_, 18, 0);
+    NoScroll(detail_card_);
 
-    detail_label_ = MakeLabel(detail_card, font, kWhite, "");
+    detail_label_ = MakeLabel(detail_card_, font, kWhite, "");
     lv_obj_set_size(detail_label_, LV_PCT(100), LV_PCT(100));
     lv_label_set_long_mode(detail_label_, LV_LABEL_LONG_CLIP);
 
@@ -256,6 +257,7 @@ void FanHoloIdlePage::Destroy() {
     container_ = nullptr;
     preview_image_ = nullptr;
     weather_root_ = nullptr;
+    detail_card_ = nullptr;
     today_box_ = nullptr;
     forecast_box_ = nullptr;
     city_label_ = nullptr;
@@ -359,12 +361,21 @@ void FanHoloIdlePage::ApplyWeather(const IdleWeatherView& weather) {
     }
     if (!weather.valid) {
         lv_obj_add_flag(weather_root_, LV_OBJ_FLAG_HIDDEN);
+        if (detail_card_) {
+            lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_HIDDEN);
+        }
         return;
     }
     const bool was_hidden = lv_obj_has_flag(weather_root_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(weather_root_, LV_OBJ_FLAG_HIDDEN);
+    if (detail_card_) {
+        lv_obj_remove_flag(detail_card_, LV_OBJ_FLAG_HIDDEN);
+    }
     if (was_hidden) {
         lv_obj_move_foreground(weather_root_);
+        if (detail_card_) {
+            lv_obj_move_foreground(detail_card_);
+        }
         status_bar_.RaiseOverlays();
     }
 

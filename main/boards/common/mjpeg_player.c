@@ -39,6 +39,7 @@
 #endif
 #include "lvgl.h"
 #include "esp_lvgl_port.h"
+#include "esp_lcd_panel_interface.h"
 
 static const char *TAG = "🎬 MJPEG播放器";
 /** LVGL 正在 flush（尤其 sw_rotate + 对话刷新）时，持锁前已提交的 DSI 传输可能仍在进行 */
@@ -76,6 +77,8 @@ static bool s_roi_letterbox_drawn;
 static bool s_output_fb_shared;
 /** true：旧播放器标记停止但尚未清理，下次 start 时完成清理 */
 static bool s_deferred_cleanup;
+static volatile bool s_running = false;
+static mjpeg_player_cfg_t s_cfg;
 
 /** 首若干帧打印 decode/blit 耗时，便于确认瓶颈（非 0 启用） */
 #ifndef MJPEG_PROFILE_FIRST_FRAMES
@@ -173,15 +176,31 @@ static void mjpeg_init_black_tile_buffer(int panel_width, int panel_height)
     }
 }
 
-static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int x0, int y0, int x1, int y1, const void *data)
+static SemaphoreHandle_t s_panel_draw_mu;
+static bool s_panel_draw_wrapped;
+static esp_err_t (*s_panel_draw_orig)(esp_lcd_panel_t *panel, int x_start, int y_start, int x_end, int y_end,
+                                      const void *color_data);
+
+static void mjpeg_panel_draw_mu_init(void)
 {
+    if (s_panel_draw_mu == NULL) {
+        s_panel_draw_mu = xSemaphoreCreateMutex();
+    }
+}
+
+static esp_err_t mjpeg_panel_draw_wait(esp_lcd_panel_t *panel, int x0, int y0, int x1, int y1, const void *data)
+{
+    esp_err_t (*draw)(esp_lcd_panel_t *, int, int, int, int, const void *) =
+        s_panel_draw_orig ? s_panel_draw_orig : (panel ? panel->draw_bitmap : NULL);
+    if (draw == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
     esp_err_t ret = ESP_FAIL;
     for (int i = 0; i < MJPEG_DRAW_RETRY_MAX; i++) {
-        ret = esp_lcd_panel_draw_bitmap(panel, x0, y0, x1, y1, data);
+        ret = draw(panel, x0, y0, x1, y1, data);
         if (ret == ESP_OK) {
             return ret;
         }
-        /* previous draw not finished: 微秒级退避，避免 tick 量化导致每次至少 1 tick(常见 10ms) */
         uint32_t us = MJPEG_DRAW_RETRY_US_MIN + (uint32_t)i * MJPEG_DRAW_RETRY_US_MIN;
         if (us > MJPEG_DRAW_RETRY_US_MAX) {
             us = MJPEG_DRAW_RETRY_US_MAX;
@@ -192,6 +211,126 @@ static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int
         }
     }
     return ret;
+}
+
+static esp_err_t mjpeg_panel_draw_serialized(esp_lcd_panel_t *panel, int x0, int y0, int x1, int y1, const void *data)
+{
+    mjpeg_panel_draw_mu_init();
+    if (s_panel_draw_mu) {
+        xSemaphoreTake(s_panel_draw_mu, portMAX_DELAY);
+    }
+    const esp_err_t ret = mjpeg_panel_draw_wait(panel, x0, y0, x1, y1, data);
+    if (s_panel_draw_mu) {
+        xSemaphoreGive(s_panel_draw_mu);
+    }
+    return ret;
+}
+
+void mjpeg_attach_panel_draw_guard(esp_lcd_panel_handle_t panel)
+{
+    if (panel == NULL || s_panel_draw_wrapped) {
+        return;
+    }
+    if (panel->draw_bitmap == NULL) {
+        return;
+    }
+    mjpeg_panel_draw_mu_init();
+    s_panel_draw_orig = panel->draw_bitmap;
+    panel->draw_bitmap = mjpeg_panel_draw_serialized;
+    s_panel_draw_wrapped = true;
+}
+
+static int32_t mjpeg_area_pixels(int32_t x1, int32_t y1, int32_t x2, int32_t y2)
+{
+    if (x2 < x1 || y2 < y1) {
+        return 0;
+    }
+    return (x2 - x1 + 1) * (y2 - y1 + 1);
+}
+
+static void mjpeg_on_lvgl_invalidate_area(lv_event_t *e)
+{
+    if (!s_running || !s_panel_roi_blit) {
+        return;
+    }
+    lv_area_t *a = lv_event_get_invalidated_area(e);
+    if (a == NULL) {
+        return;
+    }
+    const int rx0 = (int)s_cfg.panel_roi_x;
+    const int ry0 = (int)s_cfg.panel_roi_y;
+    const int rw = (s_cfg.panel_roi_w > 0) ? (int)s_cfg.panel_roi_w : (int)s_cfg.mjpeg_video_width;
+    const int rh = (s_cfg.panel_roi_h > 0) ? (int)s_cfg.panel_roi_h : (int)s_cfg.mjpeg_video_height;
+    const int rx1 = rx0 + rw - 1;
+    const int ry1 = ry0 + rh - 1;
+    if (a->x2 < rx0 || a->x1 > rx1 || a->y2 < ry0 || a->y1 > ry1) {
+        return;
+    }
+    if (a->x1 >= rx0 && a->x2 <= rx1 && a->y1 >= ry0 && a->y2 <= ry1) {
+        a->x2 = (lv_coord_t)(a->x1 - 1);
+        return;
+    }
+
+    int32_t bx1 = a->x1, by1 = a->y1, bx2 = a->x1 - 1, by2 = a->y1 - 1;
+    int32_t best = 0;
+    const int32_t cands[4][4] = {
+        {a->x1, a->y1, a->x2, (ry0 > 0) ? (ry0 - 1) : -1},
+        {a->x1, ry1 + 1, a->x2, a->y2},
+        {a->x1, a->y1, (rx0 > 0) ? (rx0 - 1) : -1, a->y2},
+        {rx1 + 1, a->y1, a->x2, a->y2},
+    };
+    for (int i = 0; i < 4; i++) {
+        int32_t x1 = cands[i][0];
+        int32_t y1 = cands[i][1];
+        int32_t x2 = cands[i][2];
+        int32_t y2 = cands[i][3];
+        if (x1 < a->x1) {
+            x1 = a->x1;
+        }
+        if (y1 < a->y1) {
+            y1 = a->y1;
+        }
+        if (x2 > a->x2) {
+            x2 = a->x2;
+        }
+        if (y2 > a->y2) {
+            y2 = a->y2;
+        }
+        const int32_t px = mjpeg_area_pixels(x1, y1, x2, y2);
+        if (px > best) {
+            best = px;
+            bx1 = x1;
+            by1 = y1;
+            bx2 = x2;
+            by2 = y2;
+        }
+    }
+    if (best <= 0) {
+        a->x2 = (lv_coord_t)(a->x1 - 1);
+        return;
+    }
+    a->x1 = (lv_coord_t)bx1;
+    a->y1 = (lv_coord_t)by1;
+    a->x2 = (lv_coord_t)bx2;
+    a->y2 = (lv_coord_t)by2;
+}
+
+void mjpeg_attach_lvgl_inv_guard(void *lv_display)
+{
+    if (lv_display == NULL) {
+        return;
+    }
+    lv_display_add_event_cb((lv_display_t *)lv_display, mjpeg_on_lvgl_invalidate_area,
+                            LV_EVENT_INVALIDATE_AREA, NULL);
+}
+
+static esp_err_t mjpeg_panel_draw_bitmap_retry(esp_lcd_panel_handle_t panel, int x0, int y0, int x1, int y1, const void *data)
+{
+    /* guard 已包装 panel->draw_bitmap：内部互斥+重试，此处不可再锁以免自死锁。 */
+    if (s_panel_draw_wrapped) {
+        return esp_lcd_panel_draw_bitmap(panel, x0, y0, x1, y1, data);
+    }
+    return mjpeg_panel_draw_wait(panel, x0, y0, x1, y1, data);
 }
 
 static void mjpeg_ppa_release(void)
@@ -401,10 +540,8 @@ typedef struct {
 } read_ctx_t;
 
 /* ─────────────── 播放器状态 ─────────────── */
-static volatile bool s_running = false;
 static TaskHandle_t s_read_task = NULL;
 static TaskHandle_t s_decode_task = NULL;
-static mjpeg_player_cfg_t s_cfg;
 static QueueHandle_t s_frame_queue;
 static QueueHandle_t s_free_queue;
 static uint8_t *s_dma_bufs[NUM_DMA_BUFS];

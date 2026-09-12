@@ -28,8 +28,8 @@ typedef struct {
     void *lv_video_canvas;
     /**
      * true：解码到紧密 RGB565 缓冲，经 esp_lcd_panel_draw_bitmap 仅刷 ROI。
-     * 须 lv_video_canvas == NULL 且 panel 非空。若 ROI 与 LVGL 合成内容不重叠，可不与 LVGL 互斥
-     *（本实现不取 lvgl_port_lock）；重叠或撕裂敏感时请改用画布模式或自管同步。
+     * 须 lv_video_canvas == NULL 且 panel 非空。DSI 绘制由
+     * mjpeg_attach_panel_draw_guard 与 LVGL flush 串行，不取 lvgl_port_lock。
      */
     bool panel_blit_roi;
     uint16_t panel_roi_x;
@@ -57,6 +57,16 @@ typedef struct {
 esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg);
 void mjpeg_player_stop(void);
 bool mjpeg_player_is_running(void);
+
+/**
+ * DPI 同时只能有一笔 draw_bitmap。LVGL flush 与 MJPEG blit 并发会
+ * previous draw not finished，UI 花屏/闪、天气只剩一条黑带。
+ * 包装 panel->draw_bitmap：互斥 + 忙重试，所有调用方共用。
+ */
+void mjpeg_attach_panel_draw_guard(esp_lcd_panel_handle_t panel);
+
+/** 播放中把落入 MJPEG ROI 的 LVGL 脏区裁掉，避免全宽/全屏 flush 盖住视频。 */
+void mjpeg_attach_lvgl_inv_guard(void *lv_display);
 
 #ifdef __cplusplus
 }
