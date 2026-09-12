@@ -740,20 +740,9 @@ void Application::CheckEmotionFiles() {
 
     ESP_LOGI(kEmotionTag, "Fetched %d emotion(s) from server", (int)fetch_result.emotions.size());
 
-    // 服务器返回空列表（用户已删除所有角色动画），清三个角色文件
+    // 服务器返回空列表：自定义 idle/listen/speak 全部删掉（不碰 default-*）
     if (fetch_result.emotions.empty()) {
-        // 构造三个角色文件的本地路径，确保即使服务器没有，CleanOrphan 也能找到并删除旧的
-        int idle_w = 240, idle_h = 290, chat_w = 240, chat_h = 290;
-        if (display) {
-            display->GetRoleMjpegSize("idle", &idle_w, &idle_h);
-            display->GetRoleMjpegSize("listen", &chat_w, &chat_h);
-        }
-        std::vector<std::string> role_only = {
-            MakeEmotionLocalPath("idle", idle_w, idle_h),
-            MakeEmotionLocalPath("listen", chat_w, chat_h),
-            MakeEmotionLocalPath("speak", chat_w, chat_h),
-        };
-        CleanOrphanEmotionFiles(role_only);
+        CleanOrphanEmotionFiles({});
         ESP_LOGI(kEmotionTag, "No role emotions on server, cleared role files only");
         return;
     }
