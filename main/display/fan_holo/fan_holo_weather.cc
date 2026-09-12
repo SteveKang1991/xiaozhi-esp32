@@ -1,5 +1,7 @@
 #include "fan_holo_weather.h"
+#include "fan_holo_display_metrics.h"
 #include "board.h"
+#include "display.h"
 
 #include <cJSON.h>
 #include <esp_heap_caps.h>
@@ -274,8 +276,14 @@ void FanHoloPrepareWeatherIcons(const IdleWeatherView& view) {
     }
     const int codes[4] = {
         view.icon, view.days[0].icon, view.days[1].icon, view.days[2].icon};
-    const int max_w[4] = {96, 62, 62, 62};
-    const int max_h[4] = {96, 62, 62, 62};
+    const auto m = (Board::GetInstance().GetDisplay() != nullptr &&
+                    Board::GetInstance().GetDisplay()->width() <= 500)
+                       ? FanHoloMetrics::For50B()
+                       : FanHoloMetrics::For55B();
+    const int today = m.weather_icon_today;
+    const int day = m.weather_icon_day;
+    const int max_w[4] = {today, day, day, day};
+    const int max_h[4] = {today, day, day, day};
     for (int i = 0; i < 4; ++i) {
         if (!lvgl_port_lock(pdMS_TO_TICKS(3000))) {
             ESP_LOGW(TAG, "prepare weather icons: lvgl lock timeout");

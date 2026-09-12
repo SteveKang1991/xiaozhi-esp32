@@ -225,6 +225,8 @@ void FanHoloMusicPage::SetupCoverUI(FanHoloDisplay& host) {
     lv_obj_set_style_bg_opa(music_cover_container_, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(music_cover_container_, 0, 0);
     lv_obj_set_style_pad_all(music_cover_container_, 0, 0);
+    lv_obj_remove_flag(music_cover_container_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(music_cover_container_, LV_SCROLLBAR_MODE_OFF);
 
     music_cover_bg_img_ = lv_img_create(music_cover_container_);
     lv_obj_set_pos(music_cover_bg_img_, 0, 0);

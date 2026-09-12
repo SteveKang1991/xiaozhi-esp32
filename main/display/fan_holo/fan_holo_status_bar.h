@@ -27,6 +27,7 @@ struct FanHoloFlipDigit {
     int32_t digit_w = 0;
     int32_t digit_h = 0;
     int32_t digit_half = 0;
+    int32_t card_pad = 0;
     int32_t font_scale = 256;
     char current = '0';
     char target = 0;

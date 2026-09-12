@@ -1593,7 +1593,15 @@ void LcdDisplay::createFftBars(lv_obj_t* parent) {
     fft_bar_gap_   = 2;                           // 条间距 2px
     fft_bar_width_ = (total_w - (FFT_BAR_COUNT - 1) * fft_bar_gap_) / FFT_BAR_COUNT;
     fft_bar_max_h_ = height_ * 3 / 10;           // 最高条约屏高 30%，冲高/抛帽都更高
-    fft_origin_y_ = height_ - fft_bar_max_h_ - (height_ * 0.04);  
+    /* 跟封面容器底对齐，再抬 2px，两板同一套，不再按屏高/4% 分行。 */
+    int parent_h = lv_obj_get_height(parent);
+    if (parent_h <= 1) {
+        parent_h = height_;
+    }
+    fft_origin_y_ = parent_h - fft_bar_max_h_ - 2;
+    if (fft_origin_y_ < 0) {
+        fft_origin_y_ = 0;
+    }  
 
     // 创建一个透明父容器（便于统一管理 24 个 obj，删除时一并清理）
     fft_container_ = lv_obj_create(parent);

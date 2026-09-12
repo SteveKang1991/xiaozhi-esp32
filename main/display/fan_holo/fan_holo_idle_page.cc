@@ -49,11 +49,13 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
         card_w = static_cast<int>(metrics.idle_weather_w);
     }
 
+    const int weather_y = clock_h - 55 + (metrics.weather_icon_today >= 80 ? 0 : 4);
+
     weather_root_ = lv_obj_create(screen_);
     lv_obj_remove_style_all(weather_root_);
     lv_obj_add_flag(weather_root_, LV_OBJ_FLAG_FLOATING);
     lv_obj_add_flag(weather_root_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_pos(weather_root_, 0, clock_h - 55);
+    lv_obj_set_pos(weather_root_, 0, weather_y);
     lv_obj_set_size(weather_root_, card_w, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(weather_root_, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(weather_root_, LV_FLEX_FLOW_COLUMN);
@@ -114,7 +116,7 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
     lv_obj_set_height(temp_label_, font->line_height * 2);
     lv_obj_add_flag(temp_label_, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_t* deg = MakeLabel(temp_row, font, kWhite, "。");
-    lv_obj_set_style_translate_x(deg, -5, 0);
+    lv_obj_set_style_translate_x(deg, metrics.weather_icon_today >= 80 ? -5 : -24, 0);
     lv_obj_set_style_translate_y(deg, -4, 0);
     text_label_ = MakeLabel(temp_col, font, kWhite, "");
     lv_obj_set_style_translate_x(text_label_, 20, 0);
@@ -126,8 +128,12 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
     lv_obj_set_style_bg_opa(today_icon_, LV_OPA_TRANSP, 0);
     lv_obj_set_style_opa(today_icon_, LV_OPA_COVER, 0);
     lv_obj_set_style_image_opa(today_icon_, LV_OPA_COVER, 0);
-    lv_obj_set_style_translate_x(today_icon_, -10, 0);
-    lv_obj_set_style_translate_y(today_icon_, -10, 0);
+    if (metrics.weather_icon_today >= 80) {
+        lv_obj_set_style_translate_x(today_icon_, -10, 0);
+        lv_obj_set_style_translate_y(today_icon_, -10, 0);
+    } else {
+        lv_obj_set_style_translate_x(today_icon_, -20, 0);
+    }
     NoScroll(today_icon_);
 
     detail_card_ = lv_obj_create(screen_);
@@ -136,10 +142,10 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
     lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_pos(detail_card_, card_w, clock_h - 55 + font->line_height + 12);
+    lv_obj_set_pos(detail_card_, card_w, weather_y + font->line_height + 12);
     lv_obj_set_size(detail_card_, host.screen_width() - card_w, font->line_height);
     StyleLedCard(detail_card_);
-    lv_obj_set_style_pad_left(detail_card_, 18, 0);
+    lv_obj_set_style_pad_left(detail_card_, metrics.weather_detail_pad_left, 0);
     NoScroll(detail_card_);
 
     detail_label_ = MakeLabel(detail_card_, font, kWhite, "");
@@ -190,16 +196,15 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
         lv_obj_set_flex_flow(icon_pack, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(icon_pack, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_column(icon_pack, 0, 0);
-        const int icon_nudge_x = -2;
-        lv_obj_set_style_translate_x(icon_pack, icon_nudge_x, 0);
-        lv_obj_set_style_translate_y(icon_pack, -60, 0);
+        lv_obj_set_style_translate_x(icon_pack, metrics.weather_icon_nudge_x, 0);
+        lv_obj_set_style_translate_y(icon_pack, metrics.weather_icon_nudge_y, 0);
         NoScroll(icon_pack);
 
         day_text_[i] = MakeLabel(icon_pack, font, kWhite, "");
         lv_obj_set_style_transform_scale(day_text_[i], 210, 0);
         lv_obj_set_style_transform_pivot_x(day_text_[i], 0, 0);
         lv_obj_set_style_transform_pivot_y(day_text_[i], font->line_height / 2, 0);
-        lv_obj_set_style_translate_x(day_text_[i], 5 + icon_nudge_x, 0);
+        lv_obj_set_style_translate_x(day_text_[i], metrics.weather_icon_today >= 80 ? 3 : 5, 0);
         lv_obj_set_style_translate_y(day_text_[i], -5, 0);
         NoScroll(day_text_[i]);
 

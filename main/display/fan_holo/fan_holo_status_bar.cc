@@ -345,14 +345,14 @@ void FlipDigitApplyProgress(FanHoloFlipDigit* d, int32_t progress) {
         lbl_y = d->label_ofs_y - half;
     }
 
-    lv_obj_set_pos(d->flap, 0, y);
+    lv_obj_set_pos(d->flap, d->card_pad, d->card_pad + y);
     lv_obj_set_height(d->flap, h);
     lv_obj_set_y(d->flap_lbl, lbl_y);
 
     const int32_t dist = lower ? (max_p - progress) : progress;
     const lv_opa_t shade = static_cast<lv_opa_t>(dist * 160 / half);
     if (d->shade != nullptr) {
-        lv_obj_set_pos(d->shade, 0, y);
+        lv_obj_set_pos(d->shade, d->card_pad, d->card_pad + y);
         lv_obj_set_height(d->shade, h);
         lv_obj_set_style_bg_opa(d->shade, shade, LV_PART_MAIN);
         lv_obj_remove_flag(d->shade, LV_OBJ_FLAG_HIDDEN);
@@ -482,39 +482,55 @@ lv_obj_t* CreateDigitLabel(lv_obj_t* parent, FanHoloFlipDigit* d, int32_t y, con
     lv_obj_set_width(lbl, d->digit_w);
     lv_obj_set_pos(lbl, 0, y);
     lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
+    if (d->font_scale > 0 && d->font_scale != 256) {
+        const int32_t line_h = (font != nullptr && font->line_height > 0) ? font->line_height : 86;
+        lv_obj_set_style_transform_pivot_x(lbl, d->digit_w / 2, LV_PART_MAIN);
+        lv_obj_set_style_transform_pivot_y(lbl, line_h / 2, LV_PART_MAIN);
+        lv_obj_set_style_transform_scale(lbl, d->font_scale, LV_PART_MAIN);
+    }
     return lbl;
 }
 
-void CreateFlipDigit(lv_obj_t* parent, FanHoloFlipDigit* d, int w, int h, int radius, const lv_font_t* font) {
+void CreateFlipDigit(lv_obj_t* parent, FanHoloFlipDigit* d, int w, int h, int card_pad, int radius,
+                     const lv_font_t* font, int32_t font_scale) {
     d->digit_w = w;
     d->digit_h = h;
     d->digit_half = h / 2;
-    d->font_scale = 256;
+    d->card_pad = card_pad;
+    d->font_scale = (font_scale > 0) ? font_scale : 256;
     const int32_t line_h = (font != nullptr && font->line_height > 0) ? font->line_height : 86;
     d->label_ofs_y = (h - line_h) / 2;
+    const int cw = w + card_pad * 2;
+    const int ch = h + card_pad * 2;
+    const int ox = card_pad;
+    const int oy = card_pad;
 
     d->card = lv_obj_create(parent);
     lv_obj_remove_style_all(d->card);
-    lv_obj_set_size(d->card, w, h);
+    lv_obj_set_size(d->card, cw, ch);
     lv_obj_set_style_radius(d->card, radius, LV_PART_MAIN);
     lv_obj_set_style_bg_color(d->card, lv_color_hex(kCardBg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(d->card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_clip_corner(d->card, true, LV_PART_MAIN);
     StyleNoScroll(d->card);
 
-    d->top_clip = CreateHalfClip(d->card, 0, w, d->digit_half, kCardBgTop);
+    d->top_clip = CreateHalfClip(d->card, oy, w, d->digit_half, kCardBgTop);
+    lv_obj_set_x(d->top_clip, ox);
     d->top_lbl = CreateDigitLabel(d->top_clip, d, d->label_ofs_y, font);
 
-    d->bot_clip = CreateHalfClip(d->card, d->digit_half, w, d->digit_half, kCardBg);
+    d->bot_clip = CreateHalfClip(d->card, oy + d->digit_half, w, d->digit_half, kCardBg);
+    lv_obj_set_x(d->bot_clip, ox);
     d->bot_lbl = CreateDigitLabel(d->bot_clip, d, d->label_ofs_y - d->digit_half, font);
 
-    d->flap = CreateHalfClip(d->card, 0, w, d->digit_half, kCardBgTop);
+    d->flap = CreateHalfClip(d->card, oy, w, d->digit_half, kCardBgTop);
+    lv_obj_set_x(d->flap, ox);
     d->flap_lbl = CreateDigitLabel(d->flap, d, d->label_ofs_y, font);
     lv_obj_add_flag(d->flap, LV_OBJ_FLAG_HIDDEN);
 
     d->shade = lv_obj_create(d->card);
     lv_obj_remove_style_all(d->shade);
     lv_obj_set_size(d->shade, w, d->digit_half);
+    lv_obj_set_pos(d->shade, ox, oy);
     lv_obj_set_style_bg_color(d->shade, lv_color_hex(0x000000), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(d->shade, LV_OPA_TRANSP, LV_PART_MAIN);
     StyleNoScroll(d->shade);
@@ -523,7 +539,7 @@ void CreateFlipDigit(lv_obj_t* parent, FanHoloFlipDigit* d, int w, int h, int ra
     d->hinge = lv_obj_create(d->card);
     lv_obj_remove_style_all(d->hinge);
     lv_obj_set_size(d->hinge, w, 3);
-    lv_obj_set_pos(d->hinge, 0, d->digit_half - 1);
+    lv_obj_set_pos(d->hinge, ox, oy + d->digit_half - 1);
     lv_obj_set_style_bg_color(d->hinge, lv_color_hex(kHingeColor), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(d->hinge, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(d->hinge, LV_OBJ_FLAG_CLICKABLE);
@@ -598,18 +614,18 @@ lv_obj_t* CreateLedColon(lv_obj_t* parent, int width, int digit_h, uint32_t colo
     return col;
 }
 
-void CreateIdleLedClock(FanHoloStatusBar* bar, int pill_h, int dw, int dh) {
+void CreateIdleLedClock(FanHoloStatusBar* bar, int pill_h, int dw, int dh, int card_pad) {
     const int group_gap = (dw >= 80) ? 30 : 24;
-    const int card_w = dw * 6 + group_gap * 2 + kPairGap * 2;
+    const int card_w = dw * 6 + group_gap * 2 + kPairGap * 2 + card_pad * 2;
     const int hm_w = dw * 88 / 100;
     const int hm_h = dh * 88 / 100;
-    const int card_h = hm_h + 32;
+    const int card_h = hm_h + 32 + card_pad * 2;
     const int hm_pair_gap = 12;
     const int sec_h = hm_h * 18 / 40;
     const int sec_w = hm_w * 22 / 40;
     const int sec_colon_w = 16;
     const int sec_digit_gap = 8;
-    const int side_pad = (card_w >= 400) ? 36 : 22;
+    const int side_pad = ((card_w - card_pad * 2 >= 400) ? 36 : 22) + card_pad;
     const int clock_y = kDateRowY + pill_h + kClockBelowDate;
 
     bar->clock_card = lv_obj_create(bar->top_bar);
@@ -686,10 +702,13 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
     const int radius = metrics.idle_digit_radius;
     const int pill_h = metrics.idle_pill_h;
     const int pill_r = (pill_h >= 36) ? 10 : 8;
+    const int date_pad = metrics.idle_date_pad_hor;
+    const int flip_pad = metrics.idle_flip_pad;
+    const int card_h = dh + flip_pad * 2;
 
     const int clock_y = kDateRowY + pill_h + kClockBelowDate;
     /* idle_clock_h 含时钟下方大块留白；占位层用实际时钟下沿，避免盖住城市名。 */
-    int header_h = clock_y + dh;
+    int header_h = clock_y + card_h;
 
     bar->top_bar = lv_obj_create(screen);
     lv_obj_remove_style_all(bar->top_bar);
@@ -700,8 +719,8 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
     lv_obj_set_style_bg_color(bar->top_bar, lv_color_hex(kBarBg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bar->top_bar, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_pad_all(bar->top_bar, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_left(bar->top_bar, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_right(bar->top_bar, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(bar->top_bar, metrics.idle_date_bar_pad, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(bar->top_bar, metrics.idle_date_bar_pad, LV_PART_MAIN);
     lv_obj_set_scrollbar_mode(bar->top_bar, LV_SCROLLBAR_MODE_OFF);
     lv_obj_remove_flag(bar->top_bar, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -711,10 +730,16 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
     lv_obj_set_size(date_row, LV_PCT(100), pill_h);
     lv_obj_set_flex_flow(date_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(date_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(date_row, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(date_row, metrics.idle_date_col_gap, LV_PART_MAIN);
+    if (metrics.idle_date_scale != 256) {
+        lv_obj_set_style_transform_scale_x(date_row, metrics.idle_date_scale, 0);
+        lv_obj_set_style_transform_scale_y(date_row, metrics.idle_date_scale, 0);
+        lv_obj_set_style_transform_pivot_x(date_row, 0, 0);
+        lv_obj_set_style_transform_pivot_y(date_row, 0, 0);
+    }
     StyleNoScroll(date_row);
 
-    lv_obj_t* year_pill = CreatePill(date_row, kYearBg, pill_r, pill_h, 10);
+    lv_obj_t* year_pill = CreatePill(date_row, kYearBg, pill_r, pill_h, date_pad);
     bar->year_label = CreatePillLabel(year_pill, text_font, 0xFFFFFF, "----");
 
     lv_obj_t* md = lv_obj_create(date_row);
@@ -729,23 +754,23 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
     lv_obj_set_style_bg_opa(md, LV_OPA_TRANSP, LV_PART_MAIN);
     StyleNoScroll(md);
 
-    lv_obj_t* month_half = CreatePill(md, kMonthBg, 0, pill_h, 10);
-    lv_obj_set_style_pad_left(month_half, 10, LV_PART_MAIN);
-    lv_obj_set_style_pad_right(month_half, 6, LV_PART_MAIN);
+    lv_obj_t* month_half = CreatePill(md, kMonthBg, 0, pill_h, date_pad);
+    lv_obj_set_style_pad_left(month_half, date_pad, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(month_half, date_pad > 2 ? date_pad - 2 : date_pad, LV_PART_MAIN);
     bar->month_label = CreatePillLabel(month_half, text_font, kMonthFg, "--");
 
-    lv_obj_t* day_half = CreatePill(md, kDayBg, 0, pill_h, 10);
-    lv_obj_set_style_pad_left(day_half, 6, LV_PART_MAIN);
-    lv_obj_set_style_pad_right(day_half, 10, LV_PART_MAIN);
+    lv_obj_t* day_half = CreatePill(md, kDayBg, 0, pill_h, date_pad);
+    lv_obj_set_style_pad_left(day_half, date_pad > 2 ? date_pad - 2 : date_pad, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(day_half, date_pad, LV_PART_MAIN);
     bar->mday_label = CreatePillLabel(day_half, text_font, kDayFg, "--");
 
-    lv_obj_t* week_pill = CreatePill(date_row, kWeekBg, pill_r, pill_h, 10);
+    lv_obj_t* week_pill = CreatePill(date_row, kWeekBg, pill_r, pill_h, date_pad);
     bar->weekday_label = CreatePillLabel(week_pill, text_font, 0xFFFFFF, "星期--");
 
-    lv_obj_t* ganzhi_pill = CreatePill(date_row, kGanzhiBg, pill_r, pill_h, 10);
+    lv_obj_t* ganzhi_pill = CreatePill(date_row, kGanzhiBg, pill_r, pill_h, date_pad);
     bar->lunar_year_label = CreatePillLabel(ganzhi_pill, text_font, kGanzhiFg, "----年");
 
-    lv_obj_t* lunar_pill = CreatePill(date_row, kLunarBg, pill_r, pill_h, 10);
+    lv_obj_t* lunar_pill = CreatePill(date_row, kLunarBg, pill_r, pill_h, date_pad);
     lv_obj_set_style_pad_column(lunar_pill, 2, LV_PART_MAIN);
     bar->lunar_month_label = CreatePillLabel(lunar_pill, text_font, kLunarMonthFg, "----");
     bar->lunar_label = CreatePillLabel(lunar_pill, text_font, 0xFFFFFF, "----");
@@ -756,13 +781,13 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
     lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, LV_PART_MAIN);
     StyleNoScroll(spacer);
 
-    lv_obj_t* net_pill = CreatePill(date_row, kIconPillBg, pill_r, pill_h, 8);
+    lv_obj_t* net_pill = CreatePill(date_row, kIconPillBg, pill_r, pill_h, date_pad);
     bar->network_label = lv_label_create(net_pill);
     lv_label_set_text(bar->network_label, "");
     lv_obj_set_style_text_font(bar->network_label, icon_font, 0);
     lv_obj_set_style_text_color(bar->network_label, lv_color_hex(kIconFg), 0);
 
-    lv_obj_t* bat_pill = CreatePill(date_row, kIconPillBg, pill_r, pill_h, 8);
+    lv_obj_t* bat_pill = CreatePill(date_row, kIconPillBg, pill_r, pill_h, date_pad);
     bar->battery_label = lv_label_create(bat_pill);
     lv_label_set_text(bar->battery_label, "");
     lv_obj_set_style_text_font(bar->battery_label, icon_font, 0);
@@ -774,15 +799,14 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
         clock_style = display_settings.GetInt("idle_clock_style", clock_style);
     }
     if (clock_style == FanHoloMetrics::kIdleClockLed7Seg) {
-        CreateIdleLedClock(bar, pill_h, dw, dh);
+        CreateIdleLedClock(bar, pill_h, dw, dh, flip_pad);
         const int hm_h = dh * 88 / 100;
-        const int card_h = hm_h + 32;
-        lv_obj_set_height(bar->top_bar, clock_y + card_h);
+        lv_obj_set_height(bar->top_bar, clock_y + hm_h + 32 + flip_pad * 2);
     } else {
         lv_obj_t* clock_row = lv_obj_create(bar->top_bar);
         lv_obj_remove_style_all(clock_row);
-        lv_obj_set_size(clock_row, LV_SIZE_CONTENT, dh);
-        lv_obj_set_style_min_height(clock_row, dh, LV_PART_MAIN);
+        lv_obj_set_size(clock_row, LV_SIZE_CONTENT, card_h);
+        lv_obj_set_style_min_height(clock_row, card_h, LV_PART_MAIN);
         lv_obj_set_flex_flow(clock_row, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(clock_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_column(clock_row, 0, LV_PART_MAIN);
@@ -802,7 +826,8 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
                     StyleNoScroll(gap);
                 }
             }
-            CreateFlipDigit(clock_row, &bar->digits[i], dw, dh, radius, &font_puhui_number_120_4);
+            CreateFlipDigit(clock_row, &bar->digits[i], dw, dh, flip_pad, radius,
+                            &font_puhui_number_120_4, metrics.idle_flip_font_scale);
         }
         lv_obj_align(clock_row, LV_ALIGN_TOP_MID, 0, clock_y);
     }
@@ -1169,13 +1194,19 @@ void FanHoloStatusBar::ApplyTextFont(const lv_font_t* font, lv_color_t color) {
         lv_obj_set_style_text_color(network_label, lv_color_hex(0x22C55E), 0);
     }
     for (int i = 0; i < kDigitCount; ++i) {
-        auto paint = [](lv_obj_t* lbl) {
+        auto paint = [&](lv_obj_t* lbl) {
             if (lbl == nullptr) {
                 return;
             }
             lv_obj_set_style_text_font(lbl, &font_puhui_number_120_4, LV_PART_MAIN);
             lv_obj_set_style_text_color(lbl, lv_color_hex(kDigitColor), LV_PART_MAIN);
             lv_obj_set_style_text_opa(lbl, LV_OPA_COVER, LV_PART_MAIN);
+            if (digits[i].font_scale > 0 && digits[i].font_scale != 256) {
+                lv_obj_set_style_transform_pivot_x(lbl, digits[i].digit_w / 2, LV_PART_MAIN);
+                lv_obj_set_style_transform_pivot_y(lbl, font_puhui_number_120_4.line_height / 2,
+                                                   LV_PART_MAIN);
+                lv_obj_set_style_transform_scale(lbl, digits[i].font_scale, LV_PART_MAIN);
+            }
         };
         paint(digits[i].top_lbl);
         paint(digits[i].bot_lbl);

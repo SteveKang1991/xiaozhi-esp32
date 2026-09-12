@@ -41,6 +41,17 @@ struct FanHoloMetrics {
     uint16_t idle_digit_radius;
     uint16_t idle_pill_h;
     uint16_t idle_role_scale; /* 256=1.0，仅 idle 角色 GIF */
+    uint16_t idle_date_scale; /* 日期栏整体缩放，256=1.0 */
+    uint8_t idle_date_pad_hor;
+    uint8_t idle_date_col_gap;
+    uint8_t idle_date_bar_pad;
+    uint8_t idle_flip_pad; /* 翻页卡片单边留边 */
+    uint16_t idle_flip_font_scale; /* 翻页数字缩放，256=1.0，不改变卡片 */
+    uint8_t weather_icon_today;
+    uint8_t weather_icon_day;
+    int8_t weather_icon_nudge_y;
+    int8_t weather_icon_nudge_x;
+    uint8_t weather_detail_pad_left;
     /* 1=翻页普惠字体  2=圆角框七段数码管（DesktopClock Font7） */
     uint8_t idle_clock_style;
 
@@ -55,6 +66,7 @@ struct FanHoloMetrics {
             160, 200, 30,
             486, 224, 110, -420, -385, 90, 150, -310, -265,
             300, 240, 56, 90, 136, 10, 36, 56,
+            256, 10, 6, 8, 0, 256, 96, 62, -60, -2, 18,
             kIdleClockFlipPuhui,
         };
     }
@@ -65,8 +77,9 @@ struct FanHoloMetrics {
             416, 816, 288, 560, 24,
             480, 816, 38, "/sdcard/Music/musicbg-480x816.bin",
             100, 140, 24,
-            330, 140, 70, -260, -250, 30, 55, -110, -80,
-            220, 192, 44, 58, 94, 7, 28, 56,
+            330, 140, 70, -260, -250, 45, 75, -185, -150,
+            236, 192, 44, 52, 84, 7, 28, 56,
+            256, 5, 3, 4, 3, 200, 64, 44, -24, -2, 9,
             kIdleClockFlipPuhui,
         };
     }
