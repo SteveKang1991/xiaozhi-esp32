@@ -17,6 +17,7 @@ public:
     void Tick();
     void ApplyTextFont(const lv_font_t* font, lv_color_t color);
     void ApplyWeather(const IdleWeatherView& weather);
+    void ApplyClockStyle(FanHoloDisplay& host);
     FanHoloRoleWidgets& role_widgets() { return role_; }
 
     lv_obj_t* screen() const { return screen_; }

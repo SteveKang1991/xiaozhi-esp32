@@ -73,6 +73,7 @@ struct FanHoloStatusBar {
     int status_scroll_w = 176;
 
     void Create(lv_obj_t* screen, FanHoloDisplay& host, Kind kind);
+    void RecreateIdleClock(lv_obj_t* screen, FanHoloDisplay& host);
     void Bind(FanHoloDisplay& host) const;
     void RaiseOverlays() const;
     void SetStatusText(const char* status);

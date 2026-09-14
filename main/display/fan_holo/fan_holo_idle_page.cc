@@ -359,6 +359,20 @@ void FanHoloIdlePage::ApplyTextFont(const lv_font_t* font, lv_color_t color) {
     }
 }
 
+void FanHoloIdlePage::ApplyClockStyle(FanHoloDisplay& host) {
+    if (screen_ == nullptr) {
+        return;
+    }
+    status_bar_.RecreateIdleClock(screen_, host);
+    if (weather_root_) {
+        lv_obj_move_foreground(weather_root_);
+    }
+    if (detail_card_) {
+        lv_obj_move_foreground(detail_card_);
+    }
+    status_bar_.RaiseOverlays();
+}
+
 void FanHoloIdlePage::ApplyWeather(const IdleWeatherView& weather) {
     last_weather_ = weather;
     if (weather_root_ == nullptr) {

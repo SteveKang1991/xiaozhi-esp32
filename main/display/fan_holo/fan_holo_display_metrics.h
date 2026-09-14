@@ -45,6 +45,7 @@ struct FanHoloMetrics {
     uint8_t idle_date_pad_hor;
     uint8_t idle_date_col_gap;
     uint8_t idle_date_bar_pad;
+    uint8_t idle_date_nudge_y; /* 仅日期栏下移，不影响时钟 */
     uint8_t idle_flip_pad; /* 翻页卡片单边留边 */
     uint16_t idle_flip_font_scale; /* 翻页数字缩放，256=1.0，不改变卡片 */
     uint8_t weather_icon_today;
@@ -66,7 +67,7 @@ struct FanHoloMetrics {
             160, 200, 30,
             486, 224, 110, -420, -385, 90, 150, -310, -265,
             300, 240, 56, 90, 136, 10, 36, 56,
-            256, 10, 6, 8, 0, 256, 96, 62, -60, -2, 18,
+            256, 10, 6, 8, 10, 0, 256, 96, 62, -60, -2, 18,
             kIdleClockFlipPuhui,
         };
     }
@@ -79,7 +80,7 @@ struct FanHoloMetrics {
             100, 140, 24,
             330, 140, 70, -260, -250, 45, 75, -185, -150,
             236, 192, 44, 52, 84, 7, 28, 56,
-            256, 5, 3, 4, 3, 200, 64, 44, -24, -2, 9,
+            256, 5, 3, 4, 0, 3, 200, 64, 44, -24, -2, 9,
             kIdleClockFlipPuhui,
         };
     }

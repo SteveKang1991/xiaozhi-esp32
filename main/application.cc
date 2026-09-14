@@ -15,6 +15,7 @@
 #include "fan_holo_weather.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <cJSON.h>
@@ -445,7 +446,23 @@ void Application::CheckDeviceInfo() {
     cJSON* addr_item = cJSON_GetObjectItem(data, "address");
     std::string address = (cJSON_IsString(addr_item) && addr_item->valuestring != nullptr)
                               ? addr_item->valuestring : "";
+    cJSON* clock_item = cJSON_GetObjectItem(data, "idle_clock_style");
+    int clock_style = 1;
+    if (cJSON_IsNumber(clock_item)) {
+        clock_style = clock_item->valueint;
+    } else if (cJSON_IsString(clock_item) && clock_item->valuestring != nullptr) {
+        clock_style = atoi(clock_item->valuestring);
+    }
+    if (clock_style != 2) {
+        clock_style = 1;
+    }
     cJSON_Delete(root);
+
+    ESP_LOGI(TAG, "Device idle_clock_style: %d", clock_style);
+    auto display = Board::GetInstance().GetDisplay();
+    if (display != nullptr) {
+        display->SetIdleClockStyle(clock_style);
+    }
 
     if (!address.empty()) {
         weather_city_ = address;

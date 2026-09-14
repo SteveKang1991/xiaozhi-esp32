@@ -2,7 +2,6 @@
 #include "fan_holo_display.h"
 #include "fan_holo_lunar.h"
 #include "assets/lang_config.h"
-#include "settings.h"
 
 #include <font_awesome.h>
 
@@ -692,6 +691,78 @@ void CreateIdleLedClock(FanHoloStatusBar* bar, int pill_h, int dw, int dh, int c
     lv_obj_update_layout(bar->clock_card);
 }
 
+void ClearIdleClockFace(FanHoloStatusBar* bar) {
+    lv_obj_t* flip_row = nullptr;
+    if (bar->clock_card == nullptr && bar->digits[0].card != nullptr) {
+        flip_row = lv_obj_get_parent(bar->digits[0].card);
+        if (flip_row == bar->top_bar) {
+            flip_row = nullptr;
+        }
+    }
+    for (int i = 0; i < kDigitCount; ++i) {
+        lv_anim_delete(&bar->digits[i], nullptr);
+        bar->digits[i] = {};
+    }
+    for (int i = 0; i < 4; ++i) {
+        bar->hm_digits[i] = {};
+    }
+    for (int i = 0; i < 2; ++i) {
+        bar->sec_digits[i] = {};
+    }
+    if (bar->clock_card != nullptr) {
+        lv_obj_del(bar->clock_card);
+        bar->clock_card = nullptr;
+    } else if (flip_row != nullptr) {
+        lv_obj_del(flip_row);
+    }
+}
+
+void CreateIdleClockFace(FanHoloStatusBar* bar, FanHoloDisplay& host, int pill_h, int dw, int dh,
+                         int flip_pad, int radius, int card_h, int clock_y) {
+    const auto& metrics = host.metrics();
+    int clock_style = host.idle_clock_style();
+    if (clock_style != FanHoloMetrics::kIdleClockLed7Seg) {
+        clock_style = FanHoloMetrics::kIdleClockFlipPuhui;
+    }
+    if (clock_style == FanHoloMetrics::kIdleClockLed7Seg) {
+        CreateIdleLedClock(bar, pill_h, dw, dh, flip_pad);
+        const int hm_h = dh * 88 / 100;
+        lv_obj_set_height(bar->top_bar, clock_y + hm_h + 32 + flip_pad * 2);
+    } else {
+        lv_obj_t* clock_row = lv_obj_create(bar->top_bar);
+        lv_obj_remove_style_all(clock_row);
+        lv_obj_set_size(clock_row, LV_SIZE_CONTENT, card_h);
+        lv_obj_set_style_min_height(clock_row, card_h, LV_PART_MAIN);
+        lv_obj_set_flex_flow(clock_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(clock_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(clock_row, 0, LV_PART_MAIN);
+        StyleNoScroll(clock_row);
+        lv_obj_align(clock_row, LV_ALIGN_TOP_MID, 0, clock_y);
+
+        const int group_gap = (dw >= 80) ? 30 : 24;
+        for (int i = 0; i < kDigitCount; ++i) {
+            if (i > 0) {
+                if (i % 2 == 0) {
+                    CreateColon(clock_row, group_gap, dh);
+                } else {
+                    lv_obj_t* gap = lv_obj_create(clock_row);
+                    lv_obj_remove_style_all(gap);
+                    lv_obj_set_size(gap, kPairGap, 1);
+                    lv_obj_set_style_bg_opa(gap, LV_OPA_TRANSP, LV_PART_MAIN);
+                    StyleNoScroll(gap);
+                }
+            }
+            CreateFlipDigit(clock_row, &bar->digits[i], dw, dh, flip_pad, radius,
+                            &font_puhui_number_120_4, metrics.idle_flip_font_scale);
+        }
+        lv_obj_align(clock_row, LV_ALIGN_TOP_MID, 0, clock_y);
+        lv_obj_set_height(bar->top_bar, clock_y + card_h);
+    }
+    bar->clock_primed = false;
+    bar->last_hm = -1;
+    bar->last_sec = -1;
+}
+
 void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay& host) {
     auto* theme = host.GetLvglTheme();
     auto icon_font = theme->icon_font()->font();
@@ -726,7 +797,7 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
 
     lv_obj_t* date_row = lv_obj_create(bar->top_bar);
     lv_obj_remove_style_all(date_row);
-    lv_obj_set_pos(date_row, 0, kDateRowY);
+    lv_obj_set_pos(date_row, 0, kDateRowY + metrics.idle_date_nudge_y);
     lv_obj_set_size(date_row, LV_PCT(100), pill_h);
     lv_obj_set_flex_flow(date_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(date_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -793,44 +864,7 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
     lv_obj_set_style_text_font(bar->battery_label, icon_font, 0);
     lv_obj_set_style_text_color(bar->battery_label, lv_color_hex(kIconFg), 0);
 
-    int clock_style = metrics.idle_clock_style;
-    {
-        Settings display_settings("display", false);
-        clock_style = display_settings.GetInt("idle_clock_style", clock_style);
-    }
-    if (clock_style == FanHoloMetrics::kIdleClockLed7Seg) {
-        CreateIdleLedClock(bar, pill_h, dw, dh, flip_pad);
-        const int hm_h = dh * 88 / 100;
-        lv_obj_set_height(bar->top_bar, clock_y + hm_h + 32 + flip_pad * 2);
-    } else {
-        lv_obj_t* clock_row = lv_obj_create(bar->top_bar);
-        lv_obj_remove_style_all(clock_row);
-        lv_obj_set_size(clock_row, LV_SIZE_CONTENT, card_h);
-        lv_obj_set_style_min_height(clock_row, card_h, LV_PART_MAIN);
-        lv_obj_set_flex_flow(clock_row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(clock_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_column(clock_row, 0, LV_PART_MAIN);
-        StyleNoScroll(clock_row);
-        lv_obj_align(clock_row, LV_ALIGN_TOP_MID, 0, clock_y);
-
-        const int group_gap = (dw >= 80) ? 30 : 24;
-        for (int i = 0; i < kDigitCount; ++i) {
-            if (i > 0) {
-                if (i % 2 == 0) {
-                    CreateColon(clock_row, group_gap, dh);
-                } else {
-                    lv_obj_t* gap = lv_obj_create(clock_row);
-                    lv_obj_remove_style_all(gap);
-                    lv_obj_set_size(gap, kPairGap, 1);
-                    lv_obj_set_style_bg_opa(gap, LV_OPA_TRANSP, LV_PART_MAIN);
-                    StyleNoScroll(gap);
-                }
-            }
-            CreateFlipDigit(clock_row, &bar->digits[i], dw, dh, flip_pad, radius,
-                            &font_puhui_number_120_4, metrics.idle_flip_font_scale);
-        }
-        lv_obj_align(clock_row, LV_ALIGN_TOP_MID, 0, clock_y);
-    }
+    CreateIdleClockFace(bar, host, pill_h, dw, dh, flip_pad, radius, card_h, clock_y);
 
     bar->notification_label = lv_label_create(screen);
     lv_obj_set_style_text_font(bar->notification_label, text_font, 0);
@@ -1212,6 +1246,24 @@ void FanHoloStatusBar::ApplyTextFont(const lv_font_t* font, lv_color_t color) {
         paint(digits[i].bot_lbl);
         paint(digits[i].flap_lbl);
     }
+}
+
+void FanHoloStatusBar::RecreateIdleClock(lv_obj_t* screen, FanHoloDisplay& host) {
+    if (screen == nullptr || top_bar == nullptr) {
+        return;
+    }
+    const auto& metrics = host.metrics();
+    const int dw = metrics.idle_digit_w;
+    const int dh = metrics.idle_digit_h;
+    const int radius = metrics.idle_digit_radius;
+    const int pill_h = metrics.idle_pill_h;
+    const int flip_pad = metrics.idle_flip_pad;
+    const int card_h = dh + flip_pad * 2;
+    const int clock_y = kDateRowY + pill_h + kClockBelowDate;
+    ClearIdleClockFace(this);
+    CreateIdleClockFace(this, host, pill_h, dw, dh, flip_pad, radius, card_h, clock_y);
+    Bind(host);
+    Tick();
 }
 
 void FanHoloStatusBar::Bind(FanHoloDisplay& host) const {

@@ -439,6 +439,18 @@ void FanHoloDisplay::SetIdleWeather(const IdleWeatherView& weather) {
     idle_page_.ApplyWeather(weather);
 }
 
+void FanHoloDisplay::SetIdleClockStyle(int style) {
+    if (style != FanHoloMetrics::kIdleClockLed7Seg) {
+        style = FanHoloMetrics::kIdleClockFlipPuhui;
+    }
+    if (idle_clock_style_ == style) {
+        return;
+    }
+    idle_clock_style_ = style;
+    DisplayLockGuard lock(this);
+    idle_page_.ApplyClockStyle(*this);
+}
+
 void FanHoloDisplay::UpdateStatusBar(bool update_all) {
     const bool popup_was_hidden =
         (low_battery_popup_ == nullptr) || lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);

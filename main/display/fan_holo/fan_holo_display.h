@@ -37,6 +37,7 @@ public:
     void UpdateStatusBar(bool update_all = false) override;
     void ShowNotification(const char* notification, int duration_ms = 3000) override;
     void SetIdleWeather(const IdleWeatherView& weather) override;
+    void SetIdleClockStyle(int style) override;
 
     void ShowIdlePage() { SetRoleAnimation("idle"); }
     void ShowChatPage(const char* state) { SetRoleAnimation(state); }
@@ -45,6 +46,7 @@ public:
     void SwitchTo(Page page);
     void PreparePage(Page page);
     const FanHoloMetrics& metrics() const { return metrics_; }
+    int idle_clock_style() const { return idle_clock_style_; }
     int screen_width() const { return width_; }
     int screen_height() const { return height_; }
     LvglTheme* GetLvglTheme() { return static_cast<LvglTheme*>(current_theme_); }
@@ -93,6 +95,7 @@ private:
     Page current_page_ = Page::Boot;
     inline static bool s_system_ready_ = false;
     FanHoloMetrics metrics_;
+    int idle_clock_style_ = 1;
     std::string current_mjpeg_path_;
     int roi_x_ = 0;
     int roi_y_ = 0;

@@ -106,6 +106,7 @@ public:
      * 默认实现为空，由具体 display 子类重写。 */
     virtual void StopFft() {}
     virtual void SetIdleWeather(const IdleWeatherView& weather) { (void)weather; }
+    virtual void SetIdleClockStyle(int style) { (void)style; }
 
     /**
      * 把频谱柱/帽打回初始高度并清计算缓存。切歌打断或一曲结束时调用，
