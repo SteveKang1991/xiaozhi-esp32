@@ -866,14 +866,29 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
 
     CreateIdleClockFace(bar, host, pill_h, dw, dh, flip_pad, radius, card_h, clock_y);
 
-    bar->notification_label = lv_label_create(screen);
+    /* 覆盖日期栏：AEC / 其它 ShowNotification 提示（定时器隐藏后露出日期）。 */
+    const int notify_y = kDateRowY + metrics.idle_date_nudge_y;
+    bar->notification_label = lv_label_create(bar->top_bar);
+    lv_obj_set_size(bar->notification_label, LV_PCT(100), pill_h);
+    lv_obj_set_pos(bar->notification_label, 0, notify_y);
+    lv_obj_set_style_bg_opa(bar->notification_label, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(bar->notification_label, lv_color_hex(kStatusOtherBg), 0);
+    lv_obj_set_style_radius(bar->notification_label, pill_r, 0);
+    lv_obj_set_style_pad_hor(bar->notification_label, date_pad, 0);
+    {
+        const int line_h = text_font != nullptr ? text_font->line_height : pill_h;
+        const int pad_top = line_h < pill_h ? (pill_h - line_h) / 2 : 0;
+        lv_obj_set_style_pad_top(bar->notification_label, pad_top, 0);
+    }
     lv_obj_set_style_text_font(bar->notification_label, text_font, 0);
     lv_obj_set_style_text_color(bar->notification_label, lv_color_white(), 0);
+    lv_obj_set_style_text_align(bar->notification_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(bar->notification_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(bar->notification_label, "");
-    lv_obj_set_pos(bar->notification_label, -1000, -1000);
     lv_obj_add_flag(bar->notification_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(bar->notification_label, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_add_flag(bar->notification_label, LV_OBJ_FLAG_FLOATING);
+    lv_obj_move_foreground(bar->notification_label);
 
     bar->status_label = lv_label_create(screen);
     lv_label_set_text(bar->status_label, "");
@@ -1219,7 +1234,9 @@ void FanHoloStatusBar::ApplyTextFont(const lv_font_t* font, lv_color_t color) {
     }
     if (notification_label) {
         lv_obj_set_style_text_font(notification_label, font, 0);
-        lv_obj_set_style_text_color(notification_label, color, 0);
+        /* Idle 通知盖在深色日期栏上，保持白字；Chat/Music 跟主题色。 */
+        lv_obj_set_style_text_color(notification_label,
+                                    year_label != nullptr ? lv_color_white() : color, 0);
     }
     if (low_battery_label) {
         lv_obj_set_style_text_font(low_battery_label, font, 0);
@@ -1273,6 +1290,9 @@ void FanHoloStatusBar::Bind(FanHoloDisplay& host) const {
 void FanHoloStatusBar::RaiseOverlays() const {
     if (top_bar != nullptr) {
         lv_obj_move_foreground(top_bar);
+    }
+    if (notification_label != nullptr && year_label != nullptr) {
+        lv_obj_move_foreground(notification_label);
     }
     if (volume_overlay != nullptr) {
         lv_obj_move_foreground(volume_overlay);

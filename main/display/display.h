@@ -44,6 +44,8 @@ public:
      * 基础类默认实现退化为 SetEmotion(state)，由具体 display 重写为 MJPEG 播放器。
      */
     virtual void SetRoleAnimation(const char* state) { SetEmotion(state); }
+    /* 停角色 MJPEG，避免和提示音抢 DSI。默认空操作。 */
+    virtual void StopRoleAnimation() {}
     virtual void SetChatMessage(const char* role, const char* content);
     virtual void ClearChatMessages();
     virtual void SetTheme(Theme* theme);

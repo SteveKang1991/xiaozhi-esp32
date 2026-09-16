@@ -22,7 +22,6 @@
 #include "esp_timer.h"
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
-#include "esp_rom_sys.h"
 #include "esp_lcd_mipi_dsi.h"
 #if __has_include("esp_memory_utils.h")
 #include "esp_memory_utils.h"
@@ -43,11 +42,9 @@
 
 static const char *TAG = "🎬 MJPEG播放器";
 /** LVGL 正在 flush（尤其 sw_rotate + 对话刷新）时，持锁前已提交的 DSI 传输可能仍在进行 */
-#define MJPEG_DRAW_RETRY_MAX        20
+#define MJPEG_DRAW_RETRY_MAX        6
 #define MJPEG_LVGL_LOCK_TIMEOUT_MS  20
 #define MJPEG_POST_LOCK_DRAIN_MS    0
-#define MJPEG_DRAW_RETRY_US_MIN     1000
-#define MJPEG_DRAW_RETRY_US_MAX     20000
 /** 严格逐帧校验会重复解析 JPEG（extract+validate），会显著增加 read 侧 CPU 占用 */
 #ifndef MJPEG_STRICT_FRAME_VALIDATE
 #define MJPEG_STRICT_FRAME_VALIDATE 0
@@ -201,14 +198,8 @@ static esp_err_t mjpeg_panel_draw_wait(esp_lcd_panel_t *panel, int x0, int y0, i
         if (ret == ESP_OK) {
             return ret;
         }
-        uint32_t us = MJPEG_DRAW_RETRY_US_MIN + (uint32_t)i * MJPEG_DRAW_RETRY_US_MIN;
-        if (us > MJPEG_DRAW_RETRY_US_MAX) {
-            us = MJPEG_DRAW_RETRY_US_MAX;
-        }
-        esp_rom_delay_us(us);
-        if (i >= (MJPEG_DRAW_RETRY_MAX - 2)) {
-            taskYIELD();
-        }
+        /* DSI 忙时让出 CPU，避免占核饿死 opus/I2S；超时则丢这一帧。 */
+        vTaskDelay(1);
     }
     return ret;
 }

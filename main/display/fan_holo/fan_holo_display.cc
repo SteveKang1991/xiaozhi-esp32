@@ -296,6 +296,10 @@ void FanHoloDisplay::ShowNotification(const char* notification, int duration_ms)
         return;
     }
     LvglDisplay::ShowNotification(notification, duration_ms);
+    DisplayLockGuard lock(this);
+    if (notification_label_ != nullptr) {
+        lv_obj_move_foreground(notification_label_);
+    }
 }
 
 void FanHoloDisplay::ApplyIdleBatteryIconColor() {
@@ -814,6 +818,10 @@ bool FanHoloDisplay::StartMjpegEmotion(const char* full_path, bool idle_layout) 
         return false;
     }
     return true;
+}
+
+void FanHoloDisplay::StopRoleAnimation() {
+    StopMjpegIfRunning();
 }
 
 void FanHoloDisplay::StopMjpegIfRunning() {

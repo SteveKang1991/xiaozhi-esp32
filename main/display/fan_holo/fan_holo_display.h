@@ -24,6 +24,7 @@ public:
 
     void SetEmotion(const char* emotion) override;
     void SetRoleAnimation(const char* state) override;
+    void StopRoleAnimation() override;
     void SetChatMessage(const char* role, const char* content) override;
     void ClearChatMessages() override;
     void SetStatus(const char* status) override;

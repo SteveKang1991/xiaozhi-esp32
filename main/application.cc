@@ -1373,10 +1373,8 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        /* 关键修复:tts stop 触发 SetDeviceState(Listening) 后到 grace 窗口结束之前,
-         * 仍然接受 UDP 音频帧,确保服务器估算提前导致的末帧不被丢弃。
-         * 正常情况下 Listening 收到的包应当是麦克风上传/历史数据,不应当入解码队列。 */
-        if (GetDeviceState() == kDeviceStateSpeaking || tts_stop_grace_accept_audio_) {
+        /* 仅 Speaking 且未 abort 才收 TTS。Listening 开麦后再播尾音会被 STT 当成用户说话。 */
+        if (!aborted_ && GetDeviceState() == kDeviceStateSpeaking) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
@@ -1412,28 +1410,12 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this, display]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
-                        /* 关键修复：tts stop (MQTT) 与 UDP 末帧不同通道异步,
-                         * stop 可能早到几十~几百 ms 导致末帧被错过 Speaking 状态丢弃。
-                         * 开启 400ms "末帧缓冲窗口":窗口期间即使 state 已转 Listening,
-                         * OnIncomingAudio 仍然把 UDP 帧入队播放。
-                         * 配合之前的 WaitForPlaybackQueueEmpty 保证播放完整。 */
-                        audio_service_.WaitForPlaybackQueueEmpty();
-                        tts_stop_grace_accept_audio_ = true;
-                        if (tts_stop_grace_timer_ == nullptr) {
-                            esp_timer_create_args_t grace_args = {
-                                .callback = [](void* arg) {
-                                    Application* app = (Application*)arg;
-                                    app->tts_stop_grace_accept_audio_ = false;
-                                },
-                                .arg = this,
-                                .dispatch_method = ESP_TIMER_TASK,
-                                .name = "tts_stop_grace",
-                                .skip_unhandled_events = true,
-                            };
-                            esp_timer_create(&grace_args, &tts_stop_grace_timer_);
+                        StopTtsGrace();
+                        if (aborted_) {
+                            audio_service_.ResetDecoder();
+                        } else {
+                            audio_service_.WaitForPlaybackQueueEmpty();
                         }
-                        esp_timer_stop(tts_stop_grace_timer_);
-                        esp_timer_start_once(tts_stop_grace_timer_, 400000);  // 400ms
                         if (listening_mode_ == kListeningModeManualStop) {
                             display->SetChatMessage("system", "");
                             SetDeviceState(kDeviceStateIdle);
@@ -1746,6 +1728,8 @@ void Application::HandleWakeWordDetectedEvent() {
             protocol_->SendStartListening(GetDefaultListeningMode());
             audio_service_.ResetDecoder();
             audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+            audio_service_.WaitForPlaybackQueueEmpty();
+            audio_service_.ClearSendAndEncodeQueues();
             // Re-enable wake word detection as it was stopped by the detection itself
             audio_service_.EnableWakeWordDetection(true);
         } else {
@@ -1827,6 +1811,8 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateIdle:
             /* 先停 AFE 再动 UI：AEC 实时态 speaking 仍在 feed，MJPEG/封面会饿死 fetch。 */
             hold_wake_audio_upload_ = false;
+            StopTtsGrace();
+            audio_service_.ResetDecoder();
             audio_service_.EnableVoiceProcessing(false);
             if (is_music_playing) {
                 audio_service_.ClearSendAndEncodeQueues();
@@ -1851,6 +1837,8 @@ void Application::HandleStateChangedEvent() {
             }
             break;
         case kDeviceStateConnecting:
+            StopTtsGrace();
+            audio_service_.ResetDecoder();
             board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
             display->SetStatus(Lang::Strings::CONNECTING);
             display->SetEmotion("neutral");
@@ -1858,24 +1846,35 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
-            display->SetRoleAnimation("listen");
             /* speak -> listen 转场时清掉上一句 AI 字幕,避免末尾字符残影 */
             display->ClearChatMessages();
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
+                StopTtsGrace();
                 // For auto mode, wait for playback queue to be empty before enabling voice processing
                 // This prevents audio truncation when STOP arrives late due to network jitter
                 if (listening_mode_ == kListeningModeAutoStop) {
                     audio_service_.WaitForPlaybackQueueEmpty();
                 }
 
-                // Send the start listening command
+                /* pop 必须在 MJPEG/AFE 起来之前播完：idle 动画和 AFE 初始化都会饿死 I2S。 */
+                if (play_popup_on_listening_) {
+                    play_popup_on_listening_ = false;
+                    display->StopRoleAnimation();
+                    audio_service_.ResetDecoder();
+                    audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+                    audio_service_.WaitForPlaybackQueueEmpty();
+                    /* 队列空时最后一帧还在 I2S 写出，等它结束再开 MJPEG。 */
+                    vTaskDelay(pdMS_TO_TICKS(80));
+                }
+
+                display->SetRoleAnimation("listen");
                 protocol_->SendStartListening(listening_mode_);
                 audio_service_.EnableVoiceProcessing(true);
-                if (hold_wake_audio_upload_) {
-                    audio_service_.ClearSendAndEncodeQueues();
-                }
+                audio_service_.ClearSendAndEncodeQueues();
+            } else {
+                display->SetRoleAnimation("listen");
             }
 
 #ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
@@ -1885,12 +1884,6 @@ void Application::HandleStateChangedEvent() {
             // Disable wake word detection in listening mode
             audio_service_.EnableWakeWordDetection(false);
 #endif
-
-            // Play popup sound after ResetDecoder (in EnableVoiceProcessing) has been called
-            if (play_popup_on_listening_) {
-                play_popup_on_listening_ = false;
-                audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
-            }
             break;
         case kDeviceStateSpeaking:
             hold_wake_audio_upload_ = false;
@@ -1925,9 +1918,18 @@ void Application::Schedule(std::function<void()>&& callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
+void Application::StopTtsGrace() {
+    tts_stop_grace_accept_audio_ = false;
+    if (tts_stop_grace_timer_ != nullptr) {
+        esp_timer_stop(tts_stop_grace_timer_);
+    }
+}
+
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
+    StopTtsGrace();
+    audio_service_.ResetDecoder();
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
     }
