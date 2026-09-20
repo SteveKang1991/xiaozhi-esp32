@@ -227,9 +227,12 @@ void FanHoloIdlePage::StyleWeatherIcon(lv_obj_t* icon, int slot) {
     if (dsc == nullptr || dsc->data == nullptr) {
         return;
     }
-    if (lv_image_get_src(icon) != dsc) {
-        lv_image_set_src(icon, dsc);
+    /* 槽位 dsc 指针固定；小时刷新方↔长只改 header/像素。指针相同会跳过
+     * set_src，LVGL 仍按旧宽高裁切，必须先清空再重绑。 */
+    if (lv_image_get_src(icon) == dsc) {
+        lv_image_set_src(icon, nullptr);
     }
+    lv_image_set_src(icon, dsc);
     lv_obj_set_size(icon, dsc->header.w, dsc->header.h);
     lv_image_set_inner_align(icon, LV_IMAGE_ALIGN_CENTER);
 }
