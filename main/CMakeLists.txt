@@ -16,6 +16,7 @@ set(SOURCES "audio/audio_codec.cc"
             "display/display.cc"
             "display/lcd_display.cc"
             "display/oled_display.cc"
+            "display/upgrade_screen/upgrade_screen.cc"
             "display/lvgl_display/lvgl_display.cc"
             "display/emote_display.cc"
             "display/lvgl_display/emoji_collection.cc"
@@ -37,10 +38,11 @@ set(SOURCES "audio/audio_codec.cc"
             "assets.cc"
             "utils/md5.cc"
             "utils/emotion_partition_storage.c"
+            "display/fan_holo/fan_holo_weather.cc"
             "main.cc"
             )
 
-set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "utils")
+set(INCLUDE_DIRS "." "display" "display/fan_holo" "display/upgrade_screen" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "utils")
 
 # Add board common files
 list(APPEND SOURCES
@@ -792,12 +794,10 @@ elseif(CONFIG_BOARD_TYPE_FANFUTURE_S6_WIFI)
     set(BOARD_TYPE "fanfuture-s6-wifi")
     set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
     set(BUILTIN_ICON_FONT font_awesome_16_4)
-    set(DEFAULT_EMOJI_COLLECTION noto-emoji_128)
 elseif(CONFIG_BOARD_TYPE_FANFUTURE_S6_ML307)
     set(BOARD_TYPE "fanfuture-s6-ml307")
     set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
     set(BUILTIN_ICON_FONT font_awesome_16_4)
-    set(DEFAULT_EMOJI_COLLECTION noto-emoji_128)
 elseif(CONFIG_BOARD_TYPE_FANFUTURE_S6_778928_WiFI)
     set(BOARD_TYPE "fanfuture-s6-778928-wifi")
     set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
@@ -824,6 +824,22 @@ else()
     )
 endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
+
+if(CONFIG_BOARD_TYPE_FANFUTURE_Huanying1_778928_WiFI OR CONFIG_BOARD_TYPE_FANFUTURE_S6_WIFI)
+    list(APPEND SOURCES
+        "display/fan_holo/fan_holo_display.cc"
+        "display/fan_holo/fan_holo_status_bar.cc"
+        "display/fan_holo/fan_holo_idle_page.cc"
+        "display/fan_holo/fan_holo_chat_page.cc"
+        "display/fan_holo/fan_holo_music_page.cc"
+        "display/fan_holo/fan_holo_lunar.cc"
+        "display/fan_holo/fan_holo_font7_digits.c"
+        "display/fan_holo/font_puhui_number_42_4.c"
+        "display/fan_holo/icons/fan_holo_icon_temp.c"
+        "display/fan_holo/icons/fan_holo_icon_humidity.c"
+        "display/fan_holo/icons/fan_holo_icon_precip.c"
+    )
+endif()
 
 # Select audio processor according to Kconfig
 if(CONFIG_USE_AUDIO_PROCESSOR)
@@ -965,8 +981,8 @@ if(CONFIG_IDF_TARGET_ESP32)
                              )
 endif()
 
-# Include EspVideo if target is ESP32S3 or ESP32P4
-if(CONFIG_XIAOZHI_ENABLE_SCREEN_SNAPSHOT_JPEG)
+# JPEG 编码：屏幕截图、以及 S3/P4 摄像头路径都会用到 image_to_jpeg_cb
+if(CONFIG_XIAOZHI_ENABLE_SCREEN_SNAPSHOT_JPEG OR CONFIG_IDF_TARGET_ESP32S3 OR CONFIG_IDF_TARGET_ESP32P4)
     list(APPEND SOURCES "display/lvgl_display/jpg/image_to_jpeg.cpp")
 endif()
 
@@ -1119,19 +1135,23 @@ function(build_default_assets_bin)
         list(APPEND BUILD_ARGS "--extra_files" "${DEFAULT_ASSETS_EXTRA_FILES}")
     endif()
 
-    # 扫描 main/assets/default-*.mjpeg，作为出厂默认表情打包到 emotions 分区
+    # 按 sdkconfig 板型打包默认表情到 emotions 分区（见 build_default_assets.py BOARD_DEFAULT_EMOTION_MJPEGS）
     set(GENERATED_EMOTIONS_BIN "${CMAKE_BINARY_DIR}/generated_emotions.bin")
-    file(GLOB DEFAULT_EMOTION_MJPEGS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
-         "${CMAKE_CURRENT_SOURCE_DIR}/assets/default-*.mjpeg")
-    set(EMOTION_ARGS "")
-    foreach(MJPEG ${DEFAULT_EMOTION_MJPEGS})
-        get_filename_component(NAME_NO_EXT "${MJPEG}" NAME)
-        list(APPEND EMOTION_ARGS "--default_emotion_mjpegs" "${NAME_NO_EXT}=${CMAKE_CURRENT_SOURCE_DIR}/${MJPEG}")
-        message(STATUS "Found default emotion: ${NAME_NO_EXT}")
-    endforeach()
-    if(EMOTION_ARGS)
-        list(APPEND BUILD_ARGS "--emotions_output" "${GENERATED_EMOTIONS_BIN}")
-        list(APPEND BUILD_ARGS ${EMOTION_ARGS})
+    set(EMOTION_ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+    list(APPEND BUILD_ARGS "--emotions_output" "${GENERATED_EMOTIONS_BIN}")
+    list(APPEND BUILD_ARGS "--emotion_assets_dir" "${EMOTION_ASSETS_DIR}")
+    # 仅依赖当前板型会打包的 mjpeg，避免删掉其它板资源后 ninja 报 missing
+    set(EMOTION_MJPEG_DEPENDS "")
+    if(CONFIG_BOARD_TYPE_FANFUTURE_Huanying1_778928_WiFI)
+        list(APPEND EMOTION_MJPEG_DEPENDS
+            "${EMOTION_ASSETS_DIR}/default-idle-160x208.mjpeg"
+            "${EMOTION_ASSETS_DIR}/default-listen-240x290.mjpeg"
+            "${EMOTION_ASSETS_DIR}/default-speak-240x290.mjpeg")
+    elseif(CONFIG_BOARD_TYPE_FANFUTURE_S6_WIFI)
+        list(APPEND EMOTION_MJPEG_DEPENDS
+            "${EMOTION_ASSETS_DIR}/default-idle-192x144.mjpeg"
+            "${EMOTION_ASSETS_DIR}/default-listen-288x208.mjpeg"
+            "${EMOTION_ASSETS_DIR}/default-speak-288x208.mjpeg")
     endif()
 
     list(APPEND BUILD_ARGS "--esp_sr_model_path" "${ESP_SR_MODEL_PATH}")
@@ -1139,12 +1159,13 @@ function(build_default_assets_bin)
     
     # Create custom command to build assets
     add_custom_command(
-        OUTPUT ${GENERATED_ASSETS_BIN}
+        OUTPUT ${GENERATED_ASSETS_BIN} ${GENERATED_EMOTIONS_BIN}
         COMMAND python ${PROJECT_DIR}/scripts/build_default_assets.py ${BUILD_ARGS}
         DEPENDS
             ${SDKCONFIG}
             ${PROJECT_DIR}/scripts/build_default_assets.py
             ${PROJECT_DIR}/scripts/emotion_bin_packer.py
+            ${EMOTION_MJPEG_DEPENDS}
         COMMENT "Building default assets.bin based on configuration"
         VERBATIM
     )
@@ -1156,14 +1177,10 @@ function(build_default_assets_bin)
     
     # Set the generated file path in parent scope
     set(GENERATED_ASSETS_LOCAL_FILE ${GENERATED_ASSETS_BIN} PARENT_SCOPE)
-    if(EMOTION_ARGS)
-        set(GENERATED_EMOTIONS_LOCAL_FILE ${GENERATED_EMOTIONS_BIN} PARENT_SCOPE)
-    endif()
+    set(GENERATED_EMOTIONS_LOCAL_FILE ${GENERATED_EMOTIONS_BIN} PARENT_SCOPE)
 
     message(STATUS "Default assets build configured: ${GENERATED_ASSETS_BIN}")
-    if(EMOTION_ARGS)
-        message(STATUS "Default emotions bin build configured: ${GENERATED_EMOTIONS_BIN}")
-    endif()
+    message(STATUS "Default emotions bin build configured: ${GENERATED_EMOTIONS_BIN} (board-selected from ${EMOTION_ASSETS_DIR})")
 endfunction()
 
 

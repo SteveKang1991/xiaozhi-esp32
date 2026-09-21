@@ -23,6 +23,7 @@ public:
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image);
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
+    virtual void PrepareForReboot() override;
     virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80);
 
 protected:

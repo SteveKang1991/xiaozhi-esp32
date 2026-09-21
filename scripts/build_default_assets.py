@@ -449,6 +449,68 @@ def pack_assets_simple(target_path, include_path, out_file, assets_path, max_nam
     print(f'All files have been merged into {os.path.basename(out_file)}')
 
 
+def read_board_type_from_sdkconfig(sdkconfig_path):
+    """Return the enabled CONFIG_BOARD_TYPE_* symbol name, or None."""
+    if not os.path.exists(sdkconfig_path):
+        return None
+    with io.open(sdkconfig_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("CONFIG_BOARD_TYPE_") and line.endswith("=y"):
+                return line.split("=", 1)[0]
+    return None
+
+
+# 按板型打包出厂默认表情（写入 emotions 分区）。name 即 flash 内资产名。
+BOARD_DEFAULT_EMOTION_MJPEGS = {
+    "CONFIG_BOARD_TYPE_FANFUTURE_Huanying1_778928_WiFI": [
+        "default-idle-160x208.mjpeg",
+        "default-listen-240x290.mjpeg",
+        "default-speak-240x290.mjpeg",
+    ],
+    "CONFIG_BOARD_TYPE_FANFUTURE_S6_WIFI": [
+        "default-idle-192x144.mjpeg",
+        "default-listen-288x208.mjpeg",
+        "default-speak-288x208.mjpeg",
+    ],
+}
+
+
+def resolve_default_emotion_mjpegs(sdkconfig_path, assets_dir, explicit_specs):
+    """
+    解析要打进 emotions 分区的默认 mjpeg 列表。
+    - 若命令行已传 --default_emotion_mjpegs，优先用显式列表
+    - 否则按 sdkconfig 板型从 BOARD_DEFAULT_EMOTION_MJPEGS 选
+    返回 [(asset_name, abs_path), ...]
+    """
+    files = []
+    if explicit_specs:
+        for spec in explicit_specs:
+            if "=" not in spec:
+                sys.exit(f"[错误] --default_emotion_mjpegs 项需 name=path 格式: {spec}")
+            name, path = spec.split("=", 1)
+            files.append((name.strip(), path.strip()))
+        return files
+
+    if not assets_dir:
+        return []
+
+    board = read_board_type_from_sdkconfig(sdkconfig_path)
+    names = BOARD_DEFAULT_EMOTION_MJPEGS.get(board) if board else None
+    if not names:
+        print(f"  Note: no board-specific default emotions for {board or '<unknown>'}, skip emotions bin")
+        return []
+
+    print(f"  board emotions ({board}):")
+    for name in names:
+        path = os.path.join(assets_dir, name)
+        if not os.path.isfile(path):
+            sys.exit(f"[错误] 缺少板型默认表情文件: {path}")
+        print(f"    - {name}")
+        files.append((name, path))
+    return files
+
+
 # =============================================================================
 # Configuration and main functions
 # =============================================================================
@@ -793,6 +855,12 @@ def build_assets_integrated(wakenet_model_paths, multinet_model_paths, text_font
             # Show size information
             total_size = os.path.getsize(output_path)
             print(f"Assets file size: {total_size / 1024:.2f}K ({total_size} bytes)")
+            assets_limit = int(config_data.get("assets_size", "0x400000"), 0)
+            if total_size > assets_limit:
+                print(f"Error: assets.bin ({total_size} bytes) exceeds partition size "
+                      f"({assets_limit} bytes / {config_data.get('assets_size')}). "
+                      f"Reduce emoji/SR models or enlarge the assets partition.")
+                return False
             
             return True
         else:
@@ -820,7 +888,11 @@ def main():
     parser.add_argument('--default_emotion_mjpegs', action='append', default=[],
                         help='emotion mjpeg to package into generated_emotions.bin. '
                              'Format: name=path (e.g. default-idle-240x290.mjpeg=main/assets/default-idle-240x290.mjpeg). '
-                             'Can be passed multiple times.')
+                             'Can be passed multiple times. If omitted, board-specific defaults are used '
+                             'when --emotion_assets_dir is set.')
+    parser.add_argument('--emotion_assets_dir', default=None,
+                        help='Directory containing default-*.mjpeg; used with sdkconfig board type '
+                             'to auto-select emotions when --default_emotion_mjpegs is empty.')
     parser.add_argument('--emotions_output', default=None,
                         help='Output path for generated_emotions.bin (emotion_partition_storage 兼容 .bin). '
                              'If not set, no emotions bin is generated.')
@@ -934,27 +1006,40 @@ def main():
     if not success:
         sys.exit(1)
 
-    # 如果指定了 --default_emotion_mjpegs + --emotions_output，单独打包一份
-    # emotion_partition_storage 兼容的 bin（供烧录到 emotions 分区）
-    if args.emotions_output and args.default_emotion_mjpegs:
+    # 如果指定了 --emotions_output，按板型（或显式列表）打包 emotions 分区 bin
+    if args.emotions_output:
         try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             from emotion_bin_packer import build_emotion_bin
         except ImportError as e:
             sys.exit(f"[错误] 无法 import emotion_bin_packer: {e}")
 
-        files = []
-        for spec in args.default_emotion_mjpegs:
-            if "=" not in spec:
-                sys.exit(f"[错误] --default_emotion_mjpegs 项需 name=path 格式: {spec}")
-            name, path = spec.split("=", 1)
-            files.append((name.strip(), path.strip()))
-        try:
-            build_emotion_bin(files, args.emotions_output)
-        except SystemExit:
-            raise
-        except Exception as e:
-            sys.exit(f"[错误] 生成 emotions bin 失败: {e}")
+        assets_dir = args.emotion_assets_dir
+        if not assets_dir:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            assets_dir = os.path.join(os.path.dirname(script_dir), "main", "assets")
+
+        files = resolve_default_emotion_mjpegs(args.sdkconfig, assets_dir, args.default_emotion_mjpegs)
+        if files:
+            try:
+                build_emotion_bin(files, args.emotions_output)
+            except SystemExit:
+                raise
+            except Exception as e:
+                sys.exit(f"[错误] 生成 emotions bin 失败: {e}")
+        else:
+            # 仍写出合法空镜像，满足 CMake OUTPUT 依赖
+            os.makedirs(os.path.dirname(os.path.abspath(args.emotions_output)) or ".", exist_ok=True)
+            with open(args.emotions_output, "wb") as f:
+                hdr = bytearray(b"\xff" * 64)
+                struct.pack_into("<I", hdr, 0, 0x56535041)  # APSV
+                hdr[4] = 1  # version
+                hdr[5] = 0  # entry_count
+                hdr[6] = 0
+                hdr[7] = 0
+                struct.pack_into("<I", hdr, 8, 0)  # deleted_count
+                f.write(hdr)
+            print(f"  Wrote empty emotions bin: {args.emotions_output}")
 
     print("Build completed successfully!")
 

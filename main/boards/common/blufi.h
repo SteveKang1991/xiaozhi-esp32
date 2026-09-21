@@ -141,24 +141,32 @@ private:
     uint8_t m_sta_ssid[32]{};
     int m_sta_ssid_len;
     bool m_sta_is_connecting;
+    bool m_conn_success_sent = false;  // 标记CONN_SUCCESS是否已发送,避免_on_got_ip重复发送
+    bool m_conn_success_acked = false; // 标记手机是否已ACK(CONN_SUCCESS发出后收到手机任意请求即认为ACK)
+    int64_t m_conn_success_send_time = 0; // CONN_SUCCESS发送时的时间戳(微秒)
     esp_blufi_extra_info_t m_sta_conn_info{};
 
     // WiFi scan related
     std::vector<wifi_ap_record_t> m_ap_records;
-    bool m_has_recent_scan_results = false;
     bool m_scan_in_progress = false;
     bool m_scan_should_save_ssid = true;
     bool m_wifi_list_requested = false;
-    esp_event_handler_instance_t m_scan_handler_instance{};
+    bool m_has_recent_scan_results = false;
+    esp_event_handler_instance_t m_scan_handler_instance = nullptr;
+    esp_event_handler_instance_t m_ip_handler_instance = nullptr;
+    esp_event_handler_instance_t m_disconnect_handler_instance = nullptr;
+    bool m_waiting_for_conn_result = false;  // 等待WiFi连接结果(用于密码错误检测)
+    uint8_t m_last_disconnect_reason = 0;
 
     // IP event handler for status report
     static void _ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
                                   void *event_data);
     void _on_got_ip();
-    esp_event_handler_instance_t m_ip_handler_instance{};
 
-    // Restart after successful provisioning
-    bool m_restart_scheduled = false;
-    esp_timer_handle_t m_restart_timer = nullptr;
-    static void _restart_timer_cb(void *arg);
+    // Disconnect event handler for error reporting
+    static void _sta_disconnect_event_handler(void *arg, esp_event_base_t event_base,
+                                             int32_t event_id, void *event_data);
+    const char* _disconnect_reason_str(uint8_t reason);
+    void _ensure_disconnect_handler_registered();
+
 };

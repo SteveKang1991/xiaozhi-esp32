@@ -34,6 +34,7 @@
 #else
 #include "wake_words/esp_wake_word.h"
 #endif
+#include "settings.h"
 
 #define TAG "AudioService"
 
@@ -137,11 +138,11 @@ void AudioService::Start() {
     }, "audio_input", 2048 * 3, this, 8, &audio_input_task_handle_, 0);
 
     /* Start the audio output task */
-    xTaskCreate([](void* arg) {
+    xTaskCreatePinnedToCore([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioOutputTask();
         vTaskDelete(NULL);
-    }, "audio_output", 2048 * 2, this, 4, &audio_output_task_handle_);
+    }, "audio_output", 2048 * 2, this, 6, &audio_output_task_handle_, 0);
 #else
     /* Start the audio input task */
     xTaskCreate([](void* arg) {
@@ -159,11 +160,11 @@ void AudioService::Start() {
 #endif
 
     /* Start the opus codec task */
-    xTaskCreate([](void* arg) {
+    xTaskCreatePinnedToCore([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->OpusCodecTask();
         vTaskDelete(NULL);
-    }, "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
+    }, "opus_codec", 2048 * 12, this, 5, &opus_codec_task_handle_, 0);
 }
 
 void AudioService::Stop() {
@@ -528,6 +529,13 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
     return packet;
 }
 
+void AudioService::ClearSendAndEncodeQueues() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    audio_send_queue_.clear();
+    audio_encode_queue_.clear();
+    audio_queue_cv_.notify_all();
+}
+
 void AudioService::EncodeWakeWord() {
     if (wake_word_) {
         wake_word_->EncodeWakeWordData();
@@ -723,6 +731,23 @@ void AudioService::SetModelsList(srmodel_list_t* models_list) {
             }
         });
     }
+}
+
+void AudioService::UpdateCustomWakeWord(const std::string& command, const std::string& text) {
+    if (command.empty()) {
+        return;
+    }
+    {
+        Settings settings("wakeword", true);
+        settings.SetString("command", command);
+        settings.SetString("text", text);
+    }
+#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
+    auto* custom = dynamic_cast<CustomWakeWord*>(wake_word_.get());
+    if (custom != nullptr) {
+        custom->UpdateWakeCommand(command, text);
+    }
+#endif
 }
 
 bool AudioService::IsAfeWakeWord() {

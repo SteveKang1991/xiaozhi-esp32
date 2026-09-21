@@ -6,6 +6,7 @@
 #include "config.h"
 #include "i2c_device.h"
 #include "esp32_camera.h"
+#include "settings.h"
 
 #include "power_save_timer.h"
 #include "led/single_led.h"
@@ -13,7 +14,8 @@
 #include "assets/lang_config.h"
 #include "power_manager.h"
 #include "lightam_controller.h"
-#include "fan_lcd20_display.h"
+#include "custom_audio_codec.h"
+#include "fan_holo_display.h"
 #include "as5600.h"
 
 #include <wifi_station.h>
@@ -78,13 +80,13 @@ private:
         power_save_timer_ = new PowerSaveTimer(-1, 300, 300);
         power_save_timer_->OnEnterSleepMode([this]() {
             ESP_LOGI(TAG, "Enabling sleep mode");
-            display_->SetPowerSaveMode(true);
-            GetBacklight()->SetBrightness(1);
+            //display_->SetPowerSaveMode(true);
+            //GetBacklight()->SetBrightness(1);
         });
         power_save_timer_->OnExitSleepMode([this]() {
             ESP_LOGI(TAG, "Exit sleep mode");
-            display_->SetPowerSaveMode(false);
-            GetBacklight()->RestoreBrightness();
+            //display_->SetPowerSaveMode(false);
+            //GetBacklight()->RestoreBrightness();
         });
         power_save_timer_->OnShutdownRequest([this]() {
             ESP_LOGI(TAG, "Shutting down");
@@ -179,9 +181,9 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, DISPLAY_SWAP_XY));
         ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y));
 
-        display_ = new FanLcd20Display(panel_io_, panel_,
+        display_ = new FanHoloDisplay(panel_io_, panel_,
                                   DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X,
-                                  DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+                                  DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY, FanHoloMetrics::ForS6());
     }
  
     void InitializeButtons() {
@@ -203,7 +205,6 @@ private:
 
         mode_button_.OnLongPress([this]() {
             #if CONFIG_USE_DEVICE_AEC
-            power_save_timer_->WakeUp();
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateIdle) {
                 app.SetAecMode(app.GetAecMode() == kAecOff ? kAecOnDeviceSide : kAecOff);
@@ -331,22 +332,9 @@ public:
     }**/
 
     virtual AudioCodec* GetAudioCodec() override {
-        static BoxAudioCodec audio_codec(
+        static CustomAudioCodec audio_codec(
             i2c_bus_,
-            AUDIO_INPUT_SAMPLE_RATE,
-            AUDIO_OUTPUT_SAMPLE_RATE,
-            AUDIO_I2S_GPIO_MCLK,
-            AUDIO_I2S_GPIO_BCLK,
-            AUDIO_I2S_GPIO_WS,
-            AUDIO_I2S_GPIO_DOUT,
-            AUDIO_I2S_GPIO_DIN,
-            AUDIO_CODEC_PA_PIN,
-            AUDIO_CODEC_ES8311_ADDR,
-            AUDIO_CODEC_ES7210_ADDR,
-            AUDIO_INPUT_REFERENCE,
-            28.0f,  // Physical MIC1 gain
-            2,      // Physical MIC3 is the playback reference input
-            0.0f);  // reference_gain
+            pca9557_);
         return &audio_codec;
     }
 

@@ -1,6 +1,7 @@
 #include "application.h"
 #include "board.h"
 #include "display.h"
+#include "upgrade_screen.h"
 #include "system_info.h"
 #include "audio_codec.h"
 #include "mqtt_protocol.h"
@@ -12,13 +13,18 @@
 #include "utils/md5.h"
 #include "utils/emotion_partition_storage.h"
 #include "boards/common/mjpeg_player.h"
+#include "fan_holo_weather.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
+#include <cstdint>
+#include <vector>
 
 #define TAG "Application"
 
@@ -37,6 +43,32 @@ static std::string MakeEmotionAssetName(const std::string& type, int width, int 
     char suffix[64];
     snprintf(suffix, sizeof(suffix), "-%dx%d.mjpeg", width, height);
     return type + suffix;
+}
+
+/**
+ * 本机型期望分辨率命名（与 FindRoleAnimation 一致）。
+ * 服务器 width/height 仅作参考；若与板子期望不一致，仍按板子分辨率存名，
+ * 否则会出现「已下载 listen-160x208，查找 listen-240x290 → 落到 default」。
+ */
+static void ResolveEmotionAssetSize(const std::string& type, int server_w, int server_h,
+                                    int* out_w, int* out_h) {
+    int w = 240;
+    int h = 290;
+    auto* display = Board::GetInstance().GetDisplay();
+    if (display) {
+        display->GetRoleMjpegSize(type.c_str(), &w, &h);
+    }
+    if (server_w > 0 && server_h > 0 && (server_w != w || server_h != h)) {
+        ESP_LOGW(kEmotionTag,
+                 "%s: server %dx%d != device expect %dx%d, store as %dx%d",
+                 type.c_str(), server_w, server_h, w, h, w, h);
+    }
+    if (out_w) {
+        *out_w = w;
+    }
+    if (out_h) {
+        *out_h = h;
+    }
 }
 
 /**
@@ -128,20 +160,14 @@ void Application::CheckEmotionFiles() {
 
     ESP_LOGI(kEmotionTag, "Fetched %d emotion(s) from server", (int)fetch_result.emotions.size());
 
-    // 服务器返回空列表（用户已删除所有角色动画），清三个角色文件
+    // 服务器返回空列表：自定义 idle/listen/speak 全部删掉（不碰 default-*）
+    // CleanOrphan 的参数是「保留名单」——空列表 = 删光所有角色动画
     if (fetch_result.emotions.empty()) {
-        auto display = Board::GetInstance().GetDisplay();
-        int w = display ? display->width() : 0;
-        int h = display ? display->height() : 0;
-        if (w <= 0) w = 240;
-        if (h <= 0) h = 290;
-        std::vector<std::string> role_only_asset = {
-            MakeEmotionAssetName("idle", w, h),
-            MakeEmotionAssetName("listen", w, h),
-            MakeEmotionAssetName("speak", w, h),
-        };
-        CleanOrphanEmotionFiles(role_only_asset);
-        ESP_LOGI(kEmotionTag, "No role emotions on server, cleared role files only (flash)");
+        CleanOrphanEmotionFiles({});
+        if (auto* d = Board::GetInstance().GetDisplay()) {
+            d->OnEmotionsUpdated();
+        }
+        ESP_LOGI(kEmotionTag, "No role emotions on server, cleared custom role files (kept default-*)");
         return;
     }
 
@@ -156,14 +182,16 @@ void Application::CheckEmotionFiles() {
         if (info.type.empty() || info.url.empty()) {
             continue;
         }
-        int width = info.width > 0 ? info.width : 240;
-        int height = info.height > 0 ? info.height : 290;
+        int width = 0;
+        int height = 0;
+        ResolveEmotionAssetSize(info.type, info.width, info.height, &width, &height);
         info.local_path = MakeEmotionLocalPath(info.type, width, height);
         info.asset_name = MakeEmotionAssetName(info.type, width, height);
 
         // 检查本地 flash 中是否已存在且大小/MD5匹配
         if (IsEmotionFileUpToDate(info.asset_name, info.size, info.hash)) {
-            ESP_LOGI(kEmotionTag, "Emotion %s is up-to-date, skip", info.type.c_str());
+            ESP_LOGI(kEmotionTag, "Emotion %s (%s) is up-to-date, skip",
+                     info.type.c_str(), info.asset_name.c_str());
             valid_asset_names.push_back(info.asset_name);
             continue;
         }
@@ -175,25 +203,39 @@ void Application::CheckEmotionFiles() {
     if (total_count == 0) {
         ESP_LOGI(kEmotionTag, "All emotions are up-to-date, checking orphan files in flash");
         CleanOrphanEmotionFiles(valid_asset_names);
+        /* 即使无需下载，也刷新一次查找缓存（兼容改名后的文件） */
+        if (auto* d = Board::GetInstance().GetDisplay()) {
+            d->OnEmotionsUpdated();
+        }
         return;
     }
 
-    // 确有需要下载的，显示下载提示
+    // 确有需要下载的，显示全屏下载界面
     auto display = Board::GetInstance().GetDisplay();
-    display->SetStatus(Lang::Strings::DOWNLOADING_EMOTIONS);
-    display->SetEmotion("download");
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    UpgradeScreen::Show(Lang::Strings::DOWNLOADING_EMOTIONS, "");
+    SetDeviceState(kDeviceStateUpgrading);
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    audio_service_.Stop();
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     // 重新遍历，实际下载
     download_count = 0;
-    for (auto& info : emotions) {
-        if (info.type.empty() || info.url.empty()) {
+    size_t bytes_done_total = 0;
+    size_t bytes_total_sum = 0;
+    size_t latest_speed_bps = 0;
+    for (const auto& info : emotions) {
+        if (info.type.empty() || info.url.empty() || info.asset_name.empty()) continue;
+        if (IsEmotionFileUpToDate(info.asset_name, info.size, info.hash)) {
             continue;
         }
-        int width = info.width > 0 ? info.width : 240;
-        int height = info.height > 0 ? info.height : 290;
-        info.local_path = MakeEmotionLocalPath(info.type, width, height);
-        info.asset_name = MakeEmotionAssetName(info.type, width, height);
+        bytes_total_sum += static_cast<size_t>(info.size);
+    }
+
+    for (auto& info : emotions) {
+        if (info.type.empty() || info.url.empty() || info.asset_name.empty()) {
+            continue;
+        }
 
         // 再次检查（避免多线程竞态）
         if (IsEmotionFileUpToDate(info.asset_name, info.size, info.hash)) {
@@ -205,21 +247,45 @@ void Application::CheckEmotionFiles() {
         download_count++;
         char progress_msg[64];
         snprintf(progress_msg, sizeof(progress_msg), Lang::Strings::DOWNLOADING_EMOTION_PROGRESS, download_count, total_count);
-        display->SetChatMessage("system", progress_msg);
+        UpgradeScreen::SetStatusMessage(progress_msg);
 
-        ProcessEmotionFile(info);
+        auto per_file_cb = [&](size_t got_bytes, size_t file_total, size_t speed_bps) {
+            latest_speed_bps = speed_bps;
+            size_t display_done = bytes_done_total + got_bytes;
+            size_t display_total = bytes_total_sum;
+            int progress = total_count > 0 ? (download_count * 100 / total_count) : 100;
+            if (display_total > 0) {
+                int byte_pct = static_cast<int>(display_done * 100ULL / display_total);
+                if (byte_pct < progress) progress = byte_pct;
+            }
+            (void)file_total;
+            UpgradeScreen::Update(progress, display_done, display_total, speed_bps);
+        };
+
+        ProcessEmotionFile(info, per_file_cb);
+        bytes_done_total += static_cast<size_t>(info.size);
         valid_asset_names.push_back(info.asset_name);
+
+        int progress = total_count > 0 ? (download_count * 100 / total_count) : 100;
+        UpgradeScreen::Update(progress, bytes_done_total, bytes_total_sum, latest_speed_bps);
     }
 
     CleanOrphanEmotionFiles(valid_asset_names);
 
-    //display->SetStatus(Lang::Strings::EMOTION_SYNC_COMPLETE);
-    //display->SetChatMessage("system", Lang::Strings::EMOTION_SYNC_COMPLETE);
+    UpgradeScreen::Dismiss();
+    audio_service_.Start();
+    board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+    /* 同步后让显示层重新扫分区，避免仍播 default */
+    if (display) {
+        display->OnEmotionsUpdated();
+        display->SetStatus(Lang::Strings::EMOTION_SYNC_COMPLETE);
+        display->SetChatMessage("system", Lang::Strings::EMOTION_SYNC_COMPLETE);
+    }
     vTaskDelay(pdMS_TO_TICKS(500));
 }
 
 bool Application::DownloadEmotionFile(const std::string& url, const std::string& asset_name,
-                                       size_t expected_size) {
+                                       size_t expected_size, DownloadProgressCallback progress_cb) {
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
     auto http = network->CreateHttp(0);
@@ -272,6 +338,9 @@ bool Application::DownloadEmotionFile(const std::string& url, const std::string&
         }
         memcpy(buf + total, chunk, got);
         total += (size_t)got;
+        if (progress_cb) {
+            progress_cb(total, expected_size, 0);
+        }
     }
     http->Close();
 
@@ -293,7 +362,7 @@ bool Application::DownloadEmotionFile(const std::string& url, const std::string&
     return true;
 }
 
-void Application::ProcessEmotionFile(const EmotionInfo& info) {
+void Application::ProcessEmotionFile(const EmotionInfo& info, DownloadProgressCallback progress_cb) {
     const std::string& asset_name = info.asset_name;
     const std::string& url = info.url;
 
@@ -303,7 +372,7 @@ void Application::ProcessEmotionFile(const EmotionInfo& info) {
         return;
     }
 
-    if (!DownloadEmotionFile(url, asset_name, info.size)) {
+    if (!DownloadEmotionFile(url, asset_name, info.size, progress_cb)) {
         ESP_LOGE(kEmotionTag, "Failed to download emotion: %s", url.c_str());
         return;
     }
@@ -595,6 +664,9 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
+                if (ShouldDropWakeStageAudio()) {
+                    continue;
+                }
                 if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
                     break;
                 }
@@ -630,6 +702,20 @@ void Application::Run() {
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
             }
+            {
+                if (clock_ticks_ % 60 == 0) {
+                    xTaskCreate([](void* arg) {
+                        static_cast<Application*>(arg)->ReportDeviceInfo();
+                        vTaskDelete(NULL);
+                    }, "online_hb", 4096, this, 1, nullptr);
+                }
+                if (clock_ticks_ > 0 && clock_ticks_ % 3600 == 0) {
+                    xTaskCreate([](void* arg) {
+                        static_cast<Application*>(arg)->RefreshIdleWeather();
+                        vTaskDelete(NULL);
+                    }, "weather", 24576, this, 1, nullptr);
+                }
+            }
         }
     }
 }
@@ -639,6 +725,12 @@ void Application::HandleNetworkConnectedEvent() {
     auto state = GetDeviceState();
 
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
+        // Mark as first boot after BluFi if coming from wifi_configuring state
+        if (state == kDeviceStateWifiConfiguring) {
+            first_boot_after_blufi_ = true;
+            ESP_LOGI(TAG, "Network connected after BluFi provisioning, will reboot after OTA check");
+        }
+        
         // Network is ready, start activation
         SetDeviceState(kDeviceStateActivating);
         if (activation_task_handle_ != nullptr) {
@@ -651,7 +743,7 @@ void Application::HandleNetworkConnectedEvent() {
             app->ActivationTask();
             app->activation_task_handle_ = nullptr;
             vTaskDelete(NULL);
-        }, "activation", 4096 * 4, this, 2, &activation_task_handle_);
+        }, "activation", 4096 * 5, this, 2, &activation_task_handle_);
     }
 
     // Update the status bar immediately to show the network state
@@ -714,8 +806,181 @@ void Application::ActivationTask() {
     // Sync emotion files from server
     CheckEmotionFiles();
 
+    // 拉取设备信息，加载自定义唤醒词拼音
+    CheckDeviceInfo();
+    ReportDeviceInfo();
+
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+}
+
+void Application::CheckDeviceInfo() {
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGW(TAG, "No network, skip wake word fetch");
+        return;
+    }
+
+    auto http = network->CreateHttp(0);
+    if (http == nullptr) {
+        ESP_LOGE(TAG, "Failed to create HTTP for device info");
+        return;
+    }
+
+    std::string mac = SystemInfo::GetMacAddress();
+    std::string uuid = board.GetUuid();
+    std::string url = "https://ai.fanfuture.cn/api/device/info?hardware_id=" + mac;
+    http->SetHeader("Device-Id", mac.c_str());
+    http->SetHeader("Client-Id", uuid.c_str());
+
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(TAG, "Failed to open device info: %s", url.c_str());
+        return;
+    }
+    if (http->GetStatusCode() != 200) {
+        ESP_LOGE(TAG, "Device info HTTP %d", http->GetStatusCode());
+        http->Close();
+        return;
+    }
+
+    std::string response;
+    char buffer[512];
+    int read;
+    while ((read = http->Read(buffer, sizeof(buffer))) > 0) {
+        response.append(buffer, read);
+    }
+    http->Close();
+
+    cJSON* root = cJSON_Parse(response.c_str());
+    if (root == nullptr) {
+        ESP_LOGE(TAG, "Failed to parse device info JSON");
+        return;
+    }
+
+    cJSON* data = cJSON_GetObjectItem(root, "data");
+    if (!cJSON_IsObject(data)) {
+        cJSON_Delete(root);
+        ESP_LOGE(TAG, "Device info missing data object");
+        return;
+    }
+
+    cJSON* command_item = cJSON_GetObjectItem(data, "assistant_command");
+    cJSON* name_item = cJSON_GetObjectItem(data, "assistant_name");
+    std::string command = cJSON_IsString(command_item) ? command_item->valuestring : "";
+    std::string text = cJSON_IsString(name_item) ? name_item->valuestring : "";
+
+    cJSON* addr_item = cJSON_GetObjectItem(data, "address");
+    std::string address = (cJSON_IsString(addr_item) && addr_item->valuestring != nullptr)
+                              ? addr_item->valuestring : "";
+    cJSON* clock_item = cJSON_GetObjectItem(data, "idle_clock_style");
+    int clock_style = 1;
+    if (cJSON_IsNumber(clock_item)) {
+        clock_style = clock_item->valueint;
+    } else if (cJSON_IsString(clock_item) && clock_item->valuestring != nullptr) {
+        clock_style = atoi(clock_item->valuestring);
+    }
+    if (clock_style != 2) {
+        clock_style = 1;
+    }
+    cJSON_Delete(root);
+
+    ESP_LOGI(TAG, "Device idle_clock_style: %d", clock_style);
+    auto display = Board::GetInstance().GetDisplay();
+    if (display != nullptr) {
+        display->SetIdleClockStyle(clock_style);
+    }
+
+    if (!address.empty()) {
+        weather_city_ = address;
+        ESP_LOGI(TAG, "Device address: %s", weather_city_.c_str());
+        xTaskCreate([](void* arg) {
+            static_cast<Application*>(arg)->RefreshIdleWeather();
+            vTaskDelete(NULL);
+        }, "weather", 24576, this, 1, nullptr);
+    } else {
+        ESP_LOGW(TAG, "Device info has no address");
+    }
+
+    if (command.empty()) {
+        ESP_LOGW(TAG, "Device info has empty assistant_command");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Device wake word: %s (%s)", command.c_str(), text.c_str());
+    audio_service_.UpdateCustomWakeWord(command, text);
+}
+
+void Application::RefreshIdleWeather() {
+    if (weather_city_.empty()) {
+        return;
+    }
+    IdleWeatherView view;
+    if (!FanHoloFetchWeather(weather_city_, &view)) {
+        ESP_LOGW(TAG, "Fetch weather failed for %s", weather_city_.c_str());
+        return;
+    }
+    auto display = Board::GetInstance().GetDisplay();
+    if (display != nullptr) {
+        display->SetIdleWeather(view);
+    }
+}
+
+void Application::ReportDeviceInfo() {
+    auto state = GetDeviceState();
+    if (state == kDeviceStateWifiConfiguring || state == kDeviceStateStarting ||
+        state == kDeviceStateUnknown) {
+        return;
+    }
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    if (network == nullptr) {
+        return;
+    }
+    auto http = network->CreateHttp(0);
+    if (http == nullptr) {
+        return;
+    }
+
+    int battery = -1;
+    bool charging = false;
+    bool discharging = false;
+    if (!board.GetBatteryLevel(battery, charging, discharging)) {
+        battery = -1;
+        charging = false;
+    }
+    int volume = 0;
+    if (auto codec = board.GetAudioCodec()) {
+        volume = codec->output_volume();
+    }
+    int brightness = -1;
+    if (auto backlight = board.GetBacklight()) {
+        brightness = backlight->brightness();
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "battery", battery);
+    cJSON_AddBoolToObject(root, "charging", charging);
+    cJSON_AddNumberToObject(root, "volume", volume);
+    cJSON_AddNumberToObject(root, "brightness", brightness);
+    char* printed = cJSON_PrintUnformatted(root);
+    std::string body = printed ? printed : "{}";
+    if (printed) {
+        cJSON_free(printed);
+    }
+    cJSON_Delete(root);
+
+    std::string mac = SystemInfo::GetMacAddress();
+    std::string url = "https://ai.fanfuture.cn/api/hardware/heartbeat";
+    http->SetHeader("Device-Id", mac.c_str());
+    http->SetHeader("Client-Id", board.GetUuid().c_str());
+    http->SetHeader("Content-Type", "application/json");
+    http->SetContent(std::move(body));
+    if (!http->Open("POST", url)) {
+        return;
+    }
+    (void)http->GetStatusCode();
+    http->Close();
 }
 
 void Application::CheckAssetsVersion() {
@@ -812,6 +1077,13 @@ void Application::CheckNewVersion() {
         }
         retry_count = 0;
         retry_delay = 10; // Reset retry delay
+
+        // Reboot after first OTA check following BluFi provisioning
+        if (first_boot_after_blufi_) {
+            ESP_LOGI(TAG, "First OTA check after BluFi completed, rebooting device...");
+            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second before reboot
+            esp_restart();
+        }
 
         if (ota_->HasNewVersion()) {
             if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
@@ -1136,10 +1408,12 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
+            SetDeviceState(kDeviceStateIdle);
             return;
         }
     }
 
+    play_popup_on_listening_ = true;
     SetListeningMode(mode);
 }
 
@@ -1211,8 +1485,9 @@ void Application::HandleWakeWordDetectedEvent() {
         // 先同步停止音乐播放（唤醒词打断）
         auto& board = Board::GetInstance();
         auto music = board.GetMusic();
-        if (music) {
+        if (music && music->IsPlaying()) {
             music->StopStreaming();
+            SetDeviceState(kDeviceStateConnecting);
         }
 
         audio_service_.EncodeWakeWord();
@@ -1228,7 +1503,6 @@ void Application::HandleWakeWordDetectedEvent() {
             return;
         }
         // Channel already opened, continue directly
-        SetDeviceState(kDeviceStateConnecting);
         ContinueWakeWordInvoke(wake_word);
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
         AbortSpeaking(kAbortReasonWakeWordDetected);
@@ -1239,6 +1513,8 @@ void Application::HandleWakeWordDetectedEvent() {
             protocol_->SendStartListening(GetDefaultListeningMode());
             audio_service_.ResetDecoder();
             audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+            audio_service_.WaitForPlaybackQueueEmpty();
+            audio_service_.ClearSendAndEncodeQueues();
             // Re-enable wake word detection as it was stopped by the detection itself
             audio_service_.EnableWakeWordDetection(true);
         } else {
@@ -1261,25 +1537,43 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
             audio_service_.EnableWakeWordDetection(true);
+            SetDeviceState(kDeviceStateIdle);
             return;
         }
     }
 
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
-#if CONFIG_SEND_WAKE_WORD_DATA
-    // Encode and send the wake word data to the server
-    while (auto packet = audio_service_.PopWakeWordPacket()) {
-        protocol_->SendAudio(std::move(packet));
+    // 只上报唤醒事件。本地缓存的唤醒词 Opus / 尾音不得当聊天发给服务端，
+    // 否则相近音节（如「星黎」→「心灵」）会被 ASR 成第二轮对话。
+    while (audio_service_.PopWakeWordPacket()) {
     }
-    // Set the chat state to wake word detected
+    while (audio_service_.PopPacketFromSendQueue()) {
+    }
+    audio_service_.ClearSendAndEncodeQueues();
+    BeginWakeAudioHold();
     protocol_->SendWakeWordDetected(wake_word);
-    SetListeningMode(GetDefaultListeningMode());
-#else
-    // Set flag to play popup sound after state changes to listening
-    // (PlaySound here would be cleared by ResetDecoder in EnableVoiceProcessing)
     play_popup_on_listening_ = true;
     SetListeningMode(GetDefaultListeningMode());
-#endif
+}
+
+void Application::BeginWakeAudioHold() {
+    hold_wake_audio_upload_ = true;
+    hold_wake_audio_until_us_ = esp_timer_get_time() + 1500000;
+}
+
+bool Application::ShouldDropWakeStageAudio() {
+    if (!hold_wake_audio_upload_) {
+        return false;
+    }
+    if (GetDeviceState() == kDeviceStateSpeaking) {
+        hold_wake_audio_upload_ = false;
+        return false;
+    }
+    if (esp_timer_get_time() >= hold_wake_audio_until_us_) {
+        hold_wake_audio_upload_ = false;
+        return false;
+    }
+    return true;
 }
 
 void Application::HandleStateChangedEvent() {
@@ -1300,19 +1594,24 @@ void Application::HandleStateChangedEvent() {
             /* 系统启动阶段，不走角色动画——开机/下载/告警仍由 SetEmotion 走主题 GIF / 内置图标 */
             break;
         case kDeviceStateIdle:
+            /* 先停 AFE 再动 UI：AEC 实时态 speaking 仍在 feed，MJPEG/封面会饿死 fetch。 */
+            hold_wake_audio_upload_ = false;
+            StopTtsGrace();
+            audio_service_.ResetDecoder();
+            audio_service_.EnableVoiceProcessing(false);
             if (is_music_playing) {
-                // 音乐播放中：显示音乐封面（黑色背景 + 专辑图），停止 MJPEG 动画
+                audio_service_.ClearSendAndEncodeQueues();
+            }
+            audio_service_.EnableWakeWordDetection(true);
+            if (is_music_playing) {
                 display->SetStatus(Lang::Strings::MUSIC_PLAYING);
-                display->ShowMusicCover(true);
+                display->ShowMusicCover(true, "");
             } else {
-                // 非音乐播放：隐藏音乐封面，恢复 idle 角色动画
                 display->ShowMusicCover(false, "");
                 display->SetStatus(Lang::Strings::STANDBY);
-                display->ClearChatMessages();
                 display->SetRoleAnimation("idle");
             }
-            audio_service_.EnableVoiceProcessing(false);
-            audio_service_.EnableWakeWordDetection(true);
+            display->ClearChatMessages();
             // 主动确保 codec input 已启用（唤醒词检测需要录音）
             // 这对于音乐播放中尤其重要，避免 wake word 收不到数据
             {
@@ -1323,12 +1622,12 @@ void Application::HandleStateChangedEvent() {
             }
             break;
         case kDeviceStateConnecting:
-            if(!s_system_ready_)
-            {
-                display->SetStatus(Lang::Strings::CONNECTING);
-                display->SetEmotion("neutral");
-                display->SetChatMessage("system", "");
-            }
+            StopTtsGrace();
+            audio_service_.ResetDecoder();
+            board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+            display->SetStatus(Lang::Strings::CONNECTING);
+            display->SetEmotion("neutral");
+            display->SetChatMessage("system", "");
             break;
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
@@ -1390,9 +1689,18 @@ void Application::Schedule(std::function<void()>&& callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
+void Application::StopTtsGrace() {
+    tts_stop_grace_accept_audio_ = false;
+    if (tts_stop_grace_timer_ != nullptr) {
+        esp_timer_stop(tts_stop_grace_timer_);
+    }
+}
+
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
+    StopTtsGrace();
+    audio_service_.ResetDecoder();
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
     }
@@ -1409,23 +1717,36 @@ ListeningMode Application::GetDefaultListeningMode() const {
 
 void Application::Reboot() {
     ESP_LOGI(TAG, "Rebooting...");
-    // Disconnect the audio channel
+    auto& board = Board::GetInstance();
+    Display* display = board.GetDisplay();
+    if (display != nullptr) {
+        display->PrepareForReboot();
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    Backlight* bl = board.GetBacklight();
+    int fade_ms = 400;
+    if (bl != nullptr) {
+        fade_ms = static_cast<int>(bl->brightness()) * 5;
+        if (fade_ms < 200) {
+            fade_ms = 200;
+        }
+        bl->SetBrightness(0, false);
+    }
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         protocol_->CloseAudioChannel();
     }
     protocol_.reset();
     audio_service_.Stop();
 
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(fade_ms + 100));
     esp_restart();
 }
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
     auto& board = Board::GetInstance();
-    auto display = board.GetDisplay();
 
     std::string upgrade_url = url;
-    std::string version_info = version.empty() ? "(Manual upgrade)" : version;
+    std::string version_info = version.empty() ? "" : version.c_str();
 
     // Close audio channel if it's open
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
@@ -1434,39 +1755,33 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
     }
     ESP_LOGI(TAG, "Starting firmware upgrade from URL: %s", upgrade_url.c_str());
 
-    Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "download", Lang::Sounds::OGG_UPGRADE);
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    UpgradeScreen::Show(Lang::Strings::OTA_UPGRADE, version_info.c_str());
 
     SetDeviceState(kDeviceStateUpgrading);
 
-    std::string message = std::string(Lang::Strings::NEW_VERSION) + version_info;
-    display->SetChatMessage("system", message.c_str());
+    audio_service_.PlaySound(Lang::Sounds::OGG_UPGRADE);
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
     audio_service_.Stop();
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(500));
 
-    bool upgrade_success = Ota::Upgrade(upgrade_url, [this, display](int progress, size_t speed) {
-        char buffer[32];
-        snprintf(buffer, sizeof(buffer), "%d%% %uKB/s", progress, speed / 1024);
-        Schedule([display, message = std::string(buffer)]() {
-            display->SetChatMessage("system", message.c_str());
-        });
+    bool upgrade_success = Ota::Upgrade(upgrade_url, [](int progress, size_t downloaded, size_t total, size_t speed) {
+        UpgradeScreen::Update(progress, downloaded, total, speed);
     });
 
     if (!upgrade_success) {
-        // Upgrade failed, restart audio service and continue running
         ESP_LOGE(TAG, "Firmware upgrade failed, restarting audio service and continuing operation...");
-        audio_service_.Start(); // Restart audio service
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER); // Restore power save level
+        UpgradeScreen::Dismiss();
+        audio_service_.Start();
+        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Alert(Lang::Strings::ERROR, Lang::Strings::UPGRADE_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
         vTaskDelay(pdMS_TO_TICKS(3000));
         return false;
     } else {
-        // Upgrade success, reboot immediately
         ESP_LOGI(TAG, "Firmware upgrade successful, rebooting...");
-        display->SetChatMessage("system", "Upgrade successful, rebooting...");
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Brief pause to show message
+        UpgradeScreen::SetStatusMessage("升级成功, 正在重启...");
+        vTaskDelay(pdMS_TO_TICKS(1000));
         Reboot();
         return true;
     }
@@ -1576,112 +1891,100 @@ void Application::ResetProtocol() {
 // 新增：接收外部音频数据（如音乐播放）
 void Application::AddAudioData(AudioStreamPacket &&packet)
 {
+    if (packet.payload.size() < 2) {
+        return;
+    }
+    AddAudioData(reinterpret_cast<int16_t*>(packet.payload.data()),
+                  packet.payload.size() / sizeof(int16_t),
+                  packet.sample_rate);
+}
+
+void Application::AddAudioData(int16_t* pcm, size_t num_samples, int sample_rate)
+{
+    if (pcm == nullptr || num_samples == 0) {
+        return;
+    }
+
     auto codec = Board::GetInstance().GetAudioCodec();
     DeviceState current_state = state_machine_.GetState();
-    // 仅在 idle 状态 + 音乐正在播放时输出音频
     auto& board = Board::GetInstance();
     auto music = board.GetMusic();
     bool is_music_playing = music && music->IsPlaying();
-    if (is_music_playing && current_state == kDeviceStateIdle && codec->output_enabled())
-    {
-        // packet.payload包含的是原始PCM数据（int16_t）
-        if (packet.payload.size() >= 2)
-        {
-            size_t num_samples = packet.payload.size() / sizeof(int16_t);
-            std::vector<int16_t> pcm_data(num_samples);
-            memcpy(pcm_data.data(), packet.payload.data(), packet.payload.size());
-
-            // 检查采样率是否匹配，如果不匹配则进行简单重采样
-            if (packet.sample_rate != codec->output_sample_rate())
-            {
-                // 验证采样率参数
-                if (packet.sample_rate <= 0 || codec->output_sample_rate() <= 0)
-                {
-                    ESP_LOGE(TAG, "Invalid sample rates: %d -> %d",
-                             packet.sample_rate, codec->output_sample_rate());
-                    return;
-                }
-
-                std::vector<int16_t> resampled;
-
-                ESP_LOGD(TAG, "Music Player: Resample from %d Hz to %d Hz (avoid I2S reconfig)",
-                         packet.sample_rate, codec->output_sample_rate());
-
-                // 关键修复：不要调用 SetOutputSampleRate 切换采样率，
-                // 因为会 disable+reconfig I2S TX，影响共享 I2S bus 的 RX（麦克风），
-                // 导致语音唤醒失效。改为在软件层做重采样。
-                if (packet.sample_rate > codec->output_sample_rate())
-                {
-                    // 下采样到 codec 当前采样率
-                    float downsample_ratio = static_cast<float>(packet.sample_rate) / codec->output_sample_rate();
-                    size_t expected_size = static_cast<size_t>(pcm_data.size() / downsample_ratio + 0.5f);
-                    resampled.resize(expected_size);
-
-                    size_t resampled_index = 0;
-                    float source_index = 0.0f;
-                    for (size_t i = 0; i < pcm_data.size() && resampled_index < expected_size; i++)
-                    {
-                        size_t idx = static_cast<size_t>(source_index);
-                        if (idx < pcm_data.size())
-                        {
-                            resampled[resampled_index++] = pcm_data[idx];
-                        }
-                        source_index += downsample_ratio;
-                    }
-
-                    pcm_data = std::move(resampled);
-                    ESP_LOGD(TAG, "Downsampled music audio from %d to %d Hz",
-                             packet.sample_rate, codec->output_sample_rate());
-                }
-                else
-                {
-                    // 上采样到 codec 当前采样率
-                    float upsample_ratio = codec->output_sample_rate() / static_cast<float>(packet.sample_rate);
-                    size_t expected_size = static_cast<size_t>(pcm_data.size() * upsample_ratio + 0.5f);
-                    resampled.reserve(expected_size);
-
-                    for (size_t i = 0; i < pcm_data.size(); ++i)
-                    {
-                        resampled.push_back(pcm_data[i]);
-
-                        int interpolation_count = static_cast<int>(upsample_ratio) - 1;
-                        if (interpolation_count > 0 && i + 1 < pcm_data.size())
-                        {
-                            int16_t current = pcm_data[i];
-                            int16_t next = pcm_data[i + 1];
-                            for (int j = 1; j <= interpolation_count; ++j)
-                            {
-                                float t = static_cast<float>(j) / (interpolation_count + 1);
-                                int16_t interpolated = static_cast<int16_t>(current + (next - current) * t);
-                                resampled.push_back(interpolated);
-                            }
-                        }
-                        else if (interpolation_count > 0)
-                        {
-                            for (int j = 1; j <= interpolation_count; ++j)
-                            {
-                                resampled.push_back(pcm_data[i]);
-                            }
-                        }
-                    }
-
-                    pcm_data = std::move(resampled);
-                    ESP_LOGD(TAG, "Upsampled music audio from %d to %d Hz",
-                             packet.sample_rate, codec->output_sample_rate());
-                }
-            }
-
-            // 确保音频输出已启用
-            if (!codec->output_enabled())
-            {
-                codec->EnableOutput(true);
-            }
-
-            // 发送PCM数据到音频编解码器
-            codec->OutputData(pcm_data);
-
-            audio_service_.UpdateOutputTimestamp();
-        }
+    if (!is_music_playing || current_state != kDeviceStateIdle || !codec || !codec->output_enabled()) {
+        return;
     }
+
+    const int16_t* out_pcm = pcm;
+    size_t out_samples = num_samples;
+
+    thread_local static std::vector<int16_t> resample_buf;
+
+    if (sample_rate != codec->output_sample_rate())
+    {
+        if (sample_rate <= 0 || codec->output_sample_rate() <= 0)
+        {
+            ESP_LOGE(TAG, "Invalid sample rates: %d -> %d",
+                     sample_rate, codec->output_sample_rate());
+            return;
+        }
+
+        const int src_rate = sample_rate;
+        const int dst_rate = codec->output_sample_rate();
+
+        if (src_rate > dst_rate)
+        {
+            size_t expected_size = (num_samples * (size_t)dst_rate + (size_t)src_rate / 2) / (size_t)src_rate;
+            if (expected_size == 0) {
+                expected_size = 1;
+            }
+            resample_buf.resize(expected_size);
+            for (size_t i = 0; i < expected_size; i++) {
+                size_t idx = (i * (size_t)src_rate) / (size_t)dst_rate;
+                if (idx >= num_samples) {
+                    idx = num_samples - 1;
+                }
+                resample_buf[i] = pcm[idx];
+            }
+        }
+        else
+        {
+            float upsample_ratio = (float)dst_rate / (float)src_rate;
+            size_t expected_size = (size_t)(num_samples * upsample_ratio + 0.5f);
+            resample_buf.clear();
+            resample_buf.reserve(expected_size);
+            int interpolation_count = (int)upsample_ratio - 1;
+            for (size_t i = 0; i < num_samples; ++i)
+            {
+                resample_buf.push_back(pcm[i]);
+                if (interpolation_count > 0 && i + 1 < num_samples)
+                {
+                    int16_t current = pcm[i];
+                    int16_t next = pcm[i + 1];
+                    for (int j = 1; j <= interpolation_count; ++j)
+                    {
+                        float t = (float)j / (interpolation_count + 1);
+                        resample_buf.push_back((int16_t)(current + (next - current) * t));
+                    }
+                }
+                else if (interpolation_count > 0)
+                {
+                    for (int j = 1; j <= interpolation_count; ++j)
+                    {
+                        resample_buf.push_back(pcm[i]);
+                    }
+                }
+            }
+        }
+        out_pcm = resample_buf.data();
+        out_samples = resample_buf.size();
+    }
+
+    if (!codec->output_enabled())
+    {
+        codec->EnableOutput(true);
+    }
+
+    codec->OutputData(out_pcm, (int)out_samples);
+    audio_service_.UpdateOutputTimestamp();
 }
 

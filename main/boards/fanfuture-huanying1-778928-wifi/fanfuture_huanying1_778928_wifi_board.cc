@@ -5,6 +5,7 @@
 #include "button.h"
 #include "config.h"
 #include "esp32_camera.h"
+#include "settings.h"
 
 #include "power_save_timer.h"
 #include "led/single_led.h"
@@ -12,7 +13,7 @@
 #include "assets/lang_config.h"
 #include "power_manager.h"
 #include "lightam_controller.h"
-#include "fan_lcd778928_display.h"
+#include "fan_holo_display.h"
 
 #include <wifi_station.h>
 #include <esp_log.h>
@@ -159,9 +160,9 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, DISPLAY_SWAP_XY));
         ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y));
 
-        display_ = new FanLcd778928Display(panel_io_, panel_,
+        display_ = new FanHoloDisplay(panel_io_, panel_,
                                   DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X,
-                                  DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+                                  DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY, FanHoloMetrics::ForHuanying1());
     }
  
     void InitializeButtons() {
@@ -183,7 +184,6 @@ private:
 
         mode_button_.OnLongPress([this]() {
             #if CONFIG_USE_DEVICE_AEC
-            power_save_timer_->WakeUp();
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateIdle) {
                 app.SetAecMode(app.GetAecMode() == kAecOff ? kAecOnDeviceSide : kAecOff);
@@ -354,7 +354,7 @@ public:
         WifiBoard::StartWifiConfigMode();
 
         // Show notification on display
-        std::string hint = ""; //std::string(Lang::Strings::BLUFI_CINFIG) + "Xiaozhi-Blufi";
+        std::string hint = std::string(Lang::Strings::BLUFI_CINFIG) + "Xiaozhi-Blufi";
         Application::GetInstance().Alert(hint.c_str(), Lang::Strings::ENTERING_WIFI_CONFIG_MODE, "gear", Lang::Sounds::OGG_WIFICONFIG);
     }
 #endif

@@ -15,6 +15,8 @@
 #include <string>
 #include <chrono>
 
+#include "fan_holo_weather.h"
+
 class Theme {
 public:
     Theme(const std::string& name) : name_(name) {}
@@ -34,12 +36,27 @@ public:
     virtual void ShowNotification(const char* notification, int duration_ms = 3000);
     virtual void ShowNotification(const std::string &notification, int duration_ms = 3000);
     virtual void SetEmotion(const char* emotion);
+    /**
+     * 角色动画：进入待命状态后由 application 根据对话阶段调用。
+     * - 默认值 "idle"（待命）
+     * - "listen"（聆听中）
+     * - "speak"（说话中）
+     * 基础类默认实现退化为 SetEmotion(state)，由具体 display 重写为 MJPEG 播放器。
+     */
+    virtual void SetRoleAnimation(const char* state) { SetEmotion(state); }
+    /* 停角色 MJPEG。默认空操作。 */
+    virtual void StopRoleAnimation() {}
     virtual void SetChatMessage(const char* role, const char* content);
     virtual void ClearChatMessages();
     virtual void SetTheme(Theme* theme);
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
+    /**
+     * 重启前：铺满黑屏，避免残留画面。
+     * 子类可先停 MJPEG 等叠加层，再调用基类。
+     */
+    virtual void PrepareForReboot() {}
     virtual void SetupUI() { 
         setup_ui_called_ = true;
     }
@@ -82,14 +99,27 @@ public:
      * 默认实现为空，由具体 display 子类重写。 */
     virtual void ShowMusicCover(bool show, const std::string& picture_url = "") {}
 
+    virtual void SetIdleWeather(const IdleWeatherView& weather) { (void)weather; }
+    virtual void SetIdleClockStyle(int style) { (void)style; }
+
     /**
-     * 角色动画：进入待命状态后由 application 根据对话阶段调用。
-     * - 默认值 "idle"（待命），播放 SD 卡 /sdcard/Emotion/idle-*.mjpeg
-     * - "listen"（聆听中），播放 listen-*.mjpeg
-     * - "speak"（说话中），播放 speak-*.mjpeg
-     * 基础类默认实现退化为 SetEmotion(state)，由具体 display 重写为 MJPEG 播放器。
-     */
-    virtual void SetRoleAnimation(const char* state) { SetEmotion(state); }
+     * 获取音乐封面容器对象。
+     * 返回 nullptr 表示音乐封面未激活。
+     * 默认实现为空。 */
+    virtual lv_obj_t* GetMusicCoverContainer() { return nullptr; }
+
+    virtual void GetRoleMjpegSize(const char* type, int* width, int* height) const {
+        if (width) {
+            *width = 240;
+        }
+        if (height) {
+            *height = 290;
+        }
+        (void)type;
+    }
+
+    /** 表情分区同步完成后回调（重新扫描 flash 内 mjpeg） */
+    virtual void OnEmotionsUpdated() {}
 
     inline int width() const { return width_; }
     inline int height() const { return height_; }

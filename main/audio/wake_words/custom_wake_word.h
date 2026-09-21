@@ -5,6 +5,9 @@
 #include <esp_mn_iface.h>
 #include <esp_mn_models.h>
 #include <model_path.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/event_groups.h>
+#include <freertos/task.h>
 
 #include <deque>
 #include <string>
@@ -23,6 +26,7 @@ public:
     ~CustomWakeWord();
 
     bool Initialize(AudioCodec* codec, srmodel_list_t* models_list);
+    void UpdateWakeCommand(const std::string& command, const std::string& text);
     void Feed(const std::vector<int16_t>& data);
     void OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback);
     void Start();
@@ -55,6 +59,11 @@ private:
     std::atomic<bool> running_ = false;
     std::vector<int16_t> input_buffer_;
     std::mutex input_buffer_mutex_;
+    std::condition_variable input_cv_;
+    EventGroupHandle_t event_group_ = nullptr;
+    TaskHandle_t detection_task_ = nullptr;
+
+    void DetectionTask();
 
     TaskHandle_t wake_word_encode_task_ = nullptr;
     StaticTask_t* wake_word_encode_task_buffer_ = nullptr;

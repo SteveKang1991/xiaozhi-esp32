@@ -11,9 +11,7 @@
 #include "audio_codec.h"
 #include "settings.h"
 #include "assets/lang_config.h"
-#if CONFIG_XIAOZHI_ENABLE_SCREEN_SNAPSHOT_JPEG
 #include "jpg/image_to_jpeg.h"
-#endif
 
 #define TAG "Display"
 
@@ -84,8 +82,10 @@ void LvglDisplay::SetStatus(const char* status) {
     }
     lv_label_set_text(status_label_, status);
     lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(notification_label_, "");  // Clear notification text to prevent ghost display
-    lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+    if (notification_label_ != nullptr) {
+        lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_invalidate(status_label_);
 
     last_status_update_time_ = std::chrono::system_clock::now();
 }
@@ -107,7 +107,6 @@ void LvglDisplay::ShowNotification(const char* notification, int duration_ms) {
     }
     lv_label_set_text(notification_label_, notification);
     lv_obj_remove_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(status_label_, "");  // Clear status text to prevent ghost display
     lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
 
     esp_timer_stop(notification_timer_);
@@ -235,8 +234,25 @@ void LvglDisplay::SetPowerSaveMode(bool on) {
     }
 }
 
+void LvglDisplay::PrepareForReboot() {
+    DisplayLockGuard lock(this);
+    lv_obj_t* blackout = lv_obj_create(lv_screen_active());
+    if (blackout == nullptr) {
+        return;
+    }
+    lv_obj_set_size(blackout, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(blackout, 0, 0);
+    lv_obj_set_style_bg_color(blackout, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(blackout, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(blackout, 0, 0);
+    lv_obj_set_style_radius(blackout, 0, 0);
+    lv_obj_set_style_pad_all(blackout, 0, 0);
+    lv_obj_remove_flag(blackout, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_foreground(blackout);
+    lv_refr_now(display_);
+}
+
 bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
-#if CONFIG_XIAOZHI_ENABLE_SCREEN_SNAPSHOT_JPEG
 #if CONFIG_LV_USE_SNAPSHOT
     DisplayLockGuard lock(this);
 
@@ -254,8 +270,10 @@ bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
         data[i] = __builtin_bswap16(data[i]);
     }
 
+    // Clear output string and use callback version to avoid pre-allocating large memory blocks
     jpeg_data.clear();
 
+    // Use callback-based JPEG encoder to further save memory
     bool ret = image_to_jpeg_cb((uint8_t*)draw_buffer->data, draw_buffer->data_size, draw_buffer->header.w, draw_buffer->header.h, V4L2_PIX_FMT_RGB565, quality,
         [](void *arg, size_t index, const void *data, size_t len) -> size_t {
         std::string* output = static_cast<std::string*>(arg);
@@ -272,12 +290,6 @@ bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
     return ret;
 #else
     ESP_LOGE(TAG, "LV_USE_SNAPSHOT is not enabled");
-    return false;
-#endif
-#else
-    (void)jpeg_data;
-    (void)quality;
-    ESP_LOGW(TAG, "Screen snapshot JPEG is disabled");
     return false;
 #endif
 }

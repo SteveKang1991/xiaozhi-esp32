@@ -13,7 +13,7 @@
 #include "assets/lang_config.h"
 #include "../fanfuture-s6-wifi/power_manager.h"
 #include "../fanfuture-s6-wifi/lightam_controller.h"
-#include "../fanfuture-s6-wifi/fan_lcd20_display.h"
+#include "fan_lcd20_display.h"
 #include "../fanfuture-s6-wifi/custom_audio_codec.h"
 
 #include <wifi_station.h>

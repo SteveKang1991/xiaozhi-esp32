@@ -50,8 +50,10 @@ static const char *TAG = "MJPEG";
 #ifndef MJPEG_PANEL_HEIGHT
 #define MJPEG_PANEL_HEIGHT 320
 #endif
-/* LVGL 与面板共用同一 SPI 时，draw_bitmap 与 LVGL flush 仍须互斥，否则可能花屏/卡死；ROI 用短超时即可。 */
-#define MJPEG_ROI_LVGL_LOCK_MS      5
+/* LVGL 与面板共用同一 SPI 时，draw_bitmap 与 LVGL flush 仍须互斥。
+ * 稳定版 FanLcd 顶栏很轻；FanHolo 顶栏+字幕若用 SCROLL_CIRCULAR 会高频占锁。
+ * 5ms 太短 → 大量丢帧（chat 掉到 5fps）；与 LVGL_LOCK 对齐到 40ms。 */
+#define MJPEG_ROI_LVGL_LOCK_MS      40
 #define MJPEG_LVGL_LOCK_TIMEOUT_MS  40
 #define MJPEG_POST_LOCK_DRAIN_MS    0
 /* ROI band 行数：esp_lcd_panel_io 内部已按 max_transfer_sz 自动 DMA 分包，

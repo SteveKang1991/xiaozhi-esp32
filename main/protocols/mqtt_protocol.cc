@@ -149,7 +149,7 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         return false;
     }
-    mqtt_->Subscribe(subscribe_topic_.c_str(), 0);
+    mqtt_->Subscribe(subscribe_topic_.c_str(), 1);
     SendText(R"({"session_id":"3144dff0","type":"goodbye"})");
     //发布一个暂停的
     ESP_LOGI(TAG, "Connected to endpoint");
@@ -234,16 +234,20 @@ bool MqttProtocol::OpenAudioChannel() {
     }
 
     error_occurred_ = false;
+
     session_id_ = "";
     xEventGroupClearBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
-
-    auto message = GetHelloMessage();
-    if (!SendText(message)) {
+    waiting_for_server_hello_ = true;
+    if (!SendText(GetHelloMessage())) {
+        waiting_for_server_hello_ = false;
+        ESP_LOGE(TAG, "Failed to send hello");
+        SetError(Lang::Strings::SERVER_ERROR);
         return false;
     }
-
-    // 等待服务器响应
-    EventBits_t bits = xEventGroupWaitBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
+    EventBits_t bits = xEventGroupWaitBits(
+        event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE,
+        pdMS_TO_TICKS(2000));
+    waiting_for_server_hello_ = false;
     if (!(bits & MQTT_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");
         SetError(Lang::Strings::SERVER_TIMEOUT);
@@ -324,6 +328,10 @@ std::string MqttProtocol::GetHelloMessage() {
 }
 
 void MqttProtocol::ParseServerHello(const cJSON* root) {
+    if (!waiting_for_server_hello_) {
+        ESP_LOGW(TAG, "Ignore late server hello");
+        return;
+    }
     auto transport = cJSON_GetObjectItem(root, "transport");
     if (transport == nullptr || strcmp(transport->valuestring, "udp") != 0) {
         ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
@@ -447,7 +455,7 @@ EmotionFetchResult MqttProtocol::FetchDeviceEmotions() {
         cJSON* s = cJSON_GetObjectItem(item, "size");
         cJSON* w = cJSON_GetObjectItem(item, "width");
         cJSON* ht = cJSON_GetObjectItem(item, "height");
-
+        
         if (cJSON_IsString(t)) info.type = t->valuestring;
         if (cJSON_IsString(u)) info.url = u->valuestring;
         if (cJSON_IsString(h)) info.hash = h->valuestring;

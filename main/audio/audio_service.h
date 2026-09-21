@@ -129,10 +129,12 @@ public:
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
+    void ClearSendAndEncodeQueues();
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
+    void UpdateCustomWakeWord(const std::string& command, const std::string& text);
 
     // 新增--
     void UpdateOutputTimestamp();
