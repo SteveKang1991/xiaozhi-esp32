@@ -2,6 +2,7 @@
 #define LCD_DISPLAY_H
 
 #include "lvgl_display.h"
+#include "lvgl_font.h"
 #include "gif/lvgl_gif.h"
 
 #include <esp_lcd_panel_io.h>
@@ -153,5 +154,19 @@ public:
                    int width, int height, int offset_x, int offset_y,
                    bool mirror_x, bool mirror_y, bool swap_xy);
 };
+
+#if HAVE_LVGL
+/**
+ * @brief 暴露 InitializeLcdThemes() 提前从 assets 分区预加载的 text_font cbin 实例。
+ *
+ * Assets::Apply() 在异步刷新 theme 时调用本接口。若返回非 nullptr，表示 theme
+ * 已经在初始化阶段持有了同一份 cbin 字体，Apply() 直接 set_text_font() 复用，
+ * 不再 new 一份 LvglCBinFont，避免同一 mmap 数据被 cbin_font_create() 解析两次
+ * 后两个 std::shared_ptr 析构顺序不可控导致悬垂指针/双重释放。
+ *
+ * 仅在 LcdDisplay 类已经构造后才会有值；非 LVGL 配置下整个函数不存在。
+ */
+std::shared_ptr<LvglFont> LcdDisplay_GetPreloadedThemeFont();
+#endif  // HAVE_LVGL
 
 #endif // LCD_DISPLAY_H

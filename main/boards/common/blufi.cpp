@@ -30,7 +30,7 @@ extern "C" {
 }
 #endif
 
-#define BLUFI_DEVICE_NAME "Xiaozhi-Blufi"
+#define BLUFI_DEVICE_NAME "FanFutureAI"
 
 extern "C" {
 void esp_blufi_adv_start(void);
