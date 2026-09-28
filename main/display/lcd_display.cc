@@ -3,6 +3,8 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "assets/lang_config.h"
+#include "assets.h"
+#include "lvgl_font.h"
 
 #include <vector>
 #include <algorithm>
@@ -22,8 +24,59 @@ LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 LV_FONT_DECLARE(font_awesome_30_4);
 
+/* InitializeLcdThemes() 预加载的 cbin theme text_font 缓存，让 Assets::Apply() 复用同一份
+ * std::shared_ptr<LvglCBinFont>，避免再 cbin_font_create 一次造成堆指针所有权混乱。 */
+namespace {
+std::shared_ptr<LvglFont> g_preloaded_theme_font;
+}
+
+std::shared_ptr<LvglFont> LcdDisplay_GetPreloadedThemeFont() {
+    return g_preloaded_theme_font;
+}
+
 void LcdDisplay::InitializeLcdThemes() {
-    auto text_font = std::make_shared<LvglBuiltInFont>(&BUILTIN_TEXT_FONT);
+    /* 优先用 assets 分区的全字符 common 字体作为 theme 默认 text_font（与 assets.Apply()
+     * 后效果一致），这样设备启动后所有 widget 默认就是 common 字体，BLUFI/WIFI/启动
+     * 中文提示不会因 basic 字体丢字。读不到才回退 ROM 内置 BUILTIN_TEXT_FONT。
+     *
+     * 只 new 一次 LvglCBinFont，并缓存到 g_preloaded_theme_font 暴露给 assets.cc，
+     * 后续 Assets::LvglStrategy::Apply() 直接复用同一份实例，不再创建新 LvglCBinFont，
+     * 避免 cbin_font_create 跑两次造成堆指针所有权混乱（double-free / 悬垂指针）。 */
+    std::shared_ptr<LvglFont> text_font;
+    auto& assets = Assets::GetInstance();
+    if (assets.partition_valid()) {
+        void* ptr = nullptr;
+        size_t size = 0;
+        if (assets.GetAssetData("index.json", ptr, size)) {
+            cJSON* root = cJSON_ParseWithLength(static_cast<char*>(ptr), size);
+            if (root != nullptr) {
+                cJSON* font = cJSON_GetObjectItem(root, "text_font");
+                if (cJSON_IsString(font)) {
+                    std::string fonts_text_file = font->valuestring;
+                    if (assets.GetAssetData(fonts_text_file, ptr, size)) {
+                        auto cbin_font = std::make_shared<LvglCBinFont>(ptr);
+                        if (cbin_font->font() != nullptr) {
+                            text_font = cbin_font;
+                            g_preloaded_theme_font = cbin_font;
+                            ESP_LOGI(TAG, "Theme text_font loaded from assets: %s", fonts_text_file.c_str());
+                        } else {
+                            ESP_LOGE(TAG, "Failed to parse cbin font %s, falling back to BUILTIN_TEXT_FONT",
+                                     fonts_text_file.c_str());
+                        }
+                    } else {
+                        ESP_LOGE(TAG, "Font file %s not found in assets, falling back to BUILTIN_TEXT_FONT",
+                                 fonts_text_file.c_str());
+                    }
+                }
+                cJSON_Delete(root);
+            }
+        }
+    } else {
+        ESP_LOGW(TAG, "Assets partition invalid, using BUILTIN_TEXT_FONT");
+    }
+    if (text_font == nullptr) {
+        text_font = std::make_shared<LvglBuiltInFont>(&BUILTIN_TEXT_FONT);
+    }
     auto icon_font = std::make_shared<LvglBuiltInFont>(&BUILTIN_ICON_FONT);
     auto large_icon_font = std::make_shared<LvglBuiltInFont>(&font_awesome_30_4);
 

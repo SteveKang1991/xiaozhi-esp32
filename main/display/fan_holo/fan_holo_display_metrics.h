@@ -196,7 +196,7 @@ struct FanHoloMetrics {
             .mjpeg_h = 208,
             .mjpeg_idle_w = 192,
             .mjpeg_idle_h = 144,
-            .mjpeg_fps = 30,
+            .mjpeg_fps = 24,
             .music_cover_w = 297, /* CONFIG_LCD_CUSTOM 有效宽，非物理 320 */
             .music_cover_h = 240,
             .music_cover_top = 0,

@@ -13,7 +13,7 @@
 #include "wifi_manager.h"
 #include "esp_heap_caps.h"
 
-#define BLUFI_DEVICE_NAME "Xiaozhi-Blufi"
+#define BLUFI_DEVICE_NAME "FanFutureAI"
 
 #ifdef CONFIG_BT_BLUEDROID_ENABLED
 #include "esp_bt_device.h"

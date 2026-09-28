@@ -833,6 +833,7 @@ void Application::CheckDeviceInfo() {
     std::string url = "https://ai.fanfuture.cn/api/device/info?hardware_id=" + mac;
     http->SetHeader("Device-Id", mac.c_str());
     http->SetHeader("Client-Id", uuid.c_str());
+    ESP_LOGI(TAG, "Check device info mac: %s", mac.c_str());
 
     if (!http->Open("GET", url)) {
         ESP_LOGE(TAG, "Failed to open device info: %s", url.c_str());

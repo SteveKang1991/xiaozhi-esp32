@@ -243,10 +243,21 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
     if (cJSON_IsString(font)) {
         std::string fonts_text_file = font->valuestring;
         if (assets->GetAssetData(fonts_text_file, ptr, size)) {
-            auto text_font = std::make_shared<LvglCBinFont>(ptr);
-            if (text_font->font() == nullptr) {
-                ESP_LOGE(TAG, "Failed to load fonts.bin");
-                return false;
+            std::shared_ptr<LvglFont> text_font;
+            /* 关键：如果 LcdDisplay 启动时已经预加载了同一份 mmap 上的 cbin font
+             * （即 InitializeLcdThemes() 把 theme text_font 提前设成 common），
+             * 直接复用该 std::shared_ptr，不再 cbin_font_create()。两份独立的
+             * LvglCBinFont 会让 cbin_font_delete 跑两次，造成堆指针所有权混乱。 */
+            auto preloaded = LcdDisplay_GetPreloadedThemeFont();
+            if (preloaded != nullptr && preloaded->font() != nullptr) {
+                text_font = preloaded;
+                ESP_LOGI(TAG, "Reuse preloaded theme text_font from LcdDisplay init");
+            } else {
+                text_font = std::make_shared<LvglCBinFont>(ptr);
+                if (text_font->font() == nullptr) {
+                    ESP_LOGE(TAG, "Failed to load fonts.bin");
+                    return false;
+                }
             }
             if (light_theme != nullptr) {
                 light_theme->set_text_font(text_font);

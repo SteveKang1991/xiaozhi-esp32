@@ -383,7 +383,7 @@ public:
             WifiBoard::StartWifiConfigMode();
 
             // Show notification on display
-            std::string hint = std::string(Lang::Strings::BLUFI_CINFIG) + "Xiaozhi-Blufi";
+            std::string hint = std::string(Lang::Strings::BLUFI_CINFIG) + "FanFutureAI";
             Application::GetInstance().Alert(hint.c_str(), Lang::Strings::ENTERING_WIFI_CONFIG_MODE, "gear", Lang::Sounds::OGG_WIFICONFIG);
         }
     #endif
