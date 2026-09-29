@@ -116,6 +116,9 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
         Settings settings("wakeword", false);
         std::string nvs_command = settings.GetString("command");
         std::string nvs_text = settings.GetString("text");
+        // NVS 里的 threshold 是 UpdateCustomWakeWord 持久化的最新值，
+        // UpdateCustomWakeWord 可能先于 Initialize 被调用，所以这里恢复一下。
+        int nvs_threshold_pct = settings.GetInt("threshold", -1);
         if (!nvs_command.empty()) {
             commands_.clear();
             if (nvs_text.empty()) {
@@ -123,6 +126,9 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
             }
             commands_.push_back({nvs_command, nvs_text, "wake"});
             ESP_LOGI(TAG, "Loaded wake word from NVS: %s (%s)", nvs_command.c_str(), nvs_text.c_str());
+        }
+        if (nvs_threshold_pct >= 1 && nvs_threshold_pct <= 99) {
+            threshold_ = nvs_threshold_pct / 100.0f;
         }
     }
 
@@ -151,9 +157,8 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
 
     multinet_ = esp_mn_handle_from_name(mn_name_);
     multinet_model_data_ = multinet_->create(mn_name_, duration_);
-#ifdef CONFIG_CUSTOM_WAKE_WORD
-    threshold_ = CONFIG_CUSTOM_WAKE_WORD_THRESHOLD / 100.0f;
-#endif
+
+    // threshold_ 已在上面的 NVS 段恢复成最新持久化值；这里直接 Apply
     multinet_->set_det_threshold(multinet_model_data_, threshold_);
     esp_mn_commands_clear();
     for (int i = 0; i < commands_.size(); i++) {
@@ -176,22 +181,29 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
     return true;
 }
 
-void CustomWakeWord::UpdateWakeCommand(const std::string& command, const std::string& text) {
+void CustomWakeWord::UpdateWakeCommand(const std::string& command, const std::string& text, int threshold) {
     if (command.empty()) {
         return;
     }
     std::string display = text.empty() ? command : text;
     commands_.clear();
     commands_.push_back({command, display, "wake"});
-    ESP_LOGI(TAG, "Update wake command: %s (%s)", command.c_str(), display.c_str());
+    ESP_LOGI(TAG, "Update wake command: %s (%s) threshold=%d", command.c_str(), display.c_str(), threshold);
 
+    // 数据库中存的是 1-99 的百分比，在这里转换为 0.01-0.99 给到识别器
+    threshold_ = threshold / 100.0f;
+
+    // 命令表必须重建（multinet 需要）
     if (multinet_ == nullptr || multinet_model_data_ == nullptr) {
+        // Initialize 尚未跑，命令/阈值会被 Initialize 末尾统一应用
         return;
     }
     esp_mn_commands_clear();
     esp_mn_commands_add(1, command.c_str());
     esp_mn_commands_update();
+    multinet_->set_det_threshold(multinet_model_data_, threshold_);
     multinet_->print_active_speech_commands(multinet_model_data_);
+    ESP_LOGI(TAG, "Wake word detection threshold set to %.2f", threshold_);
 }
 
 void CustomWakeWord::OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback) {

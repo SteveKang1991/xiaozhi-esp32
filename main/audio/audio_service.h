@@ -134,7 +134,7 @@ public:
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
-    void UpdateCustomWakeWord(const std::string& command, const std::string& text);
+    void UpdateCustomWakeWord(const std::string& command, const std::string& text, int threshold = 20);
 
     // 新增--
     void UpdateOutputTimestamp();

@@ -439,10 +439,22 @@ void Application::CheckDeviceInfo() {
         return;
     }
 
+    // 角色名称、唤醒词
     cJSON* command_item = cJSON_GetObjectItem(data, "assistant_command");
     cJSON* name_item = cJSON_GetObjectItem(data, "assistant_name");
     std::string command = cJSON_IsString(command_item) ? command_item->valuestring : "";
     std::string text = cJSON_IsString(name_item) ? name_item->valuestring : "";
+
+    // 唤醒词灵敏度：数据库存的是 1-99 的百分比
+    cJSON* threshold_item = cJSON_GetObjectItem(data, "assistant_threshold");
+    int threshold_pct = 10; // 默认 10%
+    if (cJSON_IsNumber(threshold_item)) {
+        threshold_pct = threshold_item->valueint;
+    } else if (cJSON_IsString(threshold_item) && threshold_item->valuestring != nullptr) {
+        threshold_pct = atoi(threshold_item->valuestring);
+    }
+    if (threshold_pct < 1) threshold_pct = 1;
+    if (threshold_pct > 99) threshold_pct = 99;
 
     cJSON* addr_item = cJSON_GetObjectItem(data, "address");
     std::string address = (cJSON_IsString(addr_item) && addr_item->valuestring != nullptr)
@@ -481,8 +493,8 @@ void Application::CheckDeviceInfo() {
         return;
     }
 
-    ESP_LOGI(TAG, "Device wake word: %s (%s)", command.c_str(), text.c_str());
-    audio_service_.UpdateCustomWakeWord(command, text);
+    ESP_LOGI(TAG, "Device wake word: %s (%s) threshold=%d%%", command.c_str(), text.c_str(), threshold_pct);
+    audio_service_.UpdateCustomWakeWord(command, text, threshold_pct);
 }
 
 void Application::RefreshIdleWeather() {

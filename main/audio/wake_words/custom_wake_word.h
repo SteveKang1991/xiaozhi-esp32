@@ -26,7 +26,7 @@ public:
     ~CustomWakeWord();
 
     bool Initialize(AudioCodec* codec, srmodel_list_t* models_list);
-    void UpdateWakeCommand(const std::string& command, const std::string& text);
+    void UpdateWakeCommand(const std::string& command, const std::string& text, int threshold = 20);
     void Feed(const std::vector<int16_t>& data);
     void OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback);
     void Start();
