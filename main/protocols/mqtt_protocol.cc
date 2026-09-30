@@ -180,7 +180,7 @@ bool MqttProtocol::SendText(const std::string& text) {
         return false;
     }
 
-        //ESP_LOGI(TAG, "申请消息通道 topic %s  payload %s",publish_topic_.c_str(),payload.c_str());
+        ESP_LOGI(TAG, "申请消息通道 topic %s  payload %s",publish_topic_.c_str(),payload.c_str());
 
     return true;
   
