@@ -686,10 +686,14 @@ std::string FanHoloDisplay::FindRoleAnimation(const char* state) {
     unsigned ch = 0;
     MjpegResForClip(state, &cw, &ch);
     char path[128];
-    snprintf(path, sizeof(path), "/sdcard/Emotion/%s-%ux%u.mjpeg", state, cw, ch);
-    if (FileExists(path)) {
-        ESP_LOGI(metrics_.tag, "FindRoleAnimation: found %s", path);
-        return path;
+    Settings device_settings("device", false);
+    int robot_id = device_settings.GetInt("robot_id", 0);
+    if (robot_id > 0) {
+        snprintf(path, sizeof(path), "/sdcard/Emotion/%d-%s-%ux%u.mjpeg", robot_id, state, cw, ch);
+        if (FileExists(path)) {
+            ESP_LOGI(metrics_.tag, "FindRoleAnimation: found %s", path);
+            return path;
+        }
     }
 
     snprintf(path, sizeof(path), "/sdcard/Emotion/default-%s-%ux%u.mjpeg", state, cw, ch);

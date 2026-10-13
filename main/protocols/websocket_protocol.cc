@@ -130,8 +130,10 @@ EmotionFetchResult WebsocketProtocol::FetchDeviceEmotions() {
         cJSON* s = cJSON_GetObjectItem(item, "size");
         cJSON* w = cJSON_GetObjectItem(item, "width");
         cJSON* ht = cJSON_GetObjectItem(item, "height");
+        cJSON* rid = cJSON_GetObjectItem(item, "robot_id");
         
         if (cJSON_IsString(t)) info.type = t->valuestring;
+        if (cJSON_IsNumber(rid)) info.robot_id = rid->valueint;
         if (cJSON_IsString(u)) info.url = u->valuestring;
         if (cJSON_IsString(h)) info.hash = h->valuestring;
         if (cJSON_IsNumber(s)) info.size = (size_t)s->valuedouble;

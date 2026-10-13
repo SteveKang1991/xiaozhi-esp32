@@ -439,6 +439,26 @@ void Application::CheckDeviceInfo() {
         return;
     }
 
+    // 角色id
+    cJSON* robot_item = cJSON_GetObjectItem(data, "robot_id");
+    int robot_id = 0;
+    if (cJSON_IsNumber(robot_item)) {
+        robot_id = robot_item->valueint;
+    } else if (cJSON_IsString(robot_item) && robot_item->valuestring != nullptr) {
+        robot_id = atoi(robot_item->valuestring);
+    }
+    {
+        Settings device_settings("device", true);
+        device_settings.SetInt("robot_id", robot_id);
+    }
+    ESP_LOGI(TAG, "Device robot_id: %d", robot_id);
+    if (GetDeviceState() == kDeviceStateIdle) {
+        auto idle_display = Board::GetInstance().GetDisplay();
+        if (idle_display != nullptr) {
+            idle_display->SetRoleAnimation("idle");
+        }
+    }
+
     // 角色名称、唤醒词
     cJSON* command_item = cJSON_GetObjectItem(data, "assistant_command");
     cJSON* name_item = cJSON_GetObjectItem(data, "assistant_name");
@@ -717,13 +737,33 @@ static const char* kEmotionTag = "EmotionSync";
 static constexpr const char* kEmotionDir = "/sdcard/Emotion";
 
 /**
- * 根据表情类型和分辨率生成本地保存路径
- * 格式: /sdcard/Emotion/{type}-{width}x{height}.mjpeg
+ * 根据角色、表情类型和分辨率生成本地保存路径
+ * 格式: /sdcard/Emotion/{robot_id}-{type}-{width}x{height}.mjpeg
  */
-static std::string MakeEmotionLocalPath(const std::string& type, int width, int height) {
-    char suffix[64];
-    snprintf(suffix, sizeof(suffix), "-%dx%d.mjpeg", width, height);
-    return std::string(kEmotionDir) + "/" + type + suffix;
+static std::string MakeEmotionLocalPath(int robot_id, const std::string& type, int width, int height) {
+    char name[96];
+    snprintf(name, sizeof(name), "%d-%s-%dx%d.mjpeg", robot_id, type.c_str(), width, height);
+    return std::string(kEmotionDir) + "/" + name;
+}
+
+static bool IsRoleEmotionFile(const std::string& name) {
+    if (name.rfind("default-", 0) == 0) {
+        return false;
+    }
+    if (name.rfind("idle-", 0) == 0 || name.rfind("listen-", 0) == 0 || name.rfind("speak-", 0) == 0) {
+        return true;
+    }
+    size_t dash = name.find('-');
+    if (dash == std::string::npos || dash == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < dash; ++i) {
+        if (name[i] < '0' || name[i] > '9') {
+            return false;
+        }
+    }
+    std::string rest = name.substr(dash + 1);
+    return rest.rfind("idle-", 0) == 0 || rest.rfind("listen-", 0) == 0 || rest.rfind("speak-", 0) == 0;
 }
 
 static bool EnsureEmotionDir() {
@@ -785,12 +825,12 @@ void Application::CheckEmotionFiles() {
     int total_count = 0;
 
     for (auto& info : emotions) {
-        if (info.type.empty() || info.url.empty()) {
+        if (info.robot_id <= 0 || info.type.empty() || info.url.empty()) {
             continue;
         }
         int width = info.width > 0 ? info.width : 240;
         int height = info.height > 0 ? info.height : 290;
-        info.local_path = MakeEmotionLocalPath(info.type, width, height);
+        info.local_path = MakeEmotionLocalPath(info.robot_id, info.type, width, height);
 
         // 检查本地是否已存在且MD5匹配
         struct stat st = {};
@@ -832,10 +872,10 @@ void Application::CheckEmotionFiles() {
     size_t latest_speed_bps = 0;
     // 先按 info.size 算出待下载总字节（已存在的跳过）
     for (const auto& info : emotions) {
-        if (info.type.empty() || info.url.empty()) continue;
+        if (info.robot_id <= 0 || info.type.empty() || info.url.empty()) continue;
         int width = info.width > 0 ? info.width : 240;
         int height = info.height > 0 ? info.height : 290;
-        std::string local_path = MakeEmotionLocalPath(info.type, width, height);
+        std::string local_path = MakeEmotionLocalPath(info.robot_id, info.type, width, height);
         struct stat st = {};
         if (stat(local_path.c_str(), &st) == 0 && st.st_size > 0 && st.st_size == (off_t)info.size) {
             std::string local_md5 = MD5::Calculate(local_path);
@@ -847,12 +887,12 @@ void Application::CheckEmotionFiles() {
     }
 
     for (auto& info : emotions) {
-        if (info.type.empty() || info.url.empty()) {
+        if (info.robot_id <= 0 || info.type.empty() || info.url.empty()) {
             continue;
         }
         int width = info.width > 0 ? info.width : 240;
         int height = info.height > 0 ? info.height : 290;
-        info.local_path = MakeEmotionLocalPath(info.type, width, height);
+        info.local_path = MakeEmotionLocalPath(info.robot_id, info.type, width, height);
 
         // 检查本地是否已存在且MD5匹配
         struct stat st = {};
@@ -1336,11 +1376,8 @@ void Application::CleanOrphanEmotionFiles(const std::vector<std::string>& valid_
         if (name.empty() || name[0] == '.' || name == "System Volume Information") {
             continue;
         }
-        // 只清理角色动画（idle-、listen-、speak-），不碰其他表情文件
-        if (name.find(".mjpeg") == std::string::npos) {
-            continue;
-        }
-        if (name.rfind("idle-", 0) != 0 && name.rfind("listen-", 0) != 0 && name.rfind("speak-", 0) != 0) {
+        // 只清理角色动画，不碰 default- 和其他文件
+        if (name.find(".mjpeg") == std::string::npos || !IsRoleEmotionFile(name)) {
             continue;
         }
 

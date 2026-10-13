@@ -41,6 +41,7 @@ struct EmotionInfo {
     size_t size = 0;        // 文件大小
     int width = 0;          // MJPEG 视频宽度
     int height = 0;         // MJPEG 视频高度
+    int robot_id = 0;       // 角色 id，本地文件名前缀
     std::string local_path;  // 设备本地保存路径（构造时填充）
 };
 
