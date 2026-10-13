@@ -717,6 +717,15 @@ void FanHoloDisplay::FillClipName(char* out, size_t out_size, const char* name) 
     unsigned cw = 0;
     unsigned ch = 0;
     MjpegResForClip(state, &cw, &ch);
+    /* 自定义角色动画带 robot_id 前缀；default-* 不加 */
+    if (name != nullptr && strncmp(name, "default-", 8) != 0) {
+        Settings device_settings("device", false);
+        int robot_id = device_settings.GetInt("robot_id", 0);
+        if (robot_id > 0) {
+            snprintf(out, out_size, "%d-%s-%ux%u.mjpeg", robot_id, name, cw, ch);
+            return;
+        }
+    }
     snprintf(out, out_size, "%s-%ux%u.mjpeg", name, cw, ch);
 }
 
@@ -742,24 +751,28 @@ void FanHoloDisplay::ScanEmotionClips() {
         return loc;
     };
 
+    Settings device_settings("device", false);
+    int robot_id = device_settings.GetInt("robot_id", 0);
     const char* user_names[3] = { "idle", "listen", "speak" };
-    for (int i = 0; i < 3; i++) {
-        char n[48];
-        FillClipName(n, sizeof(n), user_names[i]);
-        ClipLoc loc = try_find(n);
-        if (loc.valid()) {
-            if (i == 0) {
-                clip_cache_.idle = loc;
-            } else if (i == 1) {
-                clip_cache_.listen = loc;
-            } else {
-                clip_cache_.speak = loc;
+    if (robot_id > 0) {
+        for (int i = 0; i < 3; i++) {
+            char n[96];
+            FillClipName(n, sizeof(n), user_names[i]);
+            ClipLoc loc = try_find(n);
+            if (loc.valid()) {
+                if (i == 0) {
+                    clip_cache_.idle = loc;
+                } else if (i == 1) {
+                    clip_cache_.listen = loc;
+                } else {
+                    clip_cache_.speak = loc;
+                }
             }
         }
     }
 
     /* 各状态独立 default-{state}-{WxH}，分辨率随状态变 */
-    char dn[48];
+    char dn[96];
     FillClipName(dn, sizeof(dn), "default-idle");
     clip_cache_.default_clip = try_find(dn);
 
@@ -850,30 +863,34 @@ FanHoloDisplay::ClipLoc FanHoloDisplay::FindRoleAnimation(const char* state) {
     unsigned ch = 0;
     MjpegResForClip(state, &cw, &ch);
 
-    char path[64];
-    snprintf(path, sizeof(path), "%s-%ux%u.mjpeg", state, cw, ch);
+    char path[96];
     ClipLoc loc;
-    if (emotion_partition_storage_find(path, &loc.offset, &loc.size)) {
-        loc.name = path;
-        ESP_LOGI(metrics_.tag, "FindRoleAnimation: found %s", path);
-        return loc;
-    }
+    Settings device_settings("device", false);
+    int robot_id = device_settings.GetInt("robot_id", 0);
+    if (robot_id > 0) {
+        snprintf(path, sizeof(path), "%d-%s-%ux%u.mjpeg", robot_id, state, cw, ch);
+        if (emotion_partition_storage_find(path, &loc.offset, &loc.size)) {
+            loc.name = path;
+            ESP_LOGI(metrics_.tag, "FindRoleAnimation: found %s", path);
+            return loc;
+        }
 
-    /* 兼容：已下载但分辨率字段与板子期望不一致（如 listen-160x208） */
-    char prefix[24];
-    snprintf(prefix, sizeof(prefix), "%s-", state);
-    FindByPrefixCtx ctx{};
-    ctx.prefix = prefix;
-    ctx.prefix_len = strlen(prefix);
-    ctx.prefer_name = path;
-    ctx.found[0] = '\0';
-    emotion_partition_storage_enum(FindByPrefixCb, &ctx);
-    if (ctx.hit) {
-        loc.name = ctx.found;
-        loc.offset = ctx.offset;
-        loc.size = ctx.size;
-        ESP_LOGW(metrics_.tag, "FindRoleAnimation: exact %s missing, using %s", path, ctx.found);
-        return loc;
+        /* 兼容：已下载但分辨率字段与板子期望不一致（如 12-listen-160x208） */
+        char prefix[40];
+        snprintf(prefix, sizeof(prefix), "%d-%s-", robot_id, state);
+        FindByPrefixCtx ctx{};
+        ctx.prefix = prefix;
+        ctx.prefix_len = strlen(prefix);
+        ctx.prefer_name = path;
+        ctx.found[0] = '\0';
+        emotion_partition_storage_enum(FindByPrefixCb, &ctx);
+        if (ctx.hit) {
+            loc.name = ctx.found;
+            loc.offset = ctx.offset;
+            loc.size = ctx.size;
+            ESP_LOGW(metrics_.tag, "FindRoleAnimation: exact %s missing, using %s", path, ctx.found);
+            return loc;
+        }
     }
 
     snprintf(path, sizeof(path), "default-%s-%ux%u.mjpeg", state, cw, ch);

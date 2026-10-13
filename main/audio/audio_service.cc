@@ -733,7 +733,7 @@ void AudioService::SetModelsList(srmodel_list_t* models_list) {
     }
 }
 
-void AudioService::UpdateCustomWakeWord(const std::string& command, const std::string& text) {
+void AudioService::UpdateCustomWakeWord(const std::string& command, const std::string& text, int threshold) {
     if (command.empty()) {
         return;
     }
@@ -741,11 +741,12 @@ void AudioService::UpdateCustomWakeWord(const std::string& command, const std::s
         Settings settings("wakeword", true);
         settings.SetString("command", command);
         settings.SetString("text", text);
+        settings.SetInt("threshold", threshold);
     }
 #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
     auto* custom = dynamic_cast<CustomWakeWord*>(wake_word_.get());
     if (custom != nullptr) {
-        custom->UpdateWakeCommand(command, text);
+        custom->UpdateWakeCommand(command, text, threshold);
     }
 #endif
 }

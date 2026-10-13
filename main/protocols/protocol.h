@@ -46,6 +46,7 @@ struct EmotionInfo {
     size_t size = 0;         // 文件大小
     int width = 0;           // MJPEG 视频宽度
     int height = 0;          // MJPEG 视频高度
+    int robot_id = 0;        // 角色 id，本地文件名前缀
     std::string local_path;  // 设备本地保存路径（旧 SD 路径形式，仅用于日志/兼容）
     std::string asset_name;  // flash 资产名（写入 emotion_partition_storage 用）
 };

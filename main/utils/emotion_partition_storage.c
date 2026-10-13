@@ -172,6 +172,9 @@ static bool partition_has_room(uint32_t data_offset, uint32_t data_size) {
     return true;
 }
 
+/* 调用方必须已持有 s_mutex */
+static esp_err_t emotion_partition_storage_defragment_locked(void);
+
 esp_err_t emotion_partition_storage_init(void) {
     if (s_part && s_mutex) return ESP_OK;
 
@@ -321,7 +324,7 @@ esp_err_t emotion_partition_storage_upsert(const char* name, const void* data, s
     if (s_header.deleted_count >= EMOTION_DEFRAG_THRESHOLD) {
         ESP_LOGI(TAG, "deleted_count=%u 达阈值 %u，触发碎片整理",
                  (unsigned)s_header.deleted_count, EMOTION_DEFRAG_THRESHOLD);
-        ret = emotion_partition_storage_defragment();
+        ret = emotion_partition_storage_defragment_locked();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "defragment 失败: %s", esp_err_to_name(ret));
             goto out;
@@ -340,10 +343,29 @@ esp_err_t emotion_partition_storage_upsert(const char* name, const void* data, s
     uint32_t off = align_up(compute_data_end(), EMOTION_STORAGE_ALIGN);
     uint32_t pad = align_up((uint32_t)size, EMOTION_STORAGE_ALIGN);
     if (!partition_has_room(off, pad)) {
-        ESP_LOGE(TAG, "分区空间不足: need off=0x%x+%u, part_size=%lu",
-                 (unsigned)off, (unsigned)pad, (unsigned long)s_part->size);
-        ret = ESP_ERR_NO_MEM;
-        goto out;
+        /* 有已删除条目时先整理回收空间，再重试一次（换角色时常见） */
+        if (s_header.deleted_count > 0) {
+            ESP_LOGW(TAG, "分区空间不足，尝试 defrag 回收 deleted=%u",
+                     (unsigned)s_header.deleted_count);
+            ret = emotion_partition_storage_defragment_locked();
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "defragment 失败: %s", esp_err_to_name(ret));
+                goto out;
+            }
+            slot = find_free_entry_slot();
+            if (slot < 0) {
+                ESP_LOGE(TAG, "defrag 后 entry 仍满");
+                ret = ESP_ERR_NO_MEM;
+                goto out;
+            }
+            off = align_up(compute_data_end(), EMOTION_STORAGE_ALIGN);
+        }
+        if (!partition_has_room(off, pad)) {
+            ESP_LOGE(TAG, "分区空间不足: need off=0x%x+%u, part_size=%lu",
+                     (unsigned)off, (unsigned)pad, (unsigned long)s_part->size);
+            ret = ESP_ERR_NO_MEM;
+            goto out;
+        }
     }
     ESP_LOGI(TAG, "新增 %s (offset=0x%x size=%u pad=%u slot=%d)",
              name, (unsigned)off, (unsigned)size, (unsigned)pad, slot);
@@ -387,8 +409,7 @@ esp_err_t emotion_partition_storage_delete(const char* name) {
     return ret;
 }
 
-esp_err_t emotion_partition_storage_defragment(void) {
-    /* 假设调用方已持有 mutex */
+static esp_err_t emotion_partition_storage_defragment_locked(void) {
     if (!s_part) return ESP_ERR_INVALID_STATE;
 
     /* 1) 收集所有 VALID entries（按原 offset 升序，保证稳定） */
@@ -505,6 +526,17 @@ esp_err_t emotion_partition_storage_defragment(void) {
     free(blob);
     ESP_LOGI(TAG, "defragment: 完成");
     return ESP_OK;
+}
+
+esp_err_t emotion_partition_storage_defragment(void) {
+    if (!s_part) {
+        esp_err_t r = emotion_partition_storage_init();
+        if (r != ESP_OK) return r;
+    }
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    esp_err_t ret = emotion_partition_storage_defragment_locked();
+    xSemaphoreGive(s_mutex);
+    return ret;
 }
 
 bool emotion_partition_storage_find(const char* name, uint32_t* out_offset, uint32_t* out_size) {

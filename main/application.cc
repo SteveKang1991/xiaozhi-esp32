@@ -36,13 +36,13 @@
 static const char* kEmotionTag = "EmotionSync";
 
 /**
- * 把表情 type + 分辨率打包成 flash 资产名（写入 emotion_partition_storage 用）。
- * 形如 "idle-240x290.mjpeg"。
+ * 把角色 id + 表情 type + 分辨率打包成 flash 资产名（写入 emotion_partition_storage 用）。
+ * 形如 "{robot_id}-idle-240x290.mjpeg"。
  */
-static std::string MakeEmotionAssetName(const std::string& type, int width, int height) {
-    char suffix[64];
-    snprintf(suffix, sizeof(suffix), "-%dx%d.mjpeg", width, height);
-    return type + suffix;
+static std::string MakeEmotionAssetName(int robot_id, const std::string& type, int width, int height) {
+    char name[96];
+    snprintf(name, sizeof(name), "%d-%s-%dx%d.mjpeg", robot_id, type.c_str(), width, height);
+    return name;
 }
 
 /**
@@ -75,8 +75,44 @@ static void ResolveEmotionAssetSize(const std::string& type, int server_w, int s
  * 兼容旧代码：返回 asset_name（与 MakeEmotionAssetName 同义）。
  * 旧版返回 "/sdcard/Emotion/<type>-<W>x<H>.mjpeg"，新版等价于纯文件名。
  */
-static std::string MakeEmotionLocalPath(const std::string& type, int width, int height) {
-    return MakeEmotionAssetName(type, width, height);
+static std::string MakeEmotionLocalPath(int robot_id, const std::string& type, int width, int height) {
+    return MakeEmotionAssetName(robot_id, type, width, height);
+}
+
+/** 角色动画文件名：{robot_id}-{idle|listen|speak}-... 或旧式 idle-/listen-/speak-；不含 default- */
+static bool IsRoleEmotionFile(const std::string& name) {
+    if (name.rfind("default-", 0) == 0) {
+        return false;
+    }
+    if (name.rfind("idle-", 0) == 0 || name.rfind("listen-", 0) == 0 || name.rfind("speak-", 0) == 0) {
+        return true;
+    }
+    size_t dash = name.find('-');
+    if (dash == std::string::npos || dash == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < dash; ++i) {
+        if (name[i] < '0' || name[i] > '9') {
+            return false;
+        }
+    }
+    std::string rest = name.substr(dash + 1);
+    return rest.rfind("idle-", 0) == 0 || rest.rfind("listen-", 0) == 0 || rest.rfind("speak-", 0) == 0;
+}
+
+/**
+ * 从角色动画文件名解析 robot_id。
+ * 返回：>0 带前缀；0 旧式 idle-/listen-/speak-；<0 非角色动画。
+ */
+static int RoleEmotionRobotId(const std::string& name) {
+    if (!IsRoleEmotionFile(name)) {
+        return -1;
+    }
+    if (name.rfind("idle-", 0) == 0 || name.rfind("listen-", 0) == 0 || name.rfind("speak-", 0) == 0) {
+        return 0;
+    }
+    size_t dash = name.find('-');
+    return atoi(name.substr(0, dash).c_str());
 }
 
 /** 检查 flash 中文件存在且大小匹配；如需 MD5 校验可读取整文件 */
@@ -123,6 +159,40 @@ static bool EnsureEmotionDir() {
     return true;
 }
 
+/**
+ * emotions 分区空间有限：除 default-* 外只保留当前 robot_id 的一份角色动画。
+ * 删除其它角色（及旧式无前缀）文件；返回删除个数。不碰 default-*。
+ */
+static int PurgeOtherRoleEmotionFiles(int keep_robot_id) {
+    struct PurgeCtx {
+        int keep_robot_id = 0;
+        int deleted = 0;
+    } ctx{keep_robot_id, 0};
+
+    emotion_partition_storage_enum([](const char* name, uint32_t, uint32_t, void* user) {
+        auto* c = static_cast<PurgeCtx*>(user);
+        if (!name) {
+            return;
+        }
+        int rid = RoleEmotionRobotId(name);
+        if (rid < 0) {
+            return; /* default-* 或其它非角色文件 */
+        }
+        /* keep_robot_id<=0：清光所有角色动画；否则只留同 id */
+        if (c->keep_robot_id > 0 && rid == c->keep_robot_id) {
+            return;
+        }
+        esp_err_t er = emotion_partition_storage_delete(name);
+        if (er == ESP_OK) {
+            ESP_LOGI(kEmotionTag, "PurgeOtherRole: 删除旧角色文件 %s (keep=%d)",
+                     name, c->keep_robot_id);
+            c->deleted++;
+        }
+    }, &ctx);
+
+    return ctx.deleted;
+}
+
 void Application::CheckEmotionFiles() {
     if (ota_ == nullptr) {
         return;
@@ -132,6 +202,12 @@ void Application::CheckEmotionFiles() {
         ESP_LOGW(kEmotionTag, "Emotion directory unavailable, skip sync");
         return;
     }
+
+    /* 当前角色：由 CheckDeviceInfo 先行写入 NVS；分区只保留这一份 + default-* */
+    Settings device_settings("device", false);
+    const int current_robot_id = device_settings.GetInt("robot_id", 0);
+    ESP_LOGI(kEmotionTag, "Sync emotions for robot_id=%d (partition keeps only this role + default-*)",
+             current_robot_id);
 
     // 获取服务器表情列表
     EmotionFetchResult fetch_result;
@@ -160,33 +236,57 @@ void Application::CheckEmotionFiles() {
 
     ESP_LOGI(kEmotionTag, "Fetched %d emotion(s) from server", (int)fetch_result.emotions.size());
 
-    // 服务器返回空列表：自定义 idle/listen/speak 全部删掉（不碰 default-*）
-    // CleanOrphan 的参数是「保留名单」——空列表 = 删光所有角色动画
-    if (fetch_result.emotions.empty()) {
+    /* 只同步当前角色；无 robot_id 时不拉自定义，清光角色动画走 default */
+    std::vector<EmotionInfo> emotions;
+    emotions.reserve(fetch_result.emotions.size());
+    for (auto& info : fetch_result.emotions) {
+        if (info.robot_id <= 0 || info.type.empty() || info.url.empty()) {
+            continue;
+        }
+        if (current_robot_id > 0 && info.robot_id != current_robot_id) {
+            ESP_LOGD(kEmotionTag, "Skip emotion robot_id=%d (current=%d)",
+                     info.robot_id, current_robot_id);
+            continue;
+        }
+        if (current_robot_id <= 0) {
+            continue;
+        }
+        emotions.push_back(std::move(info));
+    }
+
+    /* 先删其它角色文件并整理分区，腾出空间再下载当前角色 */
+    int purged = PurgeOtherRoleEmotionFiles(current_robot_id);
+    if (purged > 0) {
+        ESP_LOGI(kEmotionTag, "Purged %d other-role file(s), defragmenting emotions partition", purged);
+        esp_err_t dr = emotion_partition_storage_defragment();
+        if (dr != ESP_OK) {
+            ESP_LOGE(kEmotionTag, "defragment failed: %s", esp_err_to_name(dr));
+        }
+    }
+
+    // 无可同步角色动画：清光自定义角色文件（不碰 default-*）
+    if (emotions.empty()) {
         CleanOrphanEmotionFiles({});
+        /* CleanOrphan / Purge 只标删，整理后才真正腾出空间 */
+        emotion_partition_storage_defragment();
         if (auto* d = Board::GetInstance().GetDisplay()) {
             d->OnEmotionsUpdated();
         }
-        ESP_LOGI(kEmotionTag, "No role emotions on server, cleared custom role files (kept default-*)");
+        ESP_LOGI(kEmotionTag, "No current-role emotions, cleared custom role files (kept default-*)");
         return;
     }
 
-    std::vector<EmotionInfo>& emotions = fetch_result.emotions;
-
-    // 对比服务器列表与 flash 资产，同步表情
+    // 对比服务器列表与 flash 资产，同步当前角色表情
     std::vector<std::string> valid_asset_names;
     int download_count = 0;
     int total_count = 0;
 
     for (auto& info : emotions) {
-        if (info.type.empty() || info.url.empty()) {
-            continue;
-        }
         int width = 0;
         int height = 0;
         ResolveEmotionAssetSize(info.type, info.width, info.height, &width, &height);
-        info.local_path = MakeEmotionLocalPath(info.type, width, height);
-        info.asset_name = MakeEmotionAssetName(info.type, width, height);
+        info.local_path = MakeEmotionLocalPath(info.robot_id, info.type, width, height);
+        info.asset_name = MakeEmotionAssetName(info.robot_id, info.type, width, height);
 
         // 检查本地 flash 中是否已存在且大小/MD5匹配
         if (IsEmotionFileUpToDate(info.asset_name, info.size, info.hash)) {
@@ -225,7 +325,7 @@ void Application::CheckEmotionFiles() {
     size_t bytes_total_sum = 0;
     size_t latest_speed_bps = 0;
     for (const auto& info : emotions) {
-        if (info.type.empty() || info.url.empty() || info.asset_name.empty()) continue;
+        if (info.asset_name.empty()) continue;
         if (IsEmotionFileUpToDate(info.asset_name, info.size, info.hash)) {
             continue;
         }
@@ -233,7 +333,7 @@ void Application::CheckEmotionFiles() {
     }
 
     for (auto& info : emotions) {
-        if (info.type.empty() || info.url.empty() || info.asset_name.empty()) {
+        if (info.asset_name.empty()) {
             continue;
         }
 
@@ -403,7 +503,7 @@ void Application::ProcessEmotionFile(const EmotionInfo& info, DownloadProgressCa
 
 /**
  * 删除 flash asset 表中不在 valid_asset_names 列表里的"角色动画"文件。
- * 只删除 idle-/listen-/speak- 前缀的文件；default-* 等不出现在这里的不会被删。
+ * 只删除角色动画（含 {robot_id}-idle/listen/speak-）；不碰 default-* 和其他文件。
  *
  * 不再操作 SD 卡（项目已不再用 SD 存表情）。
  */
@@ -414,17 +514,10 @@ struct OrphanCtx {
     int kept = 0;
 };
 
-static bool IsRoleAnimationName(const char* name) {
-    if (!name) return false;
-    return (strncmp(name, "idle-", 5) == 0
-         || strncmp(name, "listen-", 7) == 0
-         || strncmp(name, "speak-", 6) == 0);
-}
-
 static void CleanOrphanEmotionFiles_Cb(const char* name, uint32_t offset, uint32_t size, void* user) {
     (void)offset; (void)size;
     OrphanCtx* ctx = static_cast<OrphanCtx*>(user);
-    if (!IsRoleAnimationName(name)) {
+    if (!name || !IsRoleEmotionFile(name)) {
         ctx->kept++;
         return;
     }
@@ -803,11 +896,9 @@ void Application::ActivationTask() {
     // Initialize the protocol
     InitializeProtocol();
 
-    // Sync emotion files from server
-    CheckEmotionFiles();
-
-    // 拉取设备信息，加载自定义唤醒词拼音
+    // 先拉设备信息（含 robot_id），再同步表情：分区只保留当前角色 + default-*
     CheckDeviceInfo();
+    CheckEmotionFiles();
     ReportDeviceInfo();
 
     // Signal completion to main loop
@@ -866,10 +957,42 @@ void Application::CheckDeviceInfo() {
         return;
     }
 
+    // 角色id
+    cJSON* robot_item = cJSON_GetObjectItem(data, "robot_id");
+    int robot_id = 0;
+    if (cJSON_IsNumber(robot_item)) {
+        robot_id = robot_item->valueint;
+    } else if (cJSON_IsString(robot_item) && robot_item->valuestring != nullptr) {
+        robot_id = atoi(robot_item->valuestring);
+    }
+    {
+        Settings device_settings("device", true);
+        device_settings.SetInt("robot_id", robot_id);
+    }
+    ESP_LOGI(TAG, "Device robot_id: %d", robot_id);
+    if (GetDeviceState() == kDeviceStateIdle) {
+        auto idle_display = Board::GetInstance().GetDisplay();
+        if (idle_display != nullptr) {
+            idle_display->OnEmotionsUpdated();
+        }
+    }
+
+    // 角色名称、唤醒词
     cJSON* command_item = cJSON_GetObjectItem(data, "assistant_command");
     cJSON* name_item = cJSON_GetObjectItem(data, "assistant_name");
     std::string command = cJSON_IsString(command_item) ? command_item->valuestring : "";
     std::string text = cJSON_IsString(name_item) ? name_item->valuestring : "";
+
+    // 唤醒词灵敏度：数据库存的是 1-99 的百分比
+    cJSON* threshold_item = cJSON_GetObjectItem(data, "assistant_threshold");
+    int threshold_pct = 10; // 默认 10%
+    if (cJSON_IsNumber(threshold_item)) {
+        threshold_pct = threshold_item->valueint;
+    } else if (cJSON_IsString(threshold_item) && threshold_item->valuestring != nullptr) {
+        threshold_pct = atoi(threshold_item->valuestring);
+    }
+    if (threshold_pct < 1) threshold_pct = 1;
+    if (threshold_pct > 99) threshold_pct = 99;
 
     cJSON* addr_item = cJSON_GetObjectItem(data, "address");
     std::string address = (cJSON_IsString(addr_item) && addr_item->valuestring != nullptr)
@@ -908,8 +1031,8 @@ void Application::CheckDeviceInfo() {
         return;
     }
 
-    ESP_LOGI(TAG, "Device wake word: %s (%s)", command.c_str(), text.c_str());
-    audio_service_.UpdateCustomWakeWord(command, text);
+    ESP_LOGI(TAG, "Device wake word: %s (%s) threshold=%d%%", command.c_str(), text.c_str(), threshold_pct);
+    audio_service_.UpdateCustomWakeWord(command, text, threshold_pct);
 }
 
 void Application::RefreshIdleWeather() {

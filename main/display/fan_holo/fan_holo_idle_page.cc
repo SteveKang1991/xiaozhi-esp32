@@ -248,8 +248,51 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
         day_title_[i] = MakeLabel(col, font, kLightGray, "");
         day_text_[i] = nullptr;
         StyleForecastTitle(day_title_[i], line_h, forecast_inner, s6);
-        MakeMetricRow(col, &fan_holo_icon_temp, font, kLunarOrange, line_h, forecast_inner, s6,
-                      &day_temp_[i]);
+        /* 温度：数字 + 右上角「。」单位（抬半个字高） */
+        {
+            lv_obj_t* temp_row = lv_obj_create(col);
+            lv_obj_remove_style_all(temp_row);
+            lv_obj_set_size(temp_row, forecast_inner, LV_SIZE_CONTENT);
+            lv_obj_set_flex_flow(temp_row, LV_FLEX_FLOW_ROW);
+            lv_obj_set_flex_align(temp_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_style_pad_column(temp_row, 2, 0);
+            lv_obj_add_flag(temp_row, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+            NoScroll(temp_row);
+
+            lv_obj_t* img = lv_image_create(temp_row);
+            lv_image_set_src(img, &fan_holo_icon_temp);
+            lv_obj_set_size(img, kMetricIconDisp, kMetricIconDisp);
+            lv_image_set_scale(img, s6 ? kMetricIconScaleS6 : kMetricIconScale);
+            lv_image_set_inner_align(img, LV_IMAGE_ALIGN_CENTER);
+            lv_obj_set_style_pad_all(img, 0, 0);
+            lv_obj_set_style_bg_opa(img, LV_OPA_TRANSP, 0);
+            NoScroll(img);
+
+            lv_obj_t* temp_line = lv_obj_create(temp_row);
+            lv_obj_remove_style_all(temp_line);
+            lv_obj_set_size(temp_line, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_obj_set_flex_flow(temp_line, LV_FLEX_FLOW_ROW);
+            lv_obj_set_flex_align(temp_line, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_style_pad_column(temp_line, 0, 0);
+            lv_obj_add_flag(temp_line, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+            NoScroll(temp_line);
+
+            const int32_t vis = s6 ? kForecastTextScaleS6Vis : kForecastTextScale;
+            day_temp_[i] = MakeLabel(temp_line, font, kLunarOrange, "");
+            /* 数字宽度跟内容走，给右上角「。」留位；不要拉满整行 */
+            StyleForecastScaledLabel(day_temp_[i], line_h, 48, kForecastTextScale, vis);
+            lv_obj_set_width(day_temp_[i], LV_SIZE_CONTENT);
+            /* 单位与 P4 一致：独立 label「。」，抬半个字高到数字右上角；勿 StyleForecast 定宽否则会被裁掉 */
+            day_temp_unit_[i] = MakeLabel(temp_line, font, kLunarOrange, "。");
+            lv_label_set_long_mode(day_temp_unit_[i], LV_LABEL_LONG_WRAP);
+            lv_obj_set_size(day_temp_unit_[i], LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_obj_set_style_transform_scale(day_temp_unit_[i], vis, 0);
+            lv_obj_set_style_transform_pivot_x(day_temp_unit_[i], 0, 0);
+            lv_obj_set_style_transform_pivot_y(day_temp_unit_[i], 0, 0);
+            lv_obj_add_flag(day_temp_unit_[i], LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+            NoScroll(day_temp_unit_[i]);
+            lv_obj_set_style_translate_y(day_temp_unit_[i], -static_cast<int32_t>(font->line_height) / 2, 0);
+        }
         MakeMetricRow(col, &fan_holo_icon_humidity, font, kCyan, line_h, forecast_inner, s6,
                       &day_hum_[i]);
         /* S6（FanLcd20Display）高度不够：永不创建降水行。 */
@@ -335,7 +378,33 @@ void FanHoloIdlePage::LayoutWeather(FanHoloDisplay& host) {
                 }
                 StyleForecastLabel(lbl, line_h, label_w > 8 ? label_w : 8, s6);
             };
-            resize_metric(day_temp_[i]);
+            /* 温度行结构：temp_row(icon + temp_line(数字 + 「。」))，不能对数字做拉满整行的 StyleForecastLabel */
+            if (day_temp_[i] != nullptr) {
+                lv_obj_t* temp_line = lv_obj_get_parent(day_temp_[i]);
+                lv_obj_t* temp_row = temp_line != nullptr ? lv_obj_get_parent(temp_line) : nullptr;
+                if (temp_row != nullptr) {
+                    lv_obj_set_size(temp_row, forecast_inner, LV_SIZE_CONTENT);
+                    uint32_t n = lv_obj_get_child_cnt(temp_row);
+                    for (uint32_t ci = 0; ci < n; ++ci) {
+                        lv_obj_t* child = lv_obj_get_child(temp_row, ci);
+                        if (lv_obj_check_type(child, &lv_image_class)) {
+                            lv_image_set_scale(child, s6 ? kMetricIconScaleS6 : kMetricIconScale);
+                        }
+                    }
+                }
+                const int32_t vis = s6 ? kForecastTextScaleS6Vis : kForecastTextScale;
+                StyleForecastScaledLabel(day_temp_[i], line_h, 48, kForecastTextScale, vis);
+                lv_obj_set_width(day_temp_[i], LV_SIZE_CONTENT);
+                if (day_temp_unit_[i] != nullptr) {
+                    lv_label_set_text(day_temp_unit_[i], "。");
+                    lv_obj_set_size(day_temp_unit_[i], LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+                    lv_obj_set_style_transform_scale(day_temp_unit_[i], vis, 0);
+                    if (font != nullptr) {
+                        lv_obj_set_style_translate_y(day_temp_unit_[i],
+                                                    -static_cast<int32_t>(font->line_height) / 2, 0);
+                    }
+                }
+            }
             resize_metric(day_hum_[i]);
             resize_metric(day_precip_[i]);
         }
@@ -382,6 +451,7 @@ void FanHoloIdlePage::Destroy() {
         day_title_[i] = nullptr;
         day_text_[i] = nullptr;
         day_temp_[i] = nullptr;
+        day_temp_unit_[i] = nullptr;
         day_hum_[i] = nullptr;
         day_precip_[i] = nullptr;
     }
@@ -450,10 +520,26 @@ void FanHoloIdlePage::ApplyTextFont(const lv_font_t* font, lv_color_t color) {
     for (int i = 0; i < 3; ++i) {
         paint(day_title_[i], kLightGray);
         paint(day_temp_[i], kLunarOrange);
+        paint(day_temp_unit_[i], kLunarOrange);
         paint(day_hum_[i], kCyan);
         paint(day_precip_[i], kIconGreen);
         StyleForecastTitle(day_title_[i], line_h, forecast_inner, s6);
-        StyleForecastLabel(day_temp_[i], line_h, label_w > 8 ? label_w : 8, s6);
+        {
+            const int32_t vis = s6 ? kForecastTextScaleS6Vis : kForecastTextScale;
+            StyleForecastScaledLabel(day_temp_[i], line_h, 48, kForecastTextScale, vis);
+            if (day_temp_[i]) {
+                lv_obj_set_width(day_temp_[i], LV_SIZE_CONTENT);
+            }
+            if (day_temp_unit_[i]) {
+                lv_label_set_text(day_temp_unit_[i], "。");
+                lv_obj_set_size(day_temp_unit_[i], LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+                lv_obj_set_style_transform_scale(day_temp_unit_[i], vis, 0);
+                if (theme_font != nullptr) {
+                    lv_obj_set_style_translate_y(day_temp_unit_[i],
+                                                -static_cast<int32_t>(theme_font->line_height) / 2, 0);
+                }
+            }
+        }
         StyleForecastLabel(day_hum_[i], line_h, label_w > 8 ? label_w : 8, s6);
         StyleForecastLabel(day_precip_[i], line_h, label_w > 8 ? label_w : 8, s6);
     }
@@ -510,8 +596,11 @@ void FanHoloIdlePage::ApplyWeather(const IdleWeatherView& weather) {
             snprintf(buf, sizeof(buf), " %d-%d", d.temp_min, d.temp_max);
             lv_label_set_text(day_temp_[i], buf);
         }
+        if (day_temp_unit_[i]) {
+            lv_label_set_text(day_temp_unit_[i], "。");
+        }
         if (day_hum_[i]) {
-            snprintf(buf, sizeof(buf), " %d", d.humidity);
+            snprintf(buf, sizeof(buf), " %d%%", d.humidity);
             lv_label_set_text(day_hum_[i], buf);
         }
         if (day_precip_[i]) {
