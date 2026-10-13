@@ -186,7 +186,18 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
         NoScroll(info);
         day_title_[i] = MakeLabel(info, font, kLightGray, "");
         day_date_[i] = MakeLabel(info, font, kOrange, "");
-        day_temp_[i] = MakeLabel(info, font, kLunarOrange, "");
+        lv_obj_t* temp_line = lv_obj_create(info);
+        lv_obj_remove_style_all(temp_line);
+        lv_obj_set_size(temp_line, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(temp_line, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(temp_line, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(temp_line, 0, 0);
+        lv_obj_add_flag(temp_line, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+        NoScroll(temp_line);
+        day_temp_[i] = MakeLabel(temp_line, font, kLunarOrange, "");
+        day_temp_unit_[i] = MakeLabel(temp_line, font, kLunarOrange, "。");
+        /* 「。」落在基线，要抬到数字右上角，约半个字高 */
+        lv_obj_set_style_translate_y(day_temp_unit_[i], -static_cast<int32_t>(font->line_height) / 2, 0);
         day_hum_[i] = MakeLabel(info, font, kCyan, "");
         day_precip_[i] = MakeLabel(info, font, kIconGreen, "");
 
@@ -282,6 +293,7 @@ void FanHoloIdlePage::Destroy() {
         day_text_[i] = nullptr;
         day_icon_[i] = nullptr;
         day_temp_[i] = nullptr;
+        day_temp_unit_[i] = nullptr;
         day_hum_[i] = nullptr;
         day_precip_[i] = nullptr;
     }
@@ -357,6 +369,7 @@ void FanHoloIdlePage::ApplyTextFont(const lv_font_t* font, lv_color_t color) {
         paint(day_date_[i], kOrange);
         paint(day_text_[i], kWhite);
         paint(day_temp_[i], kLunarOrange);
+        paint(day_temp_unit_[i], kLunarOrange);
         paint(day_hum_[i], kCyan);
         paint(day_precip_[i], kIconGreen);
     }
@@ -408,7 +421,7 @@ void FanHoloIdlePage::ApplyWeather(const IdleWeatherView& weather) {
     lv_label_set_text(text_label_, weather.text);
     StyleWeatherIcon(today_icon_, 0);
 
-    snprintf(detail_line0_, sizeof(detail_line0_), "湿度:%d     降水:%d%%     风力:%s",
+    snprintf(detail_line0_, sizeof(detail_line0_), "湿度:%d%%     降水:%d%%     风力:%s级",
              weather.humidity, weather.precip, weather.wind_scale);
     snprintf(detail_line1_, sizeof(detail_line1_), "风向:%s   风速:%s km/h",
              weather.wind_dir, weather.wind_speed);
@@ -433,7 +446,7 @@ void FanHoloIdlePage::ApplyWeather(const IdleWeatherView& weather) {
             lv_label_set_text(day_temp_[i], buf);
         }
         if (day_hum_[i]) {
-            snprintf(buf, sizeof(buf), "湿度：%d", d.humidity);
+            snprintf(buf, sizeof(buf), "湿度：%d%%", d.humidity);
             lv_label_set_text(day_hum_[i], buf);
         }
         if (day_precip_[i]) {

@@ -53,6 +53,7 @@ private:
     lv_obj_t* day_text_[3]{};
     lv_obj_t* day_icon_[3]{};
     lv_obj_t* day_temp_[3]{};
+    lv_obj_t* day_temp_unit_[3]{};
     lv_obj_t* day_hum_[3]{};
     lv_obj_t* day_precip_[3]{};
 
