@@ -1,6 +1,8 @@
 #include "sd_scanner.h"
+#include "mjpeg_player.h"
+#include <stdio.h>
 #include <string.h>
-#include <sys/unistd.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <ctype.h>
@@ -10,11 +12,25 @@
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_attr.h"
 #if SOC_SDMMC_IO_POWER_EXTERNAL
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #endif
 
 static const char *SD_TAG = "SD扫描器";
+
+/* RTC 在欠压复位后仍保留，用来识别“没电了还在反复重启”。 */
+static RTC_NOINIT_ATTR uint32_t s_sd_boot_magic;
+static RTC_NOINIT_ATTR uint32_t s_sd_unstable_boots;
+static const uint32_t kSdBootMagic = 0x53444231u;
+
+static volatile int s_sd_writers = 0;
+static volatile bool s_writes_allowed = true;
+static bool s_shutdown_registered = false;
+/* 卡有应答，但 FAT 挂不上。只有这时才允许手动格式化。 */
+static bool s_fs_mount_failed = false;
+static bool s_formatting = false;
 
 // 全局文件夹信息缓存
 static sd_folder_info_t g_folder_cache[10];
@@ -243,49 +259,91 @@ esp_err_t sd_scanner_init(sd_scanner_handle_t *handle)
     scanner->pwr_ctrl_handle = NULL;
 #endif
 
-    // SD卡挂载配置（高性能模式）
+    /*
+     * 绝不在挂载失败时格式化。allocation_unit_size 只在格式化时生效，
+     * FatFS 上限是 128 个扇区（64KB），之前的 512KB 一旦格式化会直接失败或写坏参数。
+     * disk_status_check 让总线出错后停止继续写，而不是把脏 FAT 再刷一遍。
+     */
     scanner->mount_config = (esp_vfs_fat_sdmmc_mount_config_t) {
         .format_if_mount_failed = false,
-        .max_files = 20,  // 增加最大文件数，支持更多并发
-        .allocation_unit_size = 512 * 1024,  // 🚀 大幅提升allocation_unit_size至512KB，加速大文件顺序读取
+        .max_files = 8,
+        .allocation_unit_size = 16 * 1024,
         .use_one_fat = false,
-        .disk_status_check_enable = false
+        .disk_status_check_enable = true
     };
 
     ESP_LOGI(SD_TAG, "🔧 SD扫描器初始化完成");
     return ESP_OK;
 }
 
-esp_err_t sd_scanner_mount(sd_scanner_handle_t handle)
+static void sd_release_ldo(sd_scanner_t *scanner)
 {
-    if (!handle) {
-        return ESP_ERR_INVALID_ARG;
+#if SOC_SDMMC_IO_POWER_EXTERNAL
+    if (scanner->pwr_ctrl_handle) {
+        sd_pwr_ctrl_del_on_chip_ldo(scanner->pwr_ctrl_handle);
+        scanner->pwr_ctrl_handle = NULL;
+    }
+#else
+    (void)scanner;
+#endif
+}
+
+static void sd_note_boot_stability(void)
+{
+    esp_reset_reason_t reason = esp_reset_reason();
+    if (s_sd_boot_magic != kSdBootMagic) {
+        s_sd_boot_magic = kSdBootMagic;
+        s_sd_unstable_boots = 0;
     }
 
-    sd_scanner_t *scanner = handle;
+    /* 欠压复位说明上一轮电源已经塌了，这一轮再写 FAT 很容易把卡写坏。 */
+    if (reason == ESP_RST_BROWNOUT) {
+        if (s_sd_unstable_boots < 100) {
+            s_sd_unstable_boots++;
+        }
+        s_writes_allowed = false;
+        ESP_LOGW(SD_TAG, "欠压复位，本轮禁止写 SD（连续 %u 次）", (unsigned)s_sd_unstable_boots);
+        return;
+    }
+
+    /* 反复冷启动多半是没电顶着重启。单次正常开机不会到 3 次。 */
+    if (reason == ESP_RST_POWERON || reason == ESP_RST_UNKNOWN ||
+        reason == ESP_RST_WDT || reason == ESP_RST_PANIC ||
+        reason == ESP_RST_INT_WDT || reason == ESP_RST_TASK_WDT) {
+        if (s_sd_unstable_boots < 100) {
+            s_sd_unstable_boots++;
+        }
+        s_writes_allowed = (s_sd_unstable_boots < 3);
+        if (!s_writes_allowed) {
+            ESP_LOGW(SD_TAG, "连续不稳定启动 %u 次，本轮禁止写 SD", (unsigned)s_sd_unstable_boots);
+        }
+        return;
+    }
+
+    s_sd_unstable_boots = 0;
+    s_writes_allowed = true;
+}
+
+static void sd_shutdown_handler(void)
+{
+    sd_card_quiesce_and_unmount();
+}
+
+static esp_err_t sd_mount_once(sd_scanner_t *scanner)
+{
     esp_err_t ret;
-
-    if (scanner->is_mounted) {
-        ESP_LOGW(SD_TAG, "⚠️ SD卡已经挂载");
-        return ESP_OK;
-    }
 
     ESP_LOGI(SD_TAG, "🔧 正在初始化SD卡...");
 
-    // 使用SDMMC外设（尽可能高的安全频率）
+    /* 20MHz 4-bit。40MHz 在电压下跌时 CRC 失败，重试写会把 FAT 写坏。 */
     ESP_LOGI(SD_TAG, "💾 使用SDMMC外设");
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    // 高速模式（40MHz），若卡或布线不支持会在初始化协商时回退
-    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
     host.slot = SDMMC_HOST_SLOT_0;
-    // 移除DDR模式，保持标准速度
-    // 设置合适的读取超时
-    host.command_timeout_ms = 5000;
-    // 启用DMA提高传输效率
+    host.command_timeout_ms = 2000;
     host.flags |= SDMMC_HOST_FLAG_DEINIT_ARG | SDMMC_HOST_FLAG_4BIT;
-    // 移除1位模式标志，强制4线模式
     host.flags &= ~SDMMC_HOST_FLAG_1BIT;
-    ESP_LOGI(SD_TAG, "💾 SD卡标准速度模式配置: 频率=%d kHz, 超时=%d ms", host.max_freq_khz, host.command_timeout_ms);
+    ESP_LOGI(SD_TAG, "💾 SD卡配置: 频率=%d kHz, 超时=%d ms", host.max_freq_khz, host.command_timeout_ms);
 
     // 电源控制配置（ESP32-P4专用）
 #if SOC_SDMMC_IO_POWER_EXTERNAL
@@ -297,6 +355,7 @@ esp_err_t sd_scanner_mount(sd_scanner_handle_t handle)
     ret = sd_pwr_ctrl_new_on_chip_ldo(&ldo_config, &scanner->pwr_ctrl_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(SD_TAG, "❌ 创建片上LDO电源控制驱动失败: %s", esp_err_to_name(ret));
+        scanner->pwr_ctrl_handle = NULL;
         return ret;
     }
     ESP_LOGI(SD_TAG, "🔧 片上LDO电源控制驱动创建成功");
@@ -326,20 +385,75 @@ esp_err_t sd_scanner_mount(sd_scanner_handle_t handle)
 
     if (ret != ESP_OK) {
         if (ret == ESP_FAIL) {
-            ESP_LOGE(SD_TAG, "❌ 挂载文件系统失败。如果需要格式化SD卡，请设置相应的配置选项。");
+            ESP_LOGE(SD_TAG, "❌ 挂载文件系统失败，不会格式化。");
         } else {
-            ESP_LOGE(SD_TAG, "❌ 初始化SD卡失败 (%s)。请确保SD卡线路有上拉电阻。", esp_err_to_name(ret));
+            ESP_LOGE(SD_TAG, "❌ 初始化SD卡失败 (%s)。", esp_err_to_name(ret));
         }
+        scanner->card = NULL;
+        /* 拉掉卡电，让卡控制器从异常状态里出来，下次重试才有意义。 */
+        sd_release_ldo(scanner);
         return ret;
     }
 
     scanner->is_mounted = true;
     ESP_LOGI(SD_TAG, "✅ 文件系统挂载成功");
 
-    // 打印SD卡信息
     sdmmc_card_print_info(stdout, scanner->card);
 
     return ESP_OK;
+}
+
+esp_err_t sd_scanner_mount(sd_scanner_handle_t handle)
+{
+    if (!handle) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    sd_scanner_t *scanner = handle;
+
+    if (scanner->is_mounted) {
+        ESP_LOGW(SD_TAG, "⚠️ SD卡已经挂载");
+        return ESP_OK;
+    }
+
+    static bool boot_noted = false;
+    if (!boot_noted) {
+        sd_note_boot_stability();
+        boot_noted = true;
+    }
+    if (!s_writes_allowed) {
+        /* 电源刚塌过，先等轨恢复再碰卡。 */
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
+
+    if (!s_shutdown_registered) {
+        if (esp_register_shutdown_handler(sd_shutdown_handler) == ESP_OK) {
+            s_shutdown_registered = true;
+        }
+    }
+
+    esp_err_t ret = ESP_FAIL;
+    bool saw_fs_fail = false;
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        ret = sd_mount_once(scanner);
+        if (ret == ESP_OK) {
+            s_fs_mount_failed = false;
+            return ESP_OK;
+        }
+        if (ret == ESP_FAIL) {
+            saw_fs_fail = true;
+        }
+        ESP_LOGW(SD_TAG, "挂载第 %d 次失败，断电 200ms 后重试", attempt);
+        scanner->is_mounted = false;
+        scanner->card = NULL;
+        sd_release_ldo(scanner);
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    s_fs_mount_failed = saw_fs_fail;
+    if (s_fs_mount_failed) {
+        ESP_LOGW(SD_TAG, "卡有应答但文件系统挂不上，长按音量键可格式化为 FAT 16KB");
+    }
+    return ret;
 }
 
 esp_err_t sd_scanner_scan(sd_scanner_handle_t handle)
@@ -391,24 +505,18 @@ esp_err_t sd_scanner_unmount(sd_scanner_handle_t handle)
         return ESP_OK;
     }
 
-    // 卸载SD卡文件系统
+    /*
+     * 先空等一会儿，让卡把最后一次 fsync 的 NAND 编程做完，再卸载。
+     * 卸载会关掉 SD 电源；电断在卡内部编程中途，卡就会被写坏。
+     */
+    vTaskDelay(pdMS_TO_TICKS(150));
     esp_vfs_fat_sdcard_unmount(MOUNT_POINT, scanner->card);
     scanner->is_mounted = false;
     scanner->card = NULL;
+    vTaskDelay(pdMS_TO_TICKS(100));
     ESP_LOGI(SD_TAG, "💾 SD卡已卸载");
 
-    // 清理电源控制驱动
-#if SOC_SDMMC_IO_POWER_EXTERNAL
-    if (scanner->pwr_ctrl_handle) {
-        esp_err_t ret = sd_pwr_ctrl_del_on_chip_ldo(scanner->pwr_ctrl_handle);
-        if (ret != ESP_OK) {
-            ESP_LOGE(SD_TAG, "❌ 删除片上LDO电源控制驱动失败");
-            return ret;
-        }
-        scanner->pwr_ctrl_handle = NULL;
-    }
-#endif
-
+    sd_release_ldo(scanner);
     return ESP_OK;
 }
 
@@ -458,15 +566,115 @@ bool sd_scanner_is_mounted(void) {
     return (g_scanner != NULL && g_scanner->is_mounted);
 }
 
+bool sd_card_fs_mount_failed(void) {
+    return s_fs_mount_failed;
+}
+
+esp_err_t sd_card_format_fat(void) {
+    if (!s_fs_mount_failed || s_formatting) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!s_writes_allowed) {
+        ESP_LOGW(SD_TAG, "电源不稳，拒绝格式化");
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_formatting = true;
+
+    if (g_scanner == NULL) {
+        esp_err_t err = sd_scanner_init(&g_scanner);
+        if (err != ESP_OK) {
+            s_formatting = false;
+            return err;
+        }
+    }
+    if (g_scanner->is_mounted) {
+        s_fs_mount_failed = false;
+        s_formatting = false;
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* 只在这一次挂载里允许格式化。大卡会落成 FAT32，分配单元 16KB。 */
+    g_scanner->mount_config.format_if_mount_failed = true;
+    g_scanner->mount_config.allocation_unit_size = 16 * 1024;
+    g_scanner->mount_config.use_one_fat = false;
+    ESP_LOGW(SD_TAG, "开始格式化 SD 卡为 FAT，分配单元 16KB");
+    esp_err_t ret = sd_scanner_mount(g_scanner);
+    if (g_scanner != NULL) {
+        g_scanner->mount_config.format_if_mount_failed = false;
+    }
+    if (ret == ESP_OK) {
+        s_fs_mount_failed = false;
+        sd_scanner_scan(g_scanner);
+        ESP_LOGI(SD_TAG, "SD卡已格式化为 FAT，分配单元 16KB");
+    } else {
+        ESP_LOGE(SD_TAG, "格式化失败: %s", esp_err_to_name(ret));
+    }
+    s_formatting = false;
+    return ret;
+}
+
+bool sd_card_writes_allowed(void) {
+    return s_writes_allowed && sd_scanner_is_mounted();
+}
+
+void sd_card_writer_enter(void) {
+    __atomic_add_fetch(&s_sd_writers, 1, __ATOMIC_RELAXED);
+}
+
+void sd_card_writer_leave(void) {
+    __atomic_sub_fetch(&s_sd_writers, 1, __ATOMIC_RELAXED);
+}
+
+esp_err_t sd_card_flush_file(FILE* fp) {
+    if (fp == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (fflush(fp) != 0) {
+        return ESP_FAIL;
+    }
+    if (fsync(fileno(fp)) != 0) {
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+void sd_card_close_file(FILE* fp) {
+    if (fp == NULL) {
+        return;
+    }
+    fflush(fp);
+    fsync(fileno(fp));
+    fclose(fp);
+}
+
+void sd_card_quiesce_and_unmount(void) {
+    s_writes_allowed = false;
+    /* 读任务退出时会 fclose。禁止在 FatFS 调用中途 vTaskDelete。 */
+    mjpeg_player_stop();
+
+    for (int i = 0; i < 80 && __atomic_load_n(&s_sd_writers, __ATOMIC_RELAXED) > 0; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (__atomic_load_n(&s_sd_writers, __ATOMIC_RELAXED) > 0) {
+        ESP_LOGW(SD_TAG, "仍有写任务未退出，继续卸载");
+    }
+    if (g_scanner != NULL && g_scanner->is_mounted) {
+        sd_scanner_unmount(g_scanner);
+    }
+}
+
 // 初始化并扫描SD卡（保持挂载状态）
 esp_err_t sd_scanner_init_and_scan(void)
 {
     ESP_LOGI(SD_TAG, "🔍 初始化SD卡并保持挂载...");
 
-    // 如果已经初始化过，仅释放结构体内存，不卸载SD卡（保持挂载状态供视频播放器使用）
+    /* 已经挂着就只重新扫描。以前这里 free 掉句柄再 mount 一次，等于两套 FAT 同时写同一张卡。 */
     if (g_scanner != NULL) {
-        ESP_LOGI(SD_TAG, "💾 SD卡扫描器已存在，仅释放结构体内存，保持SD卡挂载");
-        free(g_scanner);
+        if (g_scanner->is_mounted) {
+            ESP_LOGI(SD_TAG, "💾 SD卡已挂载，跳过重复挂载");
+            return sd_scanner_scan(g_scanner);
+        }
+        sd_scanner_deinit(g_scanner);
         g_scanner = NULL;
     }
 

@@ -12,6 +12,7 @@
 #include "settings.h"
 #include "utils/md5.h"
 #include "boards/common/mjpeg_player.h"
+#include "boards/common/sd_scanner.h"
 #include "fan_holo_weather.h"
 
 #include <cstring>
@@ -373,11 +374,13 @@ void Application::ActivationTask() {
     // Initialize the protocol
     InitializeProtocol();
 
-    // Sync SD-asset files (music background .bin, etc.) from server to SD card
-    CheckSDAssetsFiles();
-
-    // Sync emotion files (idle/listen/speak MJPEG) from server to SD card
-    CheckEmotionFiles();
+    // 卡没挂上就不要碰资源同步。挂载在进激活任务之前已经结束，这里只看结果。
+    if (sd_scanner_is_mounted()) {
+        CheckSDAssetsFiles();
+        CheckEmotionFiles();
+    } else {
+        ESP_LOGW(TAG, "SD card not mounted, skip asset and emotion sync");
+    }
 
     // 拉取设备信息，加载自定义唤醒词拼音
     CheckDeviceInfo();
@@ -766,6 +769,31 @@ static bool IsRoleEmotionFile(const std::string& name) {
     return rest.rfind("idle-", 0) == 0 || rest.rfind("listen-", 0) == 0 || rest.rfind("speak-", 0) == 0;
 }
 
+static bool SdWritesPermitted(int min_percent) {
+    if (!sd_card_writes_allowed()) {
+        return false;
+    }
+    int level = -1;
+    bool charging = false;
+    bool discharging = false;
+    if (!Board::GetInstance().GetBatteryLevel(level, charging, discharging)) {
+        return true;
+    }
+    if (charging || level < 0) {
+        return true;
+    }
+    return level >= min_percent;
+}
+
+struct SdWriterGuard {
+    bool held = false;
+    ~SdWriterGuard() {
+        if (held) {
+            sd_card_writer_leave();
+        }
+    }
+};
+
 static bool EnsureEmotionDir() {
     struct stat st = {};
     if (stat(kEmotionDir, &st) == 0 && S_ISDIR(st.st_mode)) {
@@ -778,7 +806,15 @@ static bool EnsureEmotionDir() {
 }
 
 void Application::CheckEmotionFiles() {
+    if (!sd_scanner_is_mounted()) {
+        ESP_LOGW(kEmotionTag, "SD card not mounted, skip emotion sync");
+        return;
+    }
     if (ota_ == nullptr) {
+        return;
+    }
+    if (!SdWritesPermitted(15)) {
+        ESP_LOGW(kEmotionTag, "Skip emotion sync: low battery or unstable reboot");
         return;
     }
 
@@ -952,19 +988,29 @@ void Application::CheckEmotionFiles() {
 
 void Application::ProcessEmotionFile(const EmotionInfo& info, DownloadProgressCallback progress_cb) {
     const std::string& local = info.local_path;
+    if (!SdWritesPermitted(15)) {
+        ESP_LOGW(kEmotionTag, "Skip emotion write: %s", local.c_str());
+        return;
+    }
 
-    // 检查本地是否已存在
+    std::string tmp_path = local + ".tmp";
     struct stat st = {};
+    struct stat st_tmp = {};
+    /* 上次掉电发生在删掉旧文件之后、rename 之前时，完整的 .tmp 还在。 */
+    if (stat(local.c_str(), &st) != 0 && info.size > 0 &&
+        stat(tmp_path.c_str(), &st_tmp) == 0 && st_tmp.st_size == (off_t)info.size) {
+        if (rename(tmp_path.c_str(), local.c_str()) == 0) {
+            ESP_LOGW(kEmotionTag, "Recovered emotion from tmp: %s", local.c_str());
+        }
+    }
+
+    st = {};
     if (stat(local.c_str(), &st) == 0 && st.st_size > 0 && st.st_size == (off_t)info.size) {
         std::string local_md5 = MD5::Calculate(local);
         if (!local_md5.empty() && local_md5 == info.hash) {
             ESP_LOGI(kEmotionTag, "Emotion %s is up-to-date", local.c_str());
             return;
         }
-    }
-
-    if (stat(local.c_str(), &st) == 0) {
-        unlink(local.c_str());
     }
 
     if (!DownloadEmotionFile(info.url, local, info.size, progress_cb)) {
@@ -975,7 +1021,9 @@ void Application::ProcessEmotionFile(const EmotionInfo& info, DownloadProgressCa
     std::string final_md5 = MD5::Calculate(local);
     if (!final_md5.empty() && !info.hash.empty() && final_md5 != info.hash) {
         ESP_LOGE(kEmotionTag, "MD5 mismatch for %s", local.c_str());
-        unlink(local.c_str());
+        if (SdWritesPermitted(10)) {
+            unlink(local.c_str());
+        }
         return;
     }
 
@@ -1017,8 +1065,18 @@ bool Application::DownloadEmotionFile(const std::string& url, const std::string&
         }
     }
 
-    // 先下载到 .tmp 再 rename，避免断电/中断导致损坏
+    if (!SdWritesPermitted(15)) {
+        ESP_LOGW(kEmotionTag, "Skip download, SD write blocked");
+        http->Close();
+        return false;
+    }
+
+    /* 旧文件先留着。FAT 不能原子替换，只在临时文件刷盘成功后才挪走旧文件。 */
     std::string tmp_path = local_path + ".tmp";
+    SdWriterGuard writer;
+    sd_card_writer_enter();
+    writer.held = true;
+
     FILE* fp = fopen(tmp_path.c_str(), "wb");
     if (!fp) {
         ESP_LOGE(kEmotionTag, "Failed to open file: %s", tmp_path.c_str());
@@ -1029,18 +1087,32 @@ bool Application::DownloadEmotionFile(const std::string& url, const std::string&
     char buffer[4096];
     int read;
     size_t total = 0;
+    size_t since_sync = 0;
+    bool power_abort = false;
+    bool write_error = false;
     int64_t last_report_us = esp_timer_get_time();
     size_t last_report_bytes = 0;
     size_t current_speed_bps = 0;
     while ((read = http->Read(buffer, sizeof(buffer))) > 0) {
+        if (!sd_card_writes_allowed() || !SdWritesPermitted(10)) {
+            power_abort = true;
+            break;
+        }
         if (fwrite(buffer, 1, read, fp) != (size_t)read) {
             ESP_LOGE(kEmotionTag, "Write failed");
-            fclose(fp);
-            unlink(tmp_path.c_str());
-            http->Close();
-            return false;
+            write_error = true;
+            break;
         }
         total += read;
+        since_sync += (size_t)read;
+        if (since_sync >= 256 * 1024) {
+            if (sd_card_flush_file(fp) != ESP_OK) {
+                ESP_LOGE(kEmotionTag, "fsync failed");
+                write_error = true;
+                break;
+            }
+            since_sync = 0;
+        }
 
         if (progress_cb) {
             const int64_t now_us = esp_timer_get_time();
@@ -1055,8 +1127,19 @@ bool Application::DownloadEmotionFile(const std::string& url, const std::string&
             }
         }
     }
-    fclose(fp);
+    sd_card_close_file(fp);
     http->Close();
+
+    if (power_abort) {
+        ESP_LOGW(kEmotionTag, "Power dropped, keep %s and the old file", tmp_path.c_str());
+        return false;
+    }
+    if (write_error) {
+        if (SdWritesPermitted(10)) {
+            unlink(tmp_path.c_str());
+        }
+        return false;
+    }
 
     if (progress_cb) {
         progress_cb(total, content_length, current_speed_bps);
@@ -1064,15 +1147,27 @@ bool Application::DownloadEmotionFile(const std::string& url, const std::string&
 
     if (expected_size > 0 && total != expected_size) {
         ESP_LOGE(kEmotionTag, "Size mismatch: got %u, expect %u", (unsigned)total, (unsigned)expected_size);
-        unlink(tmp_path.c_str());
+        if (SdWritesPermitted(10)) {
+            unlink(tmp_path.c_str());
+        }
         return false;
     }
 
-    if (rename(tmp_path.c_str(), local_path.c_str()) != 0) {
-        ESP_LOGE(kEmotionTag, "Rename failed: %s -> %s", tmp_path.c_str(), local_path.c_str());
-        unlink(tmp_path.c_str());
+    if (!SdWritesPermitted(10)) {
+        ESP_LOGW(kEmotionTag, "Power dropped before rename, keep old file");
         return false;
     }
+
+    struct stat old_st = {};
+    if (stat(local_path.c_str(), &old_st) == 0) {
+        unlink(local_path.c_str());
+    }
+    if (rename(tmp_path.c_str(), local_path.c_str()) != 0) {
+        ESP_LOGE(kEmotionTag, "Rename failed: %s -> %s", tmp_path.c_str(), local_path.c_str());
+        return false;
+    }
+    FILE* committed = fopen(local_path.c_str(), "rb");
+    sd_card_close_file(committed);
 
     ESP_LOGI(kEmotionTag, "Downloaded %s: %u bytes", local_path.c_str(), (unsigned)total);
     return true;
@@ -1098,6 +1193,10 @@ static const char* kSDAssetsTag = "SDAssetsSync";
  *   3. 不会删除本地任何文件
  */
 void Application::CheckSDAssetsFiles() {
+    if (!sd_scanner_is_mounted()) {
+        ESP_LOGW(kSDAssetsTag, "SD card not mounted, skip asset sync");
+        return;
+    }
     if (ota_ == nullptr) {
         return;
     }
@@ -1150,6 +1249,10 @@ void Application::CheckSDAssetsFiles() {
 
     if (total_count == 0) {
         ESP_LOGI(kSDAssetsTag, "All SD assets already present");
+        return;
+    }
+    if (!SdWritesPermitted(15)) {
+        ESP_LOGW(kSDAssetsTag, "Skip SD asset download: low battery or unstable reboot");
         return;
     }
 
@@ -1280,6 +1383,12 @@ bool Application::DownloadSDAssetsFile(const std::string& url, const std::string
         }
     }
 
+    if (!SdWritesPermitted(15)) {
+        ESP_LOGW(kSDAssetsTag, "Skip asset write, SD write blocked");
+        http->Close();
+        return false;
+    }
+
     // 确保目标目录存在
     auto pos = local_path.find_last_of('/');
     if (pos != std::string::npos && pos > 0) {
@@ -1300,8 +1409,11 @@ bool Application::DownloadSDAssetsFile(const std::string& url, const std::string
         }
     }
 
-    // 先写到 .tmp 再 rename
     std::string tmp_path = local_path + ".tmp";
+    SdWriterGuard writer;
+    sd_card_writer_enter();
+    writer.held = true;
+
     FILE* fp = fopen(tmp_path.c_str(), "wb");
     if (!fp) {
         ESP_LOGE(kSDAssetsTag, "Failed to open file: %s", tmp_path.c_str());
@@ -1312,24 +1424,37 @@ bool Application::DownloadSDAssetsFile(const std::string& url, const std::string
     char buffer[4096];
     int read;
     size_t total = 0;
-    // 网速统计: 每 ~256ms 触发一次回调
+    size_t since_sync = 0;
+    bool power_abort = false;
+    bool write_error = false;
     int64_t last_report_us = esp_timer_get_time();
     size_t last_report_bytes = 0;
     size_t current_speed_bps = 0;
     while ((read = http->Read(buffer, sizeof(buffer))) > 0) {
+        if (!sd_card_writes_allowed() || !SdWritesPermitted(10)) {
+            power_abort = true;
+            break;
+        }
         if (fwrite(buffer, 1, read, fp) != (size_t)read) {
             ESP_LOGE(kSDAssetsTag, "Write failed for %s", tmp_path.c_str());
-            fclose(fp);
-            unlink(tmp_path.c_str());
-            http->Close();
-            return false;
+            write_error = true;
+            break;
         }
         total += read;
+        since_sync += (size_t)read;
+        if (since_sync >= 256 * 1024) {
+            if (sd_card_flush_file(fp) != ESP_OK) {
+                ESP_LOGE(kSDAssetsTag, "fsync failed");
+                write_error = true;
+                break;
+            }
+            since_sync = 0;
+        }
 
         if (progress_cb) {
             const int64_t now_us = esp_timer_get_time();
             const int64_t delta_us = now_us - last_report_us;
-            if (delta_us >= 250000) {  // 250ms
+            if (delta_us >= 250000) {
                 const size_t delta_bytes = total - last_report_bytes;
                 current_speed_bps = static_cast<size_t>(
                     (static_cast<uint64_t>(delta_bytes) * 1000000ULL) / delta_us);
@@ -1339,31 +1464,57 @@ bool Application::DownloadSDAssetsFile(const std::string& url, const std::string
             }
         }
     }
-    fclose(fp);
+    sd_card_close_file(fp);
     http->Close();
 
-    // 兜底再汇报一次最终值
+    if (power_abort) {
+        ESP_LOGW(kSDAssetsTag, "Power dropped, keep existing file and %s", tmp_path.c_str());
+        return false;
+    }
+    if (write_error) {
+        if (SdWritesPermitted(10)) {
+            unlink(tmp_path.c_str());
+        }
+        return false;
+    }
+
     if (progress_cb) {
         progress_cb(total, content_length, current_speed_bps);
     }
 
-    if (total == 0) {
-        ESP_LOGE(kSDAssetsTag, "Downloaded 0 bytes for %s", url.c_str());
-        unlink(tmp_path.c_str());
+    if (total == 0 || (content_length > 0 && total != content_length)) {
+        ESP_LOGE(kSDAssetsTag, "Incomplete download for %s (%u/%u)", url.c_str(),
+                 (unsigned)total, (unsigned)content_length);
+        if (SdWritesPermitted(10)) {
+            unlink(tmp_path.c_str());
+        }
         return false;
     }
 
-    if (rename(tmp_path.c_str(), local_path.c_str()) != 0) {
-        ESP_LOGE(kSDAssetsTag, "Rename failed: %s -> %s", tmp_path.c_str(), local_path.c_str());
-        unlink(tmp_path.c_str());
+    if (!SdWritesPermitted(10)) {
         return false;
     }
+
+    struct stat old_st = {};
+    if (stat(local_path.c_str(), &old_st) == 0) {
+        unlink(local_path.c_str());
+    }
+    if (rename(tmp_path.c_str(), local_path.c_str()) != 0) {
+        ESP_LOGE(kSDAssetsTag, "Rename failed: %s -> %s", tmp_path.c_str(), local_path.c_str());
+        return false;
+    }
+    FILE* committed = fopen(local_path.c_str(), "rb");
+    sd_card_close_file(committed);
 
     ESP_LOGI(kSDAssetsTag, "Downloaded %s: %u bytes", local_path.c_str(), (unsigned)total);
     return true;
 }
 
 void Application::CleanOrphanEmotionFiles(const std::vector<std::string>& valid_paths) {
+    if (!SdWritesPermitted(15)) {
+        ESP_LOGW(kEmotionTag, "Skip orphan cleanup, SD write blocked");
+        return;
+    }
     DIR* dir = opendir(kEmotionDir);
     if (!dir) {
         ESP_LOGW(kEmotionTag, "CleanOrphan: cannot open %s", kEmotionDir);
@@ -2019,6 +2170,7 @@ void Application::Reboot() {
     audio_service_.Stop();
 
     vTaskDelay(pdMS_TO_TICKS(fade_ms + 100));
+    sd_card_quiesce_and_unmount();
     esp_restart();
 }
 

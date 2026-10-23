@@ -1,6 +1,7 @@
 #ifndef SD_SCANNER_H
 #define SD_SCANNER_H
 
+#include <stdio.h>
 #include "esp_err.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
@@ -138,6 +139,34 @@ sd_scanner_handle_t sd_scanner_get_global(void);
  *     - false: SD卡未挂载
  */
 bool sd_scanner_is_mounted(void);
+
+/** 卡有应答但文件系统挂不上（ESP_FAIL）。为 true 时才允许手动格式化。 */
+bool sd_card_fs_mount_failed(void);
+
+/** 将卡格式化为 FAT，分配单元 16KB。仅在 sd_card_fs_mount_failed() 为 true 时执行。 */
+esp_err_t sd_card_format_fat(void);
+
+/**
+ * 欠压重启、短时间反复上电后，本轮启动禁止写 SD。
+ * 读（表情/音乐）不受影响。
+ */
+bool sd_card_writes_allowed(void);
+
+/** 标记当前任务正在写 SD。重启卸载前会等它走到检查点再退出。 */
+void sd_card_writer_enter(void);
+void sd_card_writer_leave(void);
+
+/** fflush + fsync，把 libc 缓冲和 FAT 脏数据写进卡。 */
+esp_err_t sd_card_flush_file(FILE* fp);
+
+/** flush 之后再 fclose。fp 为空则直接返回。 */
+void sd_card_close_file(FILE* fp);
+
+/**
+ * 禁止后续写入，停掉仍打开文件的播放，卸载文件系统。
+ * 主动重启前调用；意外掉电走不到这里，靠写检查点和禁写保护。
+ */
+void sd_card_quiesce_and_unmount(void);
 
 #ifdef __cplusplus
 }

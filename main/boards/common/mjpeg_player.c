@@ -873,7 +873,7 @@ static void mjpeg_read_task(void *arg)
         ctx.from_preload = false;
 
         /* SD 卡可能刚被上次 start 释放，fopen 短暂失败时重试 5 次，每次 200ms */
-        for (int open_retry = 0; open_retry < 5; open_retry++) {
+        for (int open_retry = 0; open_retry < 5 && s_running; open_retry++) {
             ctx.fp = fopen(s_cfg.file_path, "rb");
             if (ctx.fp) {
                 break;
@@ -1348,7 +1348,7 @@ esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg)
             return ESP_ERR_INVALID_ARG;
         }
     }
-    if (s_running) {
+    if (s_running || s_read_task != NULL) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1585,20 +1585,20 @@ static void mjpeg_do_deferred_cleanup(void)
 
 void mjpeg_player_stop(void)
 {
-    if (!s_running) return;
+    if (!s_running && s_read_task == NULL && s_decode_task == NULL) {
+        return;
+    }
     s_running = false;
 
-    /* 同步等待 read_task 退出：read task 持有 read_buf(256KB PSRAM) + io_buf(32KB PSRAM),
-     * 不释放就立刻 start 会撞 SPIRAM NO_MEM。最多 1500ms,超时则强制 vTaskDelete。 */
-    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
+    /*
+     * 读任务可能正停在 fread / FatFS 里。这里 vTaskDelete 会把文件系统锁和
+     * 已打开的 FIL 留下，下一轮挂载或写入就会把卡写坏。一直等到它自己 fclose。
+     */
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(8000);
     while (s_read_task) {
-        if (xTaskGetTickCount() > deadline) {
-            ESP_LOGW(TAG, "⚠️ read_task 退出超时，强制删除");
-            if (s_read_task) {
-                vTaskDelete(s_read_task);
-                s_read_task = NULL;
-            }
-            break;
+        if ((int32_t)(xTaskGetTickCount() - deadline) > 0) {
+            ESP_LOGE(TAG, "read_task 仍在访问 SD，不强制删除");
+            return;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }

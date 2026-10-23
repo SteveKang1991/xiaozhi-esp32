@@ -39,6 +39,22 @@ private:
     EspVideo* camera_ = nullptr;
     bool aec_device = true;
     int volume_direction_ = -1; // io_button 默认减小方向，撞到边界时反向
+    bool sd_format_running_ = false;
+
+    void RunSdFormat() {
+        esp_err_t ret = sd_card_format_fat();
+        auto* display = GetDisplay();
+        if (display != nullptr) {
+            if (ret == ESP_OK) {
+                display->ShowNotification("SD卡已格式化为FAT");
+            } else if (ret == ESP_ERR_INVALID_STATE) {
+                display->ShowNotification("电源不稳，未格式化");
+            } else {
+                display->ShowNotification("SD卡格式化失败");
+            }
+        }
+        sd_format_running_ = false;
+    }
 
     esp_err_t i2c_device_probe(uint8_t addr) {
         return i2c_master_probe(i2c_bus_touch_, addr, 100);
@@ -344,6 +360,31 @@ private:
             }
             codec->SetOutputVolume(volume);
             GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume));
+        });
+
+        io_button_.OnLongPress([this]() {
+            if (!sd_card_fs_mount_failed() || sd_format_running_) {
+                return;
+            }
+            if (pmic_ != nullptr) {
+                int level = -1;
+                bool charging = false;
+                bool discharging = false;
+                if (GetBatteryLevel(level, charging, discharging) &&
+                    !charging && level >= 0 && level < 15) {
+                    GetDisplay()->ShowNotification("电量过低，不能格式化");
+                    return;
+                }
+            }
+            sd_format_running_ = true;
+            GetDisplay()->ShowNotification("正在格式化SD卡");
+            if (xTaskCreate([](void* arg) {
+                    static_cast<FanFutureP4HoloST7701WiFi6Lcd5BBoard*>(arg)->RunSdFormat();
+                    vTaskDelete(NULL);
+                }, "sd_fmt", 10240, this, 5, nullptr) != pdPASS) {
+                sd_format_running_ = false;
+                GetDisplay()->ShowNotification("SD卡格式化失败");
+            }
         });
     }
 
