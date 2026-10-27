@@ -47,27 +47,47 @@ void McpServer::AddCommonTools() {
         "Provides the real-time information of the device, including the current status of the audio speaker, screen, battery, network, etc.\n"
         "Use this tool for: \n"
         "1. Answering questions about current condition (e.g. what is the current volume of the audio speaker?)\n"
-        "2. As the first step to control the device (e.g. turn up / down the volume of the audio speaker, etc.)",
+        "Do not use this tool before changing volume or brightness. Call set_volume or set_brightness directly.",
         PropertyList(),
         [&board](const PropertyList& properties) -> ReturnValue {
             return board.GetDeviceStatusJson();
         });
 
-    AddTool("self.audio_speaker.set_volume", 
-        "Set the volume of the audio speaker. If the current volume is unknown, you must call `self.get_device_status` tool first and then call this tool.",
+    AddTool("self.audio_speaker.set_volume",
+        "设置扬声器音量。用户要调音量时立刻调用本工具，不要只口头回复，也不要先查设备状态。\n"
+        "适用于这些说法：音量调到20、音量调到70、音量调到20%、音量调到70%、调小点音量、调大点音量、音量调到最小、音量调到最大。\n"
+        "参数:\n"
+        "  `volume`: 目标音量，整数 0 到 100（必需）。百分号去掉，只填数字。\n"
+        "  音量调到N、音量调到N%：volume 填 N。\n"
+        "  调小点音量：在当前音量上减 10，最低 0。\n"
+        "  调大点音量：在当前音量上加 10，最高 100。\n"
+        "  音量调到最小：volume 填 0。\n"
+        "  音量调到最大：volume 填 100。\n"
+        "返回:\n"
+        "  设置结果，不需确认，立刻调节音量。",
         PropertyList({
             Property("volume", kPropertyTypeInteger, 0, 100)
-        }), 
+        }),
         [&board](const PropertyList& properties) -> ReturnValue {
             auto codec = board.GetAudioCodec();
             codec->SetOutputVolume(properties["volume"].value<int>());
             return true;
         });
-    
+
     auto backlight = board.GetBacklight();
     if (backlight) {
         AddTool("self.screen.set_brightness",
-            "Set the brightness of the screen.",
+            "设置屏幕亮度。用户要调亮度时立刻调用本工具，不要只口头回复，也不要先查设备状态。\n"
+            "适用于这些说法：屏幕亮度调到10、屏幕亮度调到90、调整亮度到10%、调整亮度到90%、亮度调暗点、亮度调亮点、屏幕亮度调到最小、屏幕亮度调到最暗、屏幕亮度调到最大、屏幕亮度调到最亮。\n"
+            "参数:\n"
+            "  `brightness`: 目标亮度，整数 0 到 100（必需）。百分号去掉，只填数字。\n"
+            "  屏幕亮度调到N、调整亮度到N%：brightness 填 N。\n"
+            "  亮度调暗点：在当前亮度上减 10，最低 0。\n"
+            "  亮度调亮点：在当前亮度上加 10，最高 100。\n"
+            "  屏幕亮度调到最小、调到最暗：brightness 填 0。\n"
+            "  屏幕亮度调到最大、调到最亮：brightness 填 100。\n"
+            "返回:\n"
+            "  设置结果，不需确认，立刻调节亮度。",
             PropertyList({
                 Property("brightness", kPropertyTypeInteger, 0, 100)
             }),

@@ -150,6 +150,8 @@ FanHoloDisplay::~FanHoloDisplay() {
         lv_obj_del(boot_screen_);
         boot_screen_ = nullptr;
         boot_container_ = nullptr;
+        boot_subtitle_ = nullptr;
+        boot_subtitle_label_ = nullptr;
     }
     boot_bar_ = {};
     boot_role_ = {};
@@ -473,8 +475,27 @@ void FanHoloDisplay::UpdateStatusBar(bool update_all) {
     }
 }
 
+extern "C" {
+extern const lv_image_dsc_t microchip_fanfuture;
+extern const lv_image_dsc_t gear_fanfuture;
+}
+
+const lv_image_dsc_t* FanHoloBrandImage(const char* name) {
+    if (name == nullptr) {
+        return nullptr;
+    }
+    if (strcmp(name, "microchip_ai") == 0) {
+        return &microchip_fanfuture;
+    }
+    if (strcmp(name, "gear") == 0 || strcmp(name, "link") == 0) {
+        return &gear_fanfuture;
+    }
+    return nullptr;
+}
+
 void FanHoloDisplay::SetEmotion(const char* emotion) {
-    if (s_system_ready_) {
+    const lv_image_dsc_t* brand = FanHoloBrandImage(emotion);
+    if (s_system_ready_ && brand == nullptr) {
         return;
     }
     if (emotion != nullptr && std::strcmp(emotion, "neutral") == 0 && mjpeg_player_is_running()) {
@@ -498,6 +519,16 @@ void FanHoloDisplay::SetEmotion(const char* emotion) {
     }
 
     DisplayLockGuard lock(this);
+    if (brand != nullptr) {
+        lv_image_set_src(role.image, brand);
+        lv_obj_center(role.image);
+        if (role.label != nullptr) {
+            lv_obj_add_flag(role.label, LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_remove_flag(role.image, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
     auto emoji_collection = GetLvglTheme()->emoji_collection();
     auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
     if (image == nullptr) {
@@ -579,7 +610,81 @@ void FanHoloDisplay::SetRoleAnimation(const char* state) {
     }
 }
 
+void FanHoloDisplay::SetBootSubtitle(const char* content) {
+    if (boot_subtitle_ == nullptr || boot_subtitle_label_ == nullptr) {
+        return;
+    }
+    lv_anim_delete(boot_subtitle_, nullptr);
+    if (content == nullptr || content[0] == '\0') {
+        lv_label_set_text(boot_subtitle_label_, "");
+        lv_obj_add_flag(boot_subtitle_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_scroll_to_y(boot_subtitle_, 0, LV_ANIM_OFF);
+        return;
+    }
+
+    const std::string in(content);
+    std::string out;
+    out.reserve(in.size() * 2);
+    for (size_t i = 0; i < in.size(); ) {
+        const unsigned char c = (unsigned char)in[i];
+        size_t step = 1;
+        if ((c & 0xE0) == 0xC0) {
+            step = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            step = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            step = 4;
+        }
+        if (i + step > in.size()) {
+            step = in.size() - i;
+        }
+        out.append(in, i, step);
+        out.push_back('\n');
+        i += step;
+    }
+    if (!out.empty() && out.back() == '\n') {
+        out.pop_back();
+    }
+    lv_label_set_text(boot_subtitle_label_, out.c_str());
+    lv_obj_remove_flag(boot_subtitle_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(boot_subtitle_);
+    lv_obj_update_layout(boot_subtitle_label_);
+
+    const lv_coord_t content_h = lv_obj_get_height(boot_subtitle_label_);
+    const lv_coord_t container_h = lv_obj_get_height(boot_subtitle_);
+    if (content_h <= container_h) {
+        lv_obj_scroll_to_y(boot_subtitle_, 0, LV_ANIM_OFF);
+        return;
+    }
+    const int scroll_range_px = content_h - container_h;
+    uint32_t duration_ms = (uint32_t)(scroll_range_px * 1000 / 40);
+    if (duration_ms < 2000) {
+        duration_ms = 2000;
+    }
+    if (duration_ms > 16000) {
+        duration_ms = 16000;
+    }
+    lv_obj_scroll_to_y(boot_subtitle_, 0, LV_ANIM_OFF);
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, boot_subtitle_);
+    lv_anim_set_values(&anim, 0, scroll_range_px);
+    lv_anim_set_duration(&anim, duration_ms);
+    lv_anim_set_path_cb(&anim, lv_anim_path_linear);
+    lv_anim_set_exec_cb(&anim, [](void* var, int32_t v) {
+        lv_obj_scroll_to_y((lv_obj_t*)var, v, LV_ANIM_OFF);
+    });
+    lv_anim_start(&anim);
+}
+
 void FanHoloDisplay::SetChatMessage(const char* role, const char* content) {
+    if (current_page_ == Page::Boot) {
+        DisplayLockGuard lock(this);
+        const char* status = boot_bar_.status_label != nullptr ? lv_label_get_text(boot_bar_.status_label) : nullptr;
+        if (status != nullptr && strcmp(status, Lang::Strings::ACTIVATION) == 0) {
+            SetBootSubtitle(content);
+        }
+    }
     chat_page_.SetMessage(*this, role, content);
 }
 
@@ -629,6 +734,10 @@ void FanHoloDisplay::SetTheme(::Theme* theme) {
     chat_page_.ApplyTextFont(text_font, color);
     music_page_.ApplyTextFont(text_font, color);
     boot_bar_.ApplyTextFont(text_font, color);
+    if (boot_subtitle_label_ != nullptr) {
+        lv_obj_set_style_text_font(boot_subtitle_label_, text_font, 0);
+        lv_obj_set_style_text_color(boot_subtitle_label_, lv_color_hex(0xC9FF20), 0);
+    }
 }
 
 bool FanHoloDisplay::FileExists(const std::string& path) {
@@ -852,5 +961,23 @@ void FanHoloDisplay::SetupUI() {
     boot_role_.Create(boot_screen_, *this, false);
     boot_bar_.Create(boot_screen_, *this, FanHoloStatusBar::Kind::StatusLeft);
     boot_bar_.SetStatusText(Lang::Strings::INITIALIZING);
+
+    boot_subtitle_ = lv_obj_create(boot_screen_);
+    lv_obj_set_scrollbar_mode(boot_subtitle_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_scroll_dir(boot_subtitle_, LV_DIR_VER);
+    lv_obj_set_size(boot_subtitle_, (lv_coord_t)metrics_.chat_strip_w, (lv_coord_t)(height_ - 300));
+    lv_obj_set_style_bg_opa(boot_subtitle_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(boot_subtitle_, 0, 0);
+    lv_obj_set_style_pad_all(boot_subtitle_, 0, 0);
+    lv_obj_align(boot_subtitle_, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_add_flag(boot_subtitle_, LV_OBJ_FLAG_HIDDEN);
+
+    boot_subtitle_label_ = lv_label_create(boot_subtitle_);
+    lv_label_set_text(boot_subtitle_label_, "");
+    lv_obj_set_width(boot_subtitle_label_, (lv_coord_t)metrics_.chat_strip_w);
+    lv_label_set_long_mode(boot_subtitle_label_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(boot_subtitle_label_, GetLvglTheme()->text_font()->font(), 0);
+    lv_obj_set_style_text_align(boot_subtitle_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(boot_subtitle_label_, lv_color_hex(0xC9FF20), 0);
     SwitchTo(Page::Boot);
 }

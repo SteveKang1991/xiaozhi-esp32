@@ -82,6 +82,7 @@ private:
     void HideVolumeOverlay(lv_obj_t* overlay);
     void RaiseCurrentOverlays();
     void ApplyIdleBatteryIconColor();
+    void SetBootSubtitle(const char* content);
     static void VolumeHideTimerCb(void* arg);
 
     lv_obj_t* volume_bar_ = nullptr;
@@ -103,6 +104,8 @@ private:
 
     lv_obj_t* boot_screen_ = nullptr;
     lv_obj_t* boot_container_ = nullptr;
+    lv_obj_t* boot_subtitle_ = nullptr;
+    lv_obj_t* boot_subtitle_label_ = nullptr;
     FanHoloStatusBar boot_bar_;
     FanHoloRoleWidgets boot_role_;
 
@@ -110,5 +113,7 @@ private:
     FanHoloChatPage chat_page_;
     FanHoloMusicPage music_page_;
 };
+
+const lv_image_dsc_t* FanHoloBrandImage(const char* name);
 
 #endif
