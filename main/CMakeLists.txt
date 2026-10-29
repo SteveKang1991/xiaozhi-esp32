@@ -835,6 +835,8 @@ if(CONFIG_BOARD_TYPE_FANFUTURE_Huanying1_778928_WiFI OR CONFIG_BOARD_TYPE_FANFUT
         "display/fan_holo/fan_holo_lunar.cc"
         "display/fan_holo/fan_holo_font7_digits.c"
         "display/fan_holo/font_puhui_number_42_4.c"
+        "display/fan_holo/gear_fanfuture.c"
+        "display/fan_holo/microchip_fanfuture.c"
         "display/fan_holo/icons/fan_holo_icon_temp.c"
         "display/fan_holo/icons/fan_holo_icon_humidity.c"
         "display/fan_holo/icons/fan_holo_icon_precip.c"

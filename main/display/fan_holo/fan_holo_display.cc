@@ -13,6 +13,7 @@
 #include <esp_timer.h>
 #include <esp_psram.h>
 #include <cstring>
+#include <string>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -177,6 +178,8 @@ FanHoloDisplay::~FanHoloDisplay() {
         lv_obj_del(boot_screen_);
         boot_screen_ = nullptr;
         boot_container_ = nullptr;
+        boot_subtitle_ = nullptr;
+        boot_subtitle_label_ = nullptr;
     }
     boot_bar_ = {};
     boot_role_ = {};
@@ -526,8 +529,71 @@ void FanHoloDisplay::UpdateStatusBar(bool update_all) {
     }
 }
 
+extern "C" {
+extern const lv_image_dsc_t microchip_fanfuture;
+extern const lv_image_dsc_t gear_fanfuture;
+}
+
+const lv_image_dsc_t* FanHoloBrandImage(const char* name) {
+    if (name == nullptr) {
+        return nullptr;
+    }
+    if (strcmp(name, "microchip_ai") == 0) {
+        return &microchip_fanfuture;
+    }
+    if (strcmp(name, "gear") == 0 || strcmp(name, "link") == 0) {
+        return &gear_fanfuture;
+    }
+    return nullptr;
+}
+
+void FanHoloApplyBrandImage(lv_obj_t* box, lv_obj_t* image, lv_obj_t* label,
+                            const lv_image_dsc_t* brand, int screen_w, int screen_h, bool center_on_screen) {
+    if (image == nullptr || brand == nullptr) {
+        return;
+    }
+    const int iw = brand->header.w > 0 ? (int)brand->header.w : 1;
+    const int ih = brand->header.h > 0 ? (int)brand->header.h : 1;
+    int avail_w = screen_w - 8;
+    int avail_h = screen_h - 8;
+    if (avail_w < 32) {
+        avail_w = screen_w;
+    }
+    if (avail_h < 32) {
+        avail_h = screen_h;
+    }
+    int dw = iw;
+    int dh = ih;
+    if (dw > avail_w) {
+        dw = avail_w;
+        dh = ih * dw / iw;
+    }
+    if (dh > avail_h) {
+        dh = avail_h;
+        dw = iw * dh / ih;
+        if (dw < 1) {
+            dw = 1;
+        }
+    }
+    if (dh < 1) {
+        dh = 1;
+    }
+    lv_image_set_src(image, brand);
+    lv_obj_set_size(image, dw, dh);
+    lv_image_set_inner_align(image, LV_IMAGE_ALIGN_CONTAIN);
+    lv_obj_center(image);
+    if (label != nullptr) {
+        lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_remove_flag(image, LV_OBJ_FLAG_HIDDEN);
+    if (box != nullptr && center_on_screen) {
+        lv_obj_align(box, LV_ALIGN_CENTER, 0, 0);
+    }
+}
+
 void FanHoloDisplay::SetEmotion(const char* emotion) {
-    if (s_system_ready_) {
+    const lv_image_dsc_t* brand = FanHoloBrandImage(emotion);
+    if (s_system_ready_ && brand == nullptr) {
         return;
     }
     if (emotion != nullptr && std::strcmp(emotion, "neutral") == 0 && mjpeg_player_is_running()) {
@@ -552,6 +618,24 @@ void FanHoloDisplay::SetEmotion(const char* emotion) {
     }
 
     DisplayLockGuard lock(this);
+    if (brand != nullptr) {
+        const bool link_caption = current_page_ == Page::Boot && emotion != nullptr && std::strcmp(emotion, "link") == 0;
+        if (link_caption) {
+            boot_link_caption_ = true;
+        } else {
+            HideLinkCaption();
+        }
+        FanHoloApplyBrandImage(role.box, role.image, role.label, brand, width_, height_,
+                               current_page_ == Page::Boot);
+        return;
+    }
+    HideLinkCaption();
+    lv_obj_set_size(role.image, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_image_set_inner_align(role.image, LV_IMAGE_ALIGN_CENTER);
+    if (role.box != nullptr && current_page_ == Page::Boot) {
+        lv_obj_align(role.box, LV_ALIGN_CENTER, 0, 0);
+    }
+
     auto emoji_collection = GetLvglTheme()->emoji_collection();
     auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
     if (image == nullptr) {
@@ -630,7 +714,66 @@ void FanHoloDisplay::SetRoleAnimation(const char* state) {
     }
 }
 
+void FanHoloDisplay::HideLinkCaption() {
+    boot_link_caption_ = false;
+    if (boot_subtitle_ == nullptr) {
+        return;
+    }
+    if (boot_subtitle_label_ != nullptr) {
+        lv_label_set_text(boot_subtitle_label_, "");
+    }
+    lv_obj_add_flag(boot_subtitle_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void FanHoloDisplay::SetLinkCaption(const char* content) {
+    if (!boot_link_caption_ || boot_subtitle_ == nullptr || boot_subtitle_label_ == nullptr) {
+        return;
+    }
+    if (content == nullptr || content[0] == '\0') {
+        lv_label_set_text(boot_subtitle_label_, "");
+        lv_obj_add_flag(boot_subtitle_, LV_OBJ_FLAG_HIDDEN);
+        if (boot_role_.box != nullptr) {
+            lv_obj_align(boot_role_.box, LV_ALIGN_CENTER, 0, 0);
+        }
+        return;
+    }
+
+    const lv_coord_t caption_w = (lv_coord_t)width_ - 12;
+    lv_obj_set_width(boot_subtitle_, caption_w);
+    lv_obj_set_height(boot_subtitle_, LV_SIZE_CONTENT);
+    lv_obj_set_width(boot_subtitle_label_, caption_w);
+    lv_label_set_long_mode(boot_subtitle_label_, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(boot_subtitle_label_, content);
+    lv_obj_remove_flag(boot_subtitle_, LV_OBJ_FLAG_HIDDEN);
+    if (boot_role_.box != nullptr) {
+        lv_obj_align(boot_role_.box, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_update_layout(boot_role_.box);
+    }
+    lv_obj_update_layout(boot_subtitle_);
+
+    const int bottom_margin = 8;
+    int text_h = lv_obj_get_height(boot_subtitle_);
+    int img_bottom = height_ / 2;
+    if (boot_role_.box != nullptr) {
+        img_bottom = height_ / 2 + lv_obj_get_height(boot_role_.box) / 2;
+    }
+    int max_text = height_ - img_bottom - bottom_margin - 6;
+    if (max_text < 16) {
+        max_text = 16;
+    }
+    if (text_h > max_text) {
+        text_h = max_text;
+        lv_obj_set_height(boot_subtitle_, text_h);
+    }
+    lv_obj_align(boot_subtitle_, LV_ALIGN_BOTTOM_MID, 0, -bottom_margin);
+    lv_obj_move_foreground(boot_subtitle_);
+}
+
 void FanHoloDisplay::SetChatMessage(const char* role, const char* content) {
+    if (current_page_ == Page::Boot && boot_link_caption_) {
+        DisplayLockGuard lock(this);
+        SetLinkCaption(content);
+    }
     chat_page_.SetMessage(*this, role, content);
 }
 
@@ -682,6 +825,10 @@ void FanHoloDisplay::SetTheme(::Theme* theme) {
     chat_page_.ApplyTextFont(text_font, color);
     music_page_.ApplyTextFont(text_font, color);
     boot_bar_.ApplyTextFont(text_font, color);
+    if (boot_subtitle_label_ != nullptr) {
+        lv_obj_set_style_text_font(boot_subtitle_label_, text_font, 0);
+        lv_obj_set_style_text_color(boot_subtitle_label_, lv_color_hex(0xC9FF20), 0);
+    }
 }
 
 void FanHoloDisplay::MjpegResForClip(const char* clip, unsigned* w, unsigned* h) const {
@@ -1055,5 +1202,23 @@ void FanHoloDisplay::SetupUI() {
     boot_role_.Create(boot_screen_, *this, false);
     boot_bar_.Create(boot_screen_, *this, FanHoloStatusBar::Kind::StatusLeft);
     boot_bar_.SetStatusText(Lang::Strings::INITIALIZING);
+
+    boot_subtitle_ = lv_obj_create(boot_screen_);
+    lv_obj_set_scrollbar_mode(boot_subtitle_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_width(boot_subtitle_, (lv_coord_t)width_ - 12);
+    lv_obj_set_height(boot_subtitle_, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(boot_subtitle_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(boot_subtitle_, 0, 0);
+    lv_obj_set_style_pad_all(boot_subtitle_, 0, 0);
+    lv_obj_align(boot_subtitle_, LV_ALIGN_BOTTOM_MID, 0, -4);
+    lv_obj_add_flag(boot_subtitle_, LV_OBJ_FLAG_HIDDEN);
+
+    boot_subtitle_label_ = lv_label_create(boot_subtitle_);
+    lv_label_set_text(boot_subtitle_label_, "");
+    lv_obj_set_width(boot_subtitle_label_, (lv_coord_t)width_ - 12);
+    lv_label_set_long_mode(boot_subtitle_label_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(boot_subtitle_label_, GetLvglTheme()->text_font()->font(), 0);
+    lv_obj_set_style_text_align(boot_subtitle_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(boot_subtitle_label_, lv_color_hex(0xC9FF20), 0);
     SwitchTo(Page::Boot);
 }

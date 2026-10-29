@@ -1099,7 +1099,12 @@ void FanHoloRoleWidgets::Create(lv_obj_t* screen, FanHoloDisplay& host, bool idl
 
     image = lv_img_create(box);
     lv_obj_center(image);
-    lv_obj_add_flag(image, LV_OBJ_FLAG_HIDDEN);
+    const lv_image_dsc_t* brand = idle_corner ? nullptr : FanHoloBrandImage("microchip_ai");
+    if (brand != nullptr) {
+        FanHoloApplyBrandImage(box, image, label, brand, host.screen_width(), host.screen_height(), true);
+    } else {
+        lv_obj_add_flag(image, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void FanHoloRoleWidgets::Hide() {
