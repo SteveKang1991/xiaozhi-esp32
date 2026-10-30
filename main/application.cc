@@ -846,17 +846,15 @@ void Application::CheckEmotionFiles() {
 
     ESP_LOGI(kEmotionTag, "Fetched %d emotion(s) from server", (int)fetch_result.emotions.size());
 
-    // 服务器返回空列表：自定义 idle/listen/speak 全部删掉（不碰 default-*）
+    // 列表只含当前角色。空列表表示这个角色没有动画，保留卡上已有文件。
     if (fetch_result.emotions.empty()) {
-        CleanOrphanEmotionFiles({});
-        ESP_LOGI(kEmotionTag, "No role emotions on server, cleared role files only");
+        ESP_LOGI(kEmotionTag, "No emotions for current role, keep local files");
         return;
     }
 
     std::vector<EmotionInfo>& emotions = fetch_result.emotions;
 
-    // 对比服务器列表与SD卡，同步表情
-    std::vector<std::string> valid_paths;
+    // 只对比这份列表里的当前角色动画，不扫描、不删除其他角色文件
     int download_count = 0;
     int total_count = 0;
 
@@ -874,7 +872,6 @@ void Application::CheckEmotionFiles() {
             std::string local_md5 = MD5::Calculate(info.local_path);
             if (!local_md5.empty() && local_md5 == info.hash) {
                 ESP_LOGI(kEmotionTag, "Emotion %s is up-to-date, skip", info.type.c_str());
-                valid_paths.push_back(info.local_path);  // 已有文件也要标记为有效，防止清理时被删
                 continue;  // 已是最新，跳过
             }
         }
@@ -883,10 +880,8 @@ void Application::CheckEmotionFiles() {
         total_count++;
     }
 
-    // 如果没有需要下载的，直接清理角色动画同步（服务器没有的角色要删掉）
     if (total_count == 0) {
-        ESP_LOGI(kEmotionTag, "All emotions are up-to-date, checking role sync");
-        CleanOrphanEmotionFiles(valid_paths);
+        ESP_LOGI(kEmotionTag, "Current role emotions are up-to-date");
         return;
     }
 
@@ -935,7 +930,6 @@ void Application::CheckEmotionFiles() {
         if (stat(info.local_path.c_str(), &st) == 0 && st.st_size > 0 && st.st_size == (off_t)info.size) {
             std::string local_md5 = MD5::Calculate(info.local_path);
             if (!local_md5.empty() && local_md5 == info.hash) {
-                valid_paths.push_back(info.local_path);  // 已有文件也要标记为有效
                 continue;  // 已是最新，跳过
             }
         }
@@ -968,14 +962,12 @@ void Application::CheckEmotionFiles() {
         if (stat(info.local_path.c_str(), &st2) == 0) {
             bytes_done_total = file_start_bytes + static_cast<size_t>(st2.st_size);
         }
-        valid_paths.push_back(info.local_path);
 
         int progress = total_count > 0 ? (download_count * 100 / total_count) : 100;
         UpgradeScreen::Update(progress, bytes_done_total, bytes_total_sum, latest_speed_bps);
     }
 
-    // 清理孤儿文件
-    CleanOrphanEmotionFiles(valid_paths);
+    // 不删除列表之外的角色动画，也不动 default- 和其他文件。
 
     // 下载完成
     UpgradeScreen::Dismiss();
@@ -1510,6 +1502,7 @@ bool Application::DownloadSDAssetsFile(const std::string& url, const std::string
     return true;
 }
 
+// 开机同步不再调用。列表之外的角色动画留在卡上，default- 也不在这里处理。
 void Application::CleanOrphanEmotionFiles(const std::vector<std::string>& valid_paths) {
     if (!SdWritesPermitted(15)) {
         ESP_LOGW(kEmotionTag, "Skip orphan cleanup, SD write blocked");
