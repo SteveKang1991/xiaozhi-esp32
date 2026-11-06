@@ -4,6 +4,9 @@
 #include "gif/lvgl_gif.h"
 #include "assets/lang_config.h"
 #include "board.h"
+#include "jpg/jpeg_to_image.h"
+
+#include <esp_heap_caps.h>
 
 #include <memory>
 
@@ -12,6 +15,7 @@
 #include <esp_lvgl_port.h>
 #include <esp_timer.h>
 #include <cstring>
+#include <new>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -133,6 +137,7 @@ FanHoloDisplay::FanHoloDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
 }
 
 FanHoloDisplay::~FanHoloDisplay() {
+    StopAlbumCarousel();
     if (volume_hide_timer_ != nullptr) {
         esp_timer_stop(volume_hide_timer_);
         esp_timer_delete(volume_hide_timer_);
@@ -592,6 +597,15 @@ void FanHoloDisplay::SetRoleAnimation(const char* state) {
 
     const char* clip = MapRoleStateToClip(state);
     const bool idle_clip = (strcmp(clip, "idle") == 0);
+    if (idle_clip && AlbumIdleEnabled()) {
+        StopMjpegIfRunning();
+        if (current_page_ != Page::Idle || lv_screen_active() != idle_page_.screen()) {
+            PreparePage(Page::Idle);
+        }
+        StartAlbumCarousel();
+        return;
+    }
+    StopAlbumCarousel();
     const std::string& clip_path = FindRoleAnimation(clip);
     if (clip_path.empty()) {
         ESP_LOGI(metrics_.tag, "SetRoleAnimation: no available MJPEG for state=%s, skip", clip);
@@ -695,12 +709,21 @@ void FanHoloDisplay::ClearChatMessages() {
 void FanHoloDisplay::SetSystemReady() {
     s_system_ready_ = true;
     ESP_LOGI(metrics_.tag, "MJPEG ready: system is ready, SD card operations permitted");
-    if (!mjpeg_player_is_running() && sd_scanner_is_mounted()) {
+    if (!sd_scanner_is_mounted()) {
+        return;
+    }
+    /* 相册全屏 JPEG 和唤醒词建 FST 不能叠在一起，后者会把主任务栈打穿。
+     * 相册改由待机状态回调在唤醒词初始化之后再打开。 */
+    if (AlbumIdleEnabled()) {
+        return;
+    }
+    if (!mjpeg_player_is_running()) {
         SetRoleAnimation("idle");
     }
 }
 
 void FanHoloDisplay::PrepareForReboot() {
+    StopAlbumCarousel();
     StopMjpegIfRunning();
     LvglDisplay::PrepareForReboot();
 }
@@ -942,6 +965,258 @@ void FanHoloDisplay::StopMjpegIfRunning() {
         mjpeg_player_stop();
     }
     current_mjpeg_path_.clear();
+}
+
+bool FanHoloDisplay::AlbumMode() const {
+    Settings settings("device", false);
+    return settings.GetInt("idle_show_type", 1) == 2;
+}
+
+bool FanHoloDisplay::AlbumIdleEnabled() const {
+    return AlbumMode();
+}
+
+void FanHoloDisplay::ApplyIdleShowMode() {
+    DisplayLockGuard lock(this);
+    idle_page_.ApplyShowMode(*this);
+}
+
+namespace {
+
+/* 全屏 JPEG 的栈放 PSRAM，任务绑在 CPU0，不跟 CPU1 上的唤醒检测抢。 */
+constexpr size_t kAlbumStackBytes = 48 * 1024;
+
+TaskHandle_t s_album_task = nullptr;
+StackType_t* s_album_stack = nullptr;
+StaticTask_t s_album_tcb;
+std::atomic<int> s_album_slot{-1};
+
+}  // namespace
+
+void FanHoloDisplay::AlbumDecodeTask(void* arg) {
+    auto* self = static_cast<FanHoloDisplay*>(arg);
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        const int slot = s_album_slot.exchange(-1);
+        const uint32_t gen = self->album_gen_.load();
+        if (slot < 101 || slot > 110 || !self->album_active_.load() || gen != self->album_gen_.load()) {
+            self->album_decode_busy_.store(false);
+            continue;
+        }
+
+        char path[48];
+        snprintf(path, sizeof(path), "/sdcard/Album/%d.jpg", slot);
+        FILE* fp = fopen(path, "rb");
+        if (fp == nullptr) {
+            self->album_decode_busy_.store(false);
+            continue;
+        }
+        if (fseek(fp, 0, SEEK_END) != 0) {
+            fclose(fp);
+            self->album_decode_busy_.store(false);
+            continue;
+        }
+        long sz = ftell(fp);
+        if (sz <= 0 || sz > 2 * 1024 * 1024) {
+            fclose(fp);
+            self->album_decode_busy_.store(false);
+            continue;
+        }
+        rewind(fp);
+        uint8_t* data = static_cast<uint8_t*>(heap_caps_malloc(static_cast<size_t>(sz), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (data == nullptr) {
+            fclose(fp);
+            self->album_decode_busy_.store(false);
+            continue;
+        }
+        size_t total = fread(data, 1, static_cast<size_t>(sz), fp);
+        fclose(fp);
+        if (total < 3 || data[0] != 0xFF || data[1] != 0xD8 ||
+            !self->album_active_.load() || gen != self->album_gen_.load()) {
+            heap_caps_free(data);
+            self->album_decode_busy_.store(false);
+            continue;
+        }
+
+        ESP_LOGI(self->metrics_.tag, "Album decode %d (%u bytes)", slot, (unsigned)total);
+        uint8_t* decoded = nullptr;
+        size_t decoded_len = 0;
+        size_t img_w = 0;
+        size_t img_h = 0;
+        size_t stride = 0;
+        esp_err_t ret = jpeg_to_image(data, total, &decoded, &decoded_len, &img_w, &img_h, &stride);
+        heap_caps_free(data);
+        if (ret != ESP_OK || decoded == nullptr) {
+            if (decoded != nullptr) {
+                heap_caps_free(decoded);
+            }
+            ESP_LOGW(self->metrics_.tag, "Album decode %d failed: %s", slot, esp_err_to_name(ret));
+            self->album_decode_busy_.store(false);
+            continue;
+        }
+        self->ApplyAlbumFrame(gen, slot, decoded, decoded_len, img_w, img_h, stride);
+        self->album_decode_busy_.store(false);
+    }
+}
+
+void FanHoloDisplay::ScheduleAlbumDecode(int slot) {
+    if (!album_active_.load() || s_album_task == nullptr) {
+        return;
+    }
+    if (album_decode_busy_.exchange(true)) {
+        return;
+    }
+    s_album_slot.store(slot);
+    xTaskNotifyGive(s_album_task);
+}
+
+void FanHoloDisplay::AlbumStartTimerCb(void* arg) {
+    auto* self = static_cast<FanHoloDisplay*>(arg);
+    if (self == nullptr || !self->album_active_.load() || self->album_slot_count_ <= 0) {
+        return;
+    }
+    self->ScheduleAlbumDecode(self->album_slots_[0]);
+}
+
+void FanHoloDisplay::AlbumTimerCb(lv_timer_t* timer) {
+    auto* self = static_cast<FanHoloDisplay*>(lv_timer_get_user_data(timer));
+    if (self == nullptr || !self->album_active_.load() || self->album_slot_count_ <= 1) {
+        return;
+    }
+    if (self->current_page_ != Page::Idle) {
+        return;
+    }
+    self->album_slot_index_ = (self->album_slot_index_ + 1) % self->album_slot_count_;
+    self->ScheduleAlbumDecode(self->album_slots_[self->album_slot_index_]);
+}
+
+void FanHoloDisplay::ApplyAlbumFrame(uint32_t gen, int slot, uint8_t* decoded, size_t len, size_t w, size_t h,
+                                     size_t stride) {
+    (void)slot;
+    if (decoded == nullptr) {
+        return;
+    }
+    if (!album_active_.load() || gen != album_gen_.load() || current_page_ != Page::Idle) {
+        heap_caps_free(decoded);
+        return;
+    }
+    int vis_w = static_cast<int>(w);
+    int vis_h = static_cast<int>(h);
+    if (vis_w > width_) {
+        vis_w = width_;
+    }
+    if (vis_h > height_) {
+        vis_h = height_;
+    }
+    if (stride == 0) {
+        stride = w * 2;
+    }
+    DisplayLockGuard lock(this);
+    if (!album_active_.load() || gen != album_gen_.load() || current_page_ != Page::Idle) {
+        heap_caps_free(decoded);
+        return;
+    }
+    try {
+        auto next = std::make_unique<LvglAllocatedImage>(
+            decoded, len, vis_w, vis_h, static_cast<int>(stride), LV_COLOR_FORMAT_RGB565);
+        idle_page_.ShowAlbumImage(*this, next->image_dsc());
+        album_image_ = std::move(next);
+    } catch (...) {
+        heap_caps_free(decoded);
+    }
+}
+
+void FanHoloDisplay::StartAlbumCarousel() {
+    if (album_active_.load()) {
+        return;
+    }
+    Settings settings("device", false);
+    int sec = settings.GetInt("idle_show_sec", 10);
+    if (sec < 1) {
+        sec = 1;
+    } else if (sec > 60) {
+        sec = 60;
+    }
+    album_interval_sec_ = sec;
+    album_slot_count_ = 0;
+    album_slot_index_ = 0;
+    for (int slot = 101; slot <= 110; ++slot) {
+        char path[48];
+        snprintf(path, sizeof(path), "/sdcard/Album/%d.jpg", slot);
+        struct stat st = {};
+        if (stat(path, &st) == 0 && st.st_size > 0) {
+            album_slots_[album_slot_count_++] = slot;
+        }
+    }
+    album_active_.store(true);
+    if (album_slot_count_ == 0) {
+        DisplayLockGuard lock(this);
+        idle_page_.HideAlbumImage();
+        return;
+    }
+    if (s_album_task == nullptr) {
+        s_album_stack = static_cast<StackType_t*>(heap_caps_malloc(kAlbumStackBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (s_album_stack == nullptr) {
+            album_active_.store(false);
+            ESP_LOGE(metrics_.tag, "Album decode stack alloc failed");
+            return;
+        }
+        s_album_task = xTaskCreateStaticPinnedToCore(AlbumDecodeTask, "album_jpg", kAlbumStackBytes, this, 1,
+                                                      s_album_stack, &s_album_tcb, 0);
+        if (s_album_task == nullptr) {
+            heap_caps_free(s_album_stack);
+            s_album_stack = nullptr;
+            album_active_.store(false);
+            ESP_LOGE(metrics_.tag, "Album decode task create failed");
+            return;
+        }
+    }
+    if (album_start_timer_ == nullptr) {
+        const esp_timer_create_args_t args = {
+            .callback = &FanHoloDisplay::AlbumStartTimerCb,
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "album_start",
+            .skip_unhandled_events = true,
+        };
+        esp_timer_create(&args, &album_start_timer_);
+    }
+    if (album_start_timer_ != nullptr) {
+        esp_timer_stop(album_start_timer_);
+        /* 唤醒检测、采集和提示音都起来之后再硬件解码，避免和建模型挤在一起。 */
+        esp_timer_start_once(album_start_timer_, 800 * 1000);
+    }
+    if (album_slot_count_ > 1) {
+        DisplayLockGuard lock(this);
+        if (album_timer_ != nullptr) {
+            lv_timer_del(album_timer_);
+            album_timer_ = nullptr;
+        }
+        album_timer_ = lv_timer_create(AlbumTimerCb, static_cast<uint32_t>(album_interval_sec_) * 1000, this);
+    }
+}
+
+void FanHoloDisplay::StopAlbumCarousel() {
+    if (!album_active_.load() && album_timer_ == nullptr && !album_image_ && !album_decode_busy_.load()) {
+        return;
+    }
+    album_active_.store(false);
+    album_gen_.fetch_add(1);
+    if (album_start_timer_ != nullptr) {
+        esp_timer_stop(album_start_timer_);
+    }
+    for (int i = 0; i < 150 && album_decode_busy_.load(); ++i) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    DisplayLockGuard lock(this);
+    if (album_timer_ != nullptr) {
+        lv_timer_del(album_timer_);
+        album_timer_ = nullptr;
+    }
+    idle_page_.HideAlbumImage();
+    album_image_.reset();
+    album_slot_count_ = 0;
+    album_slot_index_ = 0;
 }
 
 void FanHoloDisplay::SetupUI() {

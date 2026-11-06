@@ -109,6 +109,7 @@ public:
     virtual void StopFft() {}
     virtual void SetIdleWeather(const IdleWeatherView& weather) { (void)weather; }
     virtual void SetIdleClockStyle(int style) { (void)style; }
+    virtual void ApplyIdleShowMode() {}
 
     /**
      * 把频谱柱/帽打回初始高度并清计算缓存。切歌打断或一曲结束时调用，

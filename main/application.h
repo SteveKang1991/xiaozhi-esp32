@@ -150,6 +150,7 @@ private:
     bool first_boot_after_blufi_ = false;   // Flag to reboot after first OTA check following BluFi provisioning
     int clock_ticks_ = 0;
     std::string weather_city_;
+    int idle_show_type_ = 1;
     TaskHandle_t activation_task_handle_ = nullptr;
     /* tts stop 后不再开 grace：Listening 开麦期间继续收 TTS 会把尾音录进 STT。 */
     volatile bool tts_stop_grace_accept_audio_ = false;
@@ -197,6 +198,7 @@ private:
 
     // SD 资源文件同步（音乐背景图 .bin 等），不做 MD5 校验、按文件名比对缺失即下载
     void CheckSDAssetsFiles();
+    void CheckAlbumAssetsFiles();
     bool DownloadSDAssetsFile(const std::string& url, const std::string& local_path,
                               DownloadProgressCallback progress_cb = nullptr);
     void CheckDeviceInfo();

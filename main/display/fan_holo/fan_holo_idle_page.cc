@@ -250,6 +250,15 @@ void FanHoloIdlePage::StyleWeatherIcon(lv_obj_t* icon, int slot) {
 
 void FanHoloIdlePage::Create(FanHoloDisplay& host) {
     screen_ = FanHoloCreateScreen(host);
+    album_bg_ = lv_image_create(screen_);
+    lv_obj_set_pos(album_bg_, 0, 0);
+    lv_obj_set_size(album_bg_, host.screen_width(), host.screen_height());
+    lv_obj_remove_flag(album_bg_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(album_bg_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(album_bg_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_image_opa(album_bg_, LV_OPA_COVER, 0);
+    lv_image_set_inner_align(album_bg_, LV_IMAGE_ALIGN_CENTER);
+    lv_obj_add_flag(album_bg_, LV_OBJ_FLAG_HIDDEN);
     container_ = FanHoloCreateFullBleedContainer(screen_, host);
     lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(container_, lv_color_black(), 0);
@@ -266,6 +275,7 @@ void FanHoloIdlePage::Create(FanHoloDisplay& host) {
         lv_obj_move_foreground(weather_root_);
     }
     status_bar_.RaiseOverlays();
+    ApplyShowMode(host);
 }
 
 void FanHoloIdlePage::Destroy() {
@@ -273,6 +283,7 @@ void FanHoloIdlePage::Destroy() {
         lv_obj_del(screen_);
         screen_ = nullptr;
     }
+    album_bg_ = nullptr;
     container_ = nullptr;
     preview_image_ = nullptr;
     weather_root_ = nullptr;
@@ -327,6 +338,32 @@ void FanHoloIdlePage::HideRole() {
     role_.Hide();
 }
 
+void FanHoloIdlePage::ShowAlbumImage(FanHoloDisplay& host, const lv_image_dsc_t* dsc) {
+    if (album_bg_ == nullptr || dsc == nullptr) {
+        return;
+    }
+    lv_image_set_src(album_bg_, dsc);
+    lv_obj_remove_flag(album_bg_, LV_OBJ_FLAG_HIDDEN);
+    if (weather_root_ != nullptr) {
+        lv_obj_move_foreground(weather_root_);
+    }
+    if (detail_card_ != nullptr) {
+        lv_obj_move_foreground(detail_card_);
+    }
+    host.RaiseCurrentOverlays();
+    if (host.volume_overlay_ != nullptr) {
+        lv_obj_move_foreground(host.volume_overlay_);
+    }
+}
+
+void FanHoloIdlePage::HideAlbumImage() {
+    if (album_bg_ == nullptr) {
+        return;
+    }
+    lv_image_set_src(album_bg_, nullptr);
+    lv_obj_add_flag(album_bg_, LV_OBJ_FLAG_HIDDEN);
+}
+
 void FanHoloIdlePage::Tick() {
     status_bar_.Tick();
     if (detail_label_ == nullptr || detail_line0_[0] == '\0') {
@@ -375,6 +412,42 @@ void FanHoloIdlePage::ApplyTextFont(const lv_font_t* font, lv_color_t color) {
     }
 }
 
+void FanHoloIdlePage::ApplyShowMode(FanHoloDisplay& host) {
+    album_mode_ = host.AlbumMode();
+    if (screen_ == nullptr) {
+        return;
+    }
+    status_bar_.RecreateIdleClock(screen_, host);
+    auto style_card = [this](lv_obj_t* obj) {
+        if (obj == nullptr) {
+            return;
+        }
+        if (album_mode_) {
+            lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(obj, 0, 0);
+            lv_obj_set_style_border_opa(obj, LV_OPA_TRANSP, 0);
+        } else {
+            StyleLedCard(obj);
+        }
+    };
+    style_card(today_box_);
+    style_card(forecast_box_);
+    if (detail_card_ != nullptr) {
+        if (album_mode_ || !last_weather_.valid) {
+            lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(detail_card_, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (weather_root_ != nullptr) {
+        lv_obj_move_foreground(weather_root_);
+    }
+    if (!album_mode_ && detail_card_ != nullptr) {
+        lv_obj_move_foreground(detail_card_);
+    }
+    status_bar_.RaiseOverlays();
+}
+
 void FanHoloIdlePage::ApplyClockStyle(FanHoloDisplay& host) {
     if (screen_ == nullptr) {
         return;
@@ -404,7 +477,11 @@ void FanHoloIdlePage::ApplyWeather(const IdleWeatherView& weather) {
     const bool was_hidden = lv_obj_has_flag(weather_root_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(weather_root_, LV_OBJ_FLAG_HIDDEN);
     if (detail_card_) {
-        lv_obj_remove_flag(detail_card_, LV_OBJ_FLAG_HIDDEN);
+        if (album_mode_) {
+            lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(detail_card_, LV_OBJ_FLAG_HIDDEN);
+        }
     }
     if (was_hidden) {
         lv_obj_move_foreground(weather_root_);

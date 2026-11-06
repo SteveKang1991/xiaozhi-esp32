@@ -374,17 +374,28 @@ void Application::ActivationTask() {
     // Initialize the protocol
     InitializeProtocol();
 
+    // 先拿到待机显示方式，后面才知道要不要同步相册。
+    CheckDeviceInfo();
+    ReportDeviceInfo();
+
     // 卡没挂上就不要碰资源同步。挂载在进激活任务之前已经结束，这里只看结果。
     if (sd_scanner_is_mounted()) {
         CheckSDAssetsFiles();
+        if (idle_show_type_ == 2) {
+            CheckAlbumAssetsFiles();
+        }
         CheckEmotionFiles();
     } else {
         ESP_LOGW(TAG, "SD card not mounted, skip asset and emotion sync");
     }
 
-    // 拉取设备信息，加载自定义唤醒词拼音
-    CheckDeviceInfo();
-    ReportDeviceInfo();
+    // 角色动画和相册都落卡之后再开待机画面，避免用同步前的旧文件。
+    if (GetDeviceState() == kDeviceStateIdle) {
+        auto idle_display = Board::GetInstance().GetDisplay();
+        if (idle_display != nullptr) {
+            idle_display->SetRoleAnimation("idle");
+        }
+    }
 
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
@@ -450,17 +461,37 @@ void Application::CheckDeviceInfo() {
     } else if (cJSON_IsString(robot_item) && robot_item->valuestring != nullptr) {
         robot_id = atoi(robot_item->valuestring);
     }
+    cJSON* show_item = cJSON_GetObjectItem(data, "idle_show_type");
+    int idle_show_type = 1;
+    if (cJSON_IsNumber(show_item)) {
+        idle_show_type = show_item->valueint;
+    } else if (cJSON_IsString(show_item) && show_item->valuestring != nullptr) {
+        idle_show_type = atoi(show_item->valuestring);
+    }
+    if (idle_show_type != 2) {
+        idle_show_type = 1;
+    }
+    cJSON* interval_item = cJSON_GetObjectItem(data, "idle_show_inteval");
+    int idle_show_interval = 10;
+    if (cJSON_IsNumber(interval_item)) {
+        idle_show_interval = interval_item->valueint;
+    } else if (cJSON_IsString(interval_item) && interval_item->valuestring != nullptr) {
+        idle_show_interval = atoi(interval_item->valuestring);
+    }
+    if (idle_show_interval < 1) {
+        idle_show_interval = 1;
+    } else if (idle_show_interval > 60) {
+        idle_show_interval = 60;
+    }
     {
         Settings device_settings("device", true);
         device_settings.SetInt("robot_id", robot_id);
+        device_settings.SetInt("idle_show_type", idle_show_type);
+        device_settings.SetInt("idle_show_sec", idle_show_interval);
     }
-    ESP_LOGI(TAG, "Device robot_id: %d", robot_id);
-    if (GetDeviceState() == kDeviceStateIdle) {
-        auto idle_display = Board::GetInstance().GetDisplay();
-        if (idle_display != nullptr) {
-            idle_display->SetRoleAnimation("idle");
-        }
-    }
+    idle_show_type_ = idle_show_type;
+    ESP_LOGI(TAG, "Device robot_id: %d idle_show_type: %d idle_show_inteval: %d",
+             robot_id, idle_show_type, idle_show_interval);
 
     // 角色名称、唤醒词
     cJSON* command_item = cJSON_GetObjectItem(data, "assistant_command");
@@ -498,6 +529,7 @@ void Application::CheckDeviceInfo() {
     auto display = Board::GetInstance().GetDisplay();
     if (display != nullptr) {
         display->SetIdleClockStyle(clock_style);
+        display->ApplyIdleShowMode();
     }
 
     if (!address.empty()) {
@@ -1163,6 +1195,197 @@ bool Application::DownloadEmotionFile(const std::string& url, const std::string&
 
     ESP_LOGI(kEmotionTag, "Downloaded %s: %u bytes", local_path.c_str(), (unsigned)total);
     return true;
+}
+
+// =====================================================
+// 电子相册同步。只在 idle_show_type==2 时调用。
+// 文件落在 /sdcard/Album/101.jpg … 110.jpg。
+// 服务端列表成功返回后：有更新就覆盖，列表里没有的槽位从卡上删掉。
+// 拉取失败不删任何文件。
+// =====================================================
+
+static constexpr const char* kAlbumDir = "/sdcard/Album";
+static const char* kAlbumTag = "AlbumSync";
+
+static bool EnsureAlbumDir() {
+    struct stat st = {};
+    if (stat(kAlbumDir, &st) == 0 && S_ISDIR(st.st_mode)) {
+        return true;
+    }
+    if (mkdir(kAlbumDir, 0755) != 0 && errno != EEXIST) {
+        return false;
+    }
+    return stat(kAlbumDir, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static std::string AlbumLocalPath(int slot) {
+    char buf[48];
+    snprintf(buf, sizeof(buf), "/sdcard/Album/%d.jpg", slot);
+    return std::string(buf);
+}
+
+void Application::CheckAlbumAssetsFiles() {
+    if (!sd_scanner_is_mounted()) {
+        ESP_LOGW(kAlbumTag, "SD card not mounted, skip album sync");
+        return;
+    }
+    if (!SdWritesPermitted(15)) {
+        ESP_LOGW(kAlbumTag, "Skip album sync: low battery or unstable reboot");
+        return;
+    }
+    if (!EnsureAlbumDir()) {
+        ESP_LOGW(kAlbumTag, "Album directory unavailable, skip sync");
+        return;
+    }
+
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGW(kAlbumTag, "No network, keep local album files");
+        return;
+    }
+    auto http = network->CreateHttp(0);
+    if (http == nullptr) {
+        ESP_LOGW(kAlbumTag, "Failed to create HTTP, keep local album files");
+        return;
+    }
+
+    std::string mac = SystemInfo::GetMacAddress();
+    std::string url = "https://ai.fanfuture.cn/api/device/album?hardware_id=" + mac;
+    http->SetHeader("Device-Id", mac.c_str());
+    http->SetHeader("Client-Id", board.GetUuid().c_str());
+    if (!http->Open("GET", url)) {
+        ESP_LOGW(kAlbumTag, "Failed to open album list, keep local files");
+        return;
+    }
+    if (http->GetStatusCode() != 200) {
+        ESP_LOGW(kAlbumTag, "Album list HTTP %d, keep local files", http->GetStatusCode());
+        http->Close();
+        return;
+    }
+    std::string response;
+    char buffer[512];
+    int read = 0;
+    while ((read = http->Read(buffer, sizeof(buffer))) > 0) {
+        response.append(buffer, read);
+    }
+    http->Close();
+
+    cJSON* root = cJSON_Parse(response.c_str());
+    if (root == nullptr) {
+        ESP_LOGW(kAlbumTag, "Album list JSON invalid, keep local files");
+        return;
+    }
+    cJSON* data = cJSON_GetObjectItem(root, "data");
+    cJSON* photos = data != nullptr ? cJSON_GetObjectItem(data, "photos") : nullptr;
+    if (!cJSON_IsArray(photos)) {
+        cJSON_Delete(root);
+        ESP_LOGW(kAlbumTag, "Album list missing photos, keep local files");
+        return;
+    }
+
+    struct AlbumSlot {
+        int slot = 0;
+        std::string url;
+        std::string hash;
+        size_t size = 0;
+        std::string local_path;
+        bool needs_download = false;
+    };
+    std::vector<AlbumSlot> slots;
+    bool keep[111] = {};
+    const int photo_count = cJSON_GetArraySize(photos);
+    for (int i = 0; i < photo_count; ++i) {
+        cJSON* item = cJSON_GetArrayItem(photos, i);
+        if (!cJSON_IsObject(item)) {
+            continue;
+        }
+        cJSON* type_item = cJSON_GetObjectItem(item, "type");
+        int slot = 0;
+        if (cJSON_IsNumber(type_item)) {
+            slot = type_item->valueint;
+        } else if (cJSON_IsString(type_item) && type_item->valuestring != nullptr) {
+            slot = atoi(type_item->valuestring);
+        }
+        cJSON* url_item = cJSON_GetObjectItem(item, "url");
+        if (slot < 101 || slot > 110 || !cJSON_IsString(url_item) || url_item->valuestring == nullptr ||
+            url_item->valuestring[0] == '\0') {
+            continue;
+        }
+        if (keep[slot]) {
+            continue;
+        }
+        keep[slot] = true;
+        AlbumSlot photo;
+        photo.slot = slot;
+        photo.url = url_item->valuestring;
+        cJSON* hash_item = cJSON_GetObjectItem(item, "hash");
+        if (cJSON_IsString(hash_item) && hash_item->valuestring != nullptr) {
+            photo.hash = hash_item->valuestring;
+        }
+        cJSON* size_item = cJSON_GetObjectItem(item, "size");
+        if (cJSON_IsNumber(size_item) && size_item->valueint > 0) {
+            photo.size = static_cast<size_t>(size_item->valueint);
+        }
+        photo.local_path = AlbumLocalPath(slot);
+        struct stat st = {};
+        bool same = false;
+        if (stat(photo.local_path.c_str(), &st) == 0 && st.st_size > 0 &&
+            (photo.size == 0 || st.st_size == (off_t)photo.size)) {
+            if (photo.hash.empty()) {
+                same = photo.size > 0;
+            } else {
+                std::string local_md5 = MD5::Calculate(photo.local_path);
+                same = !local_md5.empty() && local_md5 == photo.hash;
+            }
+        }
+        photo.needs_download = !same;
+        slots.push_back(std::move(photo));
+    }
+    cJSON_Delete(root);
+
+    int total_count = 0;
+    for (const auto& photo : slots) {
+        if (photo.needs_download) {
+            total_count++;
+        }
+    }
+    ESP_LOGI(kAlbumTag, "Album slots=%d to_download=%d", (int)slots.size(), total_count);
+
+    if (total_count > 0) {
+        UpgradeScreen::Show("下载相册照片", "");
+        int download_count = 0;
+        for (const auto& photo : slots) {
+            if (!photo.needs_download) {
+                continue;
+            }
+            EmotionInfo info;
+            info.url = photo.url;
+            info.hash = photo.hash;
+            info.size = photo.size;
+            info.local_path = photo.local_path;
+            ProcessEmotionFile(info);
+            download_count++;
+            UpgradeScreen::Update(download_count * 100 / total_count, 0, 0, 0);
+        }
+        UpgradeScreen::Dismiss();
+    }
+
+    for (int slot = 101; slot <= 110; ++slot) {
+        if (keep[slot]) {
+            continue;
+        }
+        std::string path = AlbumLocalPath(slot);
+        struct stat st = {};
+        if (stat(path.c_str(), &st) == 0) {
+            unlink(path.c_str());
+            ESP_LOGI(kAlbumTag, "Removed album file %s", path.c_str());
+        }
+        std::string tmp = path + ".tmp";
+        if (stat(tmp.c_str(), &st) == 0) {
+            unlink(tmp.c_str());
+        }
+    }
 }
 
 // =====================================================

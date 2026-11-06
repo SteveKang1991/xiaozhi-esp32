@@ -8,7 +8,11 @@
 #include "fan_holo_chat_page.h"
 #include "fan_holo_music_page.h"
 
+#include <atomic>
+#include <memory>
 #include <string>
+
+#include "lvgl_image.h"
 
 /* 55B/5B 共用 Holo 显示协调器：LVGL/DSI、三页切换、MJPEG 硬件 blit。
  * idle / chat / music 各自拥有 screen 与控件，互切不共用控件树。 */
@@ -39,6 +43,8 @@ public:
     void ShowNotification(const char* notification, int duration_ms = 3000) override;
     void SetIdleWeather(const IdleWeatherView& weather) override;
     void SetIdleClockStyle(int style) override;
+    void ApplyIdleShowMode() override;
+    bool AlbumMode() const;
 
     void ShowIdlePage() { SetRoleAnimation("idle"); }
     void ShowChatPage(const char* state) { SetRoleAnimation(state); }
@@ -84,6 +90,14 @@ private:
     void ApplyIdleBatteryIconColor();
     void SetBootSubtitle(const char* content);
     static void VolumeHideTimerCb(void* arg);
+    bool AlbumIdleEnabled() const;
+    void StartAlbumCarousel();
+    void StopAlbumCarousel();
+    void ScheduleAlbumDecode(int slot);
+    static void AlbumDecodeTask(void* arg);
+    static void AlbumTimerCb(lv_timer_t* timer);
+    static void AlbumStartTimerCb(void* arg);
+    void ApplyAlbumFrame(uint32_t gen, int slot, uint8_t* decoded, size_t len, size_t w, size_t h, size_t stride);
 
     lv_obj_t* volume_bar_ = nullptr;
     lv_obj_t* volume_overlay_ = nullptr;
@@ -112,6 +126,17 @@ private:
     FanHoloIdlePage idle_page_;
     FanHoloChatPage chat_page_;
     FanHoloMusicPage music_page_;
+
+    lv_timer_t* album_timer_ = nullptr;
+    esp_timer_handle_t album_start_timer_ = nullptr;
+    int album_slots_[10] = {};
+    int album_slot_count_ = 0;
+    int album_slot_index_ = 0;
+    int album_interval_sec_ = 10;
+    std::atomic<bool> album_active_{false};
+    std::atomic<bool> album_decode_busy_{false};
+    std::atomic<uint32_t> album_gen_{0};
+    std::unique_ptr<LvglAllocatedImage> album_image_;
 };
 
 const lv_image_dsc_t* FanHoloBrandImage(const char* name);
