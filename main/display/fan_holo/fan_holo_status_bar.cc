@@ -26,7 +26,6 @@ constexpr uint32_t kDayBg = 0xFFFFFF;
 constexpr uint32_t kDayFg = 0x111111;
 constexpr uint32_t kIconFg = 0x22C55E;
 constexpr uint32_t kIconPillBg = 0xFFFFFF;
-constexpr uint32_t kBarBg = 0x000000;
 constexpr uint32_t kCardBg = 0xFFFFFF;
 constexpr uint32_t kCardBgTop = 0xF4F4F6;
 constexpr uint32_t kHingeColor = 0xC8C8CC;
@@ -115,11 +114,10 @@ IdleHeaderGeom MakeIdleHeaderGeom(FanHoloDisplay& host) {
     g.font_scale = font_scale;
     return g;
 }
-/* 图1：卡片深灰可见；时分亮冰青；秒青色。 */
+/* 图1：卡片深灰可见。时分秒和冒号同一色。 */
 constexpr uint32_t kLedCardBg = 0x1A4854;
 constexpr uint32_t kLedCardBorder = 0x3A6A78;
-constexpr uint32_t kLedTimeOn = 0xC8F6FF;
-constexpr uint32_t kLedSecOn = 0x00E8F0;
+constexpr uint32_t kLedOn = 0x5AC8E6;
 
 constexpr uint32_t kVolumeTrack = 0xE6E6E6;
 constexpr uint32_t kVolumeFill = 0xF07820;
@@ -336,12 +334,16 @@ void OnFont7DigitDraw(lv_event_t* e) {
     }
 }
 
-void CreateLedDigit(lv_obj_t* parent, FanHoloSegDigit* d, int w, int h, uint32_t color) {
+void CreateLedDigit(lv_obj_t* parent, FanHoloSegDigit* d, int w, int h, uint32_t color, bool fill_bg) {
     d->box = lv_obj_create(parent);
     lv_obj_remove_style_all(d->box);
     lv_obj_set_size(d->box, w, h);
-    lv_obj_set_style_bg_color(d->box, lv_color_hex(kLedCardBg), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(d->box, LV_OPA_COVER, LV_PART_MAIN);
+    if (fill_bg) {
+        lv_obj_set_style_bg_color(d->box, lv_color_hex(kLedCardBg), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(d->box, LV_OPA_COVER, LV_PART_MAIN);
+    } else {
+        lv_obj_set_style_bg_opa(d->box, LV_OPA_TRANSP, LV_PART_MAIN);
+    }
     lv_obj_set_style_pad_all(d->box, 0, LV_PART_MAIN);
     lv_obj_set_style_text_color(d->box, lv_color_hex(color), LV_PART_MAIN);
     lv_obj_set_user_data(d->box, reinterpret_cast<void*>(static_cast<intptr_t>(-1)));
@@ -705,7 +707,7 @@ lv_obj_t* CreateLedColon(lv_obj_t* parent, int width, int digit_h, uint32_t colo
     return col;
 }
 
-void CreateIdleLedClock(FanHoloStatusBar* bar, const IdleHeaderGeom& g, int screen_w, const char* tag) {
+void CreateIdleLedClock(FanHoloStatusBar* bar, const IdleHeaderGeom& g, int screen_w, const char* tag, bool bare) {
     const bool s6 = (tag != nullptr && strcmp(tag, "FanLcd20Display") == 0);
     const bool huanying1 = (tag != nullptr && strcmp(tag, "FanLcd778928Display") == 0);
     const int dw = g.dw;
@@ -747,12 +749,18 @@ void CreateIdleLedClock(FanHoloStatusBar* bar, const IdleHeaderGeom& g, int scre
     lv_obj_remove_style_all(bar->clock_card);
     lv_obj_set_size(bar->clock_card, card_w, card_h);
     lv_obj_set_style_layout(bar->clock_card, LV_LAYOUT_NONE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(bar->clock_card, lv_color_hex(kLedCardBg), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bar->clock_card, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(bar->clock_card, 12, LV_PART_MAIN);
-    lv_obj_set_style_border_width(bar->clock_card, 2, LV_PART_MAIN);
-    lv_obj_set_style_border_color(bar->clock_card, lv_color_hex(kLedCardBorder), LV_PART_MAIN);
-    lv_obj_set_style_border_opa(bar->clock_card, LV_OPA_COVER, LV_PART_MAIN);
+    if (bare) {
+        lv_obj_set_style_bg_opa(bar->clock_card, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(bar->clock_card, 0, LV_PART_MAIN);
+        lv_obj_set_style_border_opa(bar->clock_card, LV_OPA_TRANSP, LV_PART_MAIN);
+    } else {
+        lv_obj_set_style_bg_color(bar->clock_card, lv_color_hex(kLedCardBg), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(bar->clock_card, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_radius(bar->clock_card, 12, LV_PART_MAIN);
+        lv_obj_set_style_border_width(bar->clock_card, 2, LV_PART_MAIN);
+        lv_obj_set_style_border_color(bar->clock_card, lv_color_hex(kLedCardBorder), LV_PART_MAIN);
+        lv_obj_set_style_border_opa(bar->clock_card, LV_OPA_COVER, LV_PART_MAIN);
+    }
     lv_obj_set_style_pad_all(bar->clock_card, 0, LV_PART_MAIN);
     lv_obj_set_style_clip_corner(bar->clock_card, true, LV_PART_MAIN);
     StyleNoScroll(bar->clock_card);
@@ -780,29 +788,30 @@ void CreateIdleLedClock(FanHoloStatusBar* bar, const IdleHeaderGeom& g, int scre
     const int sec_y = (hm_h - sec_h) / 2;
     int x = 0;
 
-    CreateLedDigit(pack, &bar->hm_digits[0], hm_w, hm_h, kLedTimeOn);
+    const bool fill_digit = !bare;
+    CreateLedDigit(pack, &bar->hm_digits[0], hm_w, hm_h, kLedOn, fill_digit);
     lv_obj_set_pos(bar->hm_digits[0].box, x + hour_dx, time_y);
     x += hm_w + hm_pair_gap;
-    CreateLedDigit(pack, &bar->hm_digits[1], hm_w, hm_h, kLedTimeOn);
+    CreateLedDigit(pack, &bar->hm_digits[1], hm_w, hm_h, kLedOn, fill_digit);
     lv_obj_set_pos(bar->hm_digits[1].box, x + hour_dx, time_y);
     x += hm_w;
-    lv_obj_t* hm_colon = CreateLedColon(pack, hm_colon_w, hm_h, kLedTimeOn);
+    lv_obj_t* hm_colon = CreateLedColon(pack, hm_colon_w, hm_h, kLedOn);
     lv_obj_set_pos(hm_colon, x, time_y);
     x += hm_colon_w;
-    CreateLedDigit(pack, &bar->hm_digits[2], hm_w, hm_h, kLedTimeOn);
+    CreateLedDigit(pack, &bar->hm_digits[2], hm_w, hm_h, kLedOn, fill_digit);
     lv_obj_set_pos(bar->hm_digits[2].box, x + min_dx, time_y);
     x += hm_w + hm_pair_gap;
-    CreateLedDigit(pack, &bar->hm_digits[3], hm_w, hm_h, kLedTimeOn);
+    CreateLedDigit(pack, &bar->hm_digits[3], hm_w, hm_h, kLedOn, fill_digit);
     lv_obj_set_pos(bar->hm_digits[3].box, x + min_dx, time_y);
     x += hm_w + min_sec_gap;
 
-    lv_obj_t* sec_colon = CreateLedColon(pack, sec_colon_w, sec_h, kLedSecOn, s6 ? 4 : 0);
+    lv_obj_t* sec_colon = CreateLedColon(pack, sec_colon_w, sec_h, kLedOn, s6 ? 4 : 0);
     lv_obj_set_pos(sec_colon, x + sec_colon_dx, sec_y);
     x += sec_colon_w;
-    CreateLedDigit(pack, &bar->sec_digits[0], sec_w, sec_h, kLedSecOn);
+    CreateLedDigit(pack, &bar->sec_digits[0], sec_w, sec_h, kLedOn, fill_digit);
     lv_obj_set_pos(bar->sec_digits[0].box, x + sec_dx, sec_y);
     x += sec_w + sec_digit_gap;
-    CreateLedDigit(pack, &bar->sec_digits[1], sec_w, sec_h, kLedSecOn);
+    CreateLedDigit(pack, &bar->sec_digits[1], sec_w, sec_h, kLedOn, fill_digit);
     lv_obj_set_pos(bar->sec_digits[1].box, x + sec_dx, sec_y);
     lv_obj_update_layout(bar->clock_card);
 }
@@ -834,12 +843,13 @@ void ClearIdleClockFace(FanHoloStatusBar* bar) {
 }
 
 void CreateIdleClockFace(FanHoloStatusBar* bar, FanHoloDisplay& host, const IdleHeaderGeom& g) {
-    int clock_style = host.idle_clock_style();
+    const bool album = host.AlbumMode();
+    int clock_style = album ? FanHoloMetrics::kIdleClockLed7Seg : host.idle_clock_style();
     if (clock_style != FanHoloMetrics::kIdleClockLed7Seg) {
         clock_style = FanHoloMetrics::kIdleClockFlipPuhui;
     }
     if (clock_style == FanHoloMetrics::kIdleClockLed7Seg) {
-        CreateIdleLedClock(bar, g, host.screen_width(), host.metrics().tag);
+        CreateIdleLedClock(bar, g, host.screen_width(), host.metrics().tag, album);
         const int hm_h = g.dh * 88 / 100;
         lv_obj_set_height(bar->top_bar, g.clock_y + hm_h + (host.screen_width() < 480 ? 10 : 32) + g.flip_pad * 2);
     } else {
@@ -896,8 +906,7 @@ void CreateIdleClockBar(FanHoloStatusBar* bar, lv_obj_t* screen, FanHoloDisplay&
     lv_obj_set_pos(bar->top_bar, 0, 0);
     lv_obj_set_size(bar->top_bar, host.screen_width(), header_h);
     lv_obj_set_style_layout(bar->top_bar, LV_LAYOUT_NONE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(bar->top_bar, lv_color_hex(kBarBg), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bar->top_bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bar->top_bar, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_pad_all(bar->top_bar, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_left(bar->top_bar, metrics.idle_date_bar_pad, LV_PART_MAIN);
     lv_obj_set_style_pad_right(bar->top_bar, metrics.idle_date_bar_pad, LV_PART_MAIN);

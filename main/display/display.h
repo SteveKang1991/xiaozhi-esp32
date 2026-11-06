@@ -101,6 +101,7 @@ public:
 
     virtual void SetIdleWeather(const IdleWeatherView& weather) { (void)weather; }
     virtual void SetIdleClockStyle(int style) { (void)style; }
+    virtual void ApplyIdleShowMode() {}
 
     /**
      * 获取音乐封面容器对象。

@@ -418,6 +418,15 @@ void FanHoloIdlePage::Create(FanHoloDisplay& host) {
     container_ = FanHoloCreateFullBleedContainer(screen_, host);
     lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(container_, lv_color_black(), 0);
+    album_bg_ = lv_image_create(screen_);
+    lv_obj_set_pos(album_bg_, 0, 0);
+    lv_obj_set_size(album_bg_, host.screen_width(), host.screen_height());
+    lv_obj_remove_flag(album_bg_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(album_bg_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(album_bg_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_image_opa(album_bg_, LV_OPA_COVER, 0);
+    lv_image_set_inner_align(album_bg_, LV_IMAGE_ALIGN_CENTER);
+    lv_obj_add_flag(album_bg_, LV_OBJ_FLAG_HIDDEN);
     role_.Create(screen_, host, true);
     preview_image_ = FanHoloCreatePreviewImage(screen_, host);
 
@@ -429,6 +438,7 @@ void FanHoloIdlePage::Create(FanHoloDisplay& host) {
     }
     LayoutWeather(host);
     status_bar_.RaiseOverlays();
+    ApplyShowMode(host);
 }
 
 void FanHoloIdlePage::Destroy() {
@@ -440,6 +450,7 @@ void FanHoloIdlePage::Destroy() {
         lv_obj_del(screen_);
         screen_ = nullptr;
     }
+    album_bg_ = nullptr;
     container_ = nullptr;
     preview_image_ = nullptr;
     weather_root_ = nullptr;
@@ -481,6 +492,54 @@ void FanHoloIdlePage::Show(FanHoloDisplay& host) {
 
 void FanHoloIdlePage::HideRole() {
     role_.Hide();
+}
+
+void FanHoloIdlePage::ShowAlbumImage(FanHoloDisplay& host, const lv_image_dsc_t* dsc) {
+    if (album_bg_ == nullptr || dsc == nullptr) {
+        return;
+    }
+    lv_image_set_src(album_bg_, dsc);
+    lv_obj_remove_flag(album_bg_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(album_bg_);
+    if (weather_root_ != nullptr) {
+        lv_obj_move_foreground(weather_root_);
+    }
+    host.RaiseCurrentOverlays();
+    if (host.volume_overlay_ != nullptr) {
+        lv_obj_move_foreground(host.volume_overlay_);
+    }
+}
+
+void FanHoloIdlePage::HideAlbumImage() {
+    if (album_bg_ == nullptr) {
+        return;
+    }
+    lv_image_set_src(album_bg_, nullptr);
+    lv_obj_add_flag(album_bg_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void FanHoloIdlePage::ApplyShowMode(FanHoloDisplay& host) {
+    album_mode_ = host.AlbumMode();
+    if (screen_ == nullptr) {
+        return;
+    }
+    status_bar_.RecreateIdleClock(screen_, host);
+    if (forecast_box_ != nullptr) {
+        if (album_mode_) {
+            lv_obj_set_style_bg_opa(forecast_box_, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(forecast_box_, 0, 0);
+            lv_obj_set_style_border_opa(forecast_box_, LV_OPA_TRANSP, 0);
+        } else {
+            StyleLedCard(forecast_box_, 5);
+        }
+    }
+    if (album_mode_) {
+        HideRole();
+    }
+    if (weather_root_ != nullptr) {
+        lv_obj_move_foreground(weather_root_);
+    }
+    status_bar_.RaiseOverlays();
 }
 
 void FanHoloIdlePage::Tick() {

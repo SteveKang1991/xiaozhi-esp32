@@ -35,6 +35,11 @@
 #define MAIN_EVENT_STATE_CHANGED        (1 << 12)
 
 
+struct IdleAlbumItem {
+    int slot = 0;
+    std::string url;
+};
+
 enum AecMode {
     kAecOff,
     kAecOnDeviceSide,
@@ -114,6 +119,7 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
+    void CopyIdleAlbum(std::vector<IdleAlbumItem>* out) const;
 
     // 新增：接收外部音频数据（如音乐播放）
     void AddAudioData(AudioStreamPacket&& packet);
@@ -150,6 +156,9 @@ private:
     bool first_boot_after_blufi_ = false;   // Flag to reboot after first OTA check following BluFi provisioning
     int clock_ticks_ = 0;
     std::string weather_city_;
+    int idle_show_type_ = 1;
+    mutable std::mutex album_mu_;
+    std::vector<IdleAlbumItem> album_slots_;
     TaskHandle_t activation_task_handle_ = nullptr;
     bool s_system_ready_ = false;
     /* tts stop 后不再开 grace：Listening 开麦期间继续收 TTS 会把尾音录进 STT。
@@ -198,6 +207,7 @@ private:
                              DownloadProgressCallback progress_cb = nullptr);
 
     void CheckDeviceInfo();
+    void FetchAlbumList();
     void ReportDeviceInfo();
     void RefreshIdleWeather();
     

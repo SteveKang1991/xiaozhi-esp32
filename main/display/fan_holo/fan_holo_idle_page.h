@@ -14,10 +14,13 @@ public:
     void Show(FanHoloDisplay& host);
     void Bind(FanHoloDisplay& host) const;
     void HideRole();
+    void ShowAlbumImage(FanHoloDisplay& host, const lv_image_dsc_t* dsc);
+    void HideAlbumImage();
     void Tick();
     void ApplyTextFont(const lv_font_t* font, lv_color_t color);
     void ApplyWeather(const IdleWeatherView& weather);
     void ApplyClockStyle(FanHoloDisplay& host);
+    void ApplyShowMode(FanHoloDisplay& host);
     FanHoloRoleWidgets& role_widgets() { return role_; }
 
     lv_obj_t* screen() const { return screen_; }
@@ -29,6 +32,7 @@ private:
     void LayoutWeather(FanHoloDisplay& host);
 
     lv_obj_t* screen_ = nullptr;
+    lv_obj_t* album_bg_ = nullptr;
     lv_obj_t* container_ = nullptr;
     lv_obj_t* preview_image_ = nullptr;
     FanHoloStatusBar status_bar_;
@@ -49,6 +53,7 @@ private:
 
     IdleWeatherView last_weather_{};
     bool s6_weather_tune_ = false;
+    bool album_mode_ = false;
 };
 
 #endif

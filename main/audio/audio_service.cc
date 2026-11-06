@@ -1,6 +1,7 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <cstring>
+#include <freertos/semphr.h>
 
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)        \
     (esp_ae_rate_cvt_cfg_t)                                  \
@@ -562,7 +563,33 @@ void AudioService::EnableWakeWordDetection(bool enable) {
     ESP_LOGD(TAG, "%s wake word detection", enable ? "Enabling" : "Disabling");
     if (enable) {
         if (!wake_word_initialized_) {
-            if (!wake_word_->Initialize(codec_, models_list_)) {
+            /* esp_mn_commands_update 建 FST 要很大的栈，主任务只有 10KB，直接跑会踩穿返回地址。 */
+            struct WakeInitJob {
+                WakeWord* wake_word;
+                AudioCodec* codec;
+                srmodel_list_t* models;
+                bool ok;
+                SemaphoreHandle_t done;
+            } job{wake_word_.get(), codec_, models_list_, false, xSemaphoreCreateBinary()};
+            bool started = false;
+            if (job.done != nullptr) {
+                started = xTaskCreate([](void* arg) {
+                    auto* job = static_cast<WakeInitJob*>(arg);
+                    job->ok = job->wake_word->Initialize(job->codec, job->models);
+                    xSemaphoreGive(job->done);
+                    vTaskDelete(nullptr);
+                }, "mn_init", 32768, &job, 5, nullptr) == pdPASS;
+            }
+            if (started) {
+                xSemaphoreTake(job.done, portMAX_DELAY);
+            } else {
+                ESP_LOGW(TAG, "Wake word init task unavailable, run on current task");
+                job.ok = wake_word_->Initialize(codec_, models_list_);
+            }
+            if (job.done != nullptr) {
+                vSemaphoreDelete(job.done);
+            }
+            if (!job.ok) {
                 ESP_LOGE(TAG, "Failed to initialize wake word");
                 return;
             }

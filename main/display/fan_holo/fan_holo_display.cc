@@ -4,6 +4,12 @@
 #include "gif/lvgl_gif.h"
 #include "assets/lang_config.h"
 #include "board.h"
+#include "application.h"
+#include "jpg/jpeg_to_image.h"
+#include "esp_jpeg_common.h"
+#include "esp_jpeg_dec.h"
+
+#include <esp_heap_caps.h>
 
 #include <memory>
 
@@ -13,6 +19,7 @@
 #include <esp_timer.h>
 #include <esp_psram.h>
 #include <cstring>
+#include <new>
 #include <string>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +28,8 @@
 #include <src/misc/cache/lv_cache.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+
+extern "C" void jpeg_free_align(void* ptr);
 
 extern "C" {
 #include "mjpeg_player.h"
@@ -162,6 +171,10 @@ FanHoloDisplay::FanHoloDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
 }
 
 FanHoloDisplay::~FanHoloDisplay() {
+    StopAlbumCarousel();
+    for (int i = 0; i < 1000 && album_decode_busy_.load(); ++i) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
     if (volume_hide_timer_ != nullptr) {
         esp_timer_stop(volume_hide_timer_);
         esp_timer_delete(volume_hide_timer_);
@@ -698,6 +711,15 @@ void FanHoloDisplay::SetRoleAnimation(const char* state) {
 
     const char* clip = MapRoleStateToClip(state);
     const bool idle_clip = (strcmp(clip, "idle") == 0);
+    if (idle_clip && AlbumIdleEnabled()) {
+        StopMjpegIfRunning();
+        if (current_page_ != Page::Idle || lv_screen_active() != idle_page_.screen()) {
+            PreparePage(Page::Idle);
+        }
+        StartAlbumCarousel();
+        return;
+    }
+    StopAlbumCarousel();
     const ClipLoc clip_loc = FindRoleAnimation(clip);
     if (!clip_loc.valid()) {
         ESP_LOGI(metrics_.tag, "SetRoleAnimation: no available MJPEG for state=%s, skip", clip);
@@ -792,6 +814,7 @@ void FanHoloDisplay::SetSystemReady() {
 }
 
 void FanHoloDisplay::PrepareForReboot() {
+    StopAlbumCarousel();
     StopMjpegIfRunning();
     LvglDisplay::PrepareForReboot();
 }
@@ -805,6 +828,9 @@ void FanHoloDisplay::SetMusicProgress(int current_ms, const char* lyric, const c
 }
 
 void FanHoloDisplay::ShowMusicCover(bool show, const std::string& picture_url) {
+    if (show) {
+        StopAlbumCarousel();
+    }
     music_page_.ShowCover(*this, show, picture_url);
 }
 
@@ -1183,6 +1209,386 @@ void FanHoloDisplay::StopMjpegIfRunning() {
     mjpeg_player_stop();
     current_mjpeg_path_.clear();
     current_clip_name_.clear();
+}
+
+bool FanHoloDisplay::AlbumMode() const {
+    Settings settings("device", false);
+    return settings.GetInt("idle_show_type", 1) == 2;
+}
+
+bool FanHoloDisplay::AlbumIdleEnabled() const {
+    return AlbumMode();
+}
+
+void FanHoloDisplay::ApplyIdleShowMode() {
+    DisplayLockGuard lock(this);
+    idle_page_.ApplyShowMode(*this);
+}
+
+namespace {
+
+constexpr size_t kAlbumStackBytes = 64 * 1024;
+constexpr size_t kAlbumJpegMax = 512 * 1024;
+constexpr int kAlbumMaxEdge = 1280;
+constexpr size_t kAlbumMaxPixels = 1280u * 720u;
+
+TaskHandle_t s_album_task = nullptr;
+StackType_t* s_album_stack = nullptr;
+StaticTask_t s_album_tcb;
+std::atomic<int> s_album_index{-1};
+
+bool AlbumJpegWithinLimit(const uint8_t* jpeg, int jpeg_len, const char* tag) {
+    jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
+    config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+    jpeg_dec_handle_t dec = nullptr;
+    if (jpeg_dec_open(&config, &dec) != JPEG_ERR_OK || dec == nullptr) {
+        return false;
+    }
+    jpeg_dec_io_t io = {};
+    jpeg_dec_header_info_t info = {};
+    io.inbuf = const_cast<uint8_t*>(jpeg);
+    io.inbuf_len = jpeg_len;
+    const jpeg_error_t err = jpeg_dec_parse_header(dec, &io, &info);
+    jpeg_dec_close(dec);
+    if (err != JPEG_ERR_OK || info.width <= 0 || info.height <= 0 || info.width > kAlbumMaxEdge ||
+        info.height > kAlbumMaxEdge ||
+        static_cast<size_t>(info.width) * static_cast<size_t>(info.height) > kAlbumMaxPixels) {
+        ESP_LOGW(tag, "Album jpeg rejected %dx%d", info.width, info.height);
+        return false;
+    }
+    return true;
+}
+
+uint8_t* DownloadAlbumJpeg(const std::string& url, size_t* out_len, const std::atomic<bool>& active,
+                           const std::atomic<uint32_t>& generation, uint32_t gen, const char* tag) {
+    if (out_len != nullptr) {
+        *out_len = 0;
+    }
+    auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        return nullptr;
+    }
+    auto http = network->CreateHttp(0);
+    if (http == nullptr) {
+        return nullptr;
+    }
+    http->SetTimeout(15000);
+    if (!http->Open("GET", url)) {
+        return nullptr;
+    }
+    if (http->GetStatusCode() != 200) {
+        http->Close();
+        return nullptr;
+    }
+
+    size_t cap = 32 * 1024;
+    auto* buf = static_cast<uint8_t*>(heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (buf == nullptr) {
+        http->Close();
+        return nullptr;
+    }
+    size_t total = 0;
+    char chunk[1024];
+    int got = 0;
+    while ((got = http->Read(chunk, sizeof(chunk))) > 0) {
+        if (!active.load() || gen != generation.load()) {
+            heap_caps_free(buf);
+            http->Close();
+            return nullptr;
+        }
+        if (total + static_cast<size_t>(got) > kAlbumJpegMax) {
+            heap_caps_free(buf);
+            http->Close();
+            ESP_LOGW(tag, "Album jpeg larger than %u", (unsigned)kAlbumJpegMax);
+            return nullptr;
+        }
+        if (total + static_cast<size_t>(got) > cap) {
+            size_t new_cap = cap * 2;
+            if (new_cap > kAlbumJpegMax) {
+                new_cap = kAlbumJpegMax;
+            }
+            auto* grown = static_cast<uint8_t*>(heap_caps_malloc(new_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (grown == nullptr) {
+                heap_caps_free(buf);
+                http->Close();
+                return nullptr;
+            }
+            memcpy(grown, buf, total);
+            heap_caps_free(buf);
+            buf = grown;
+            cap = new_cap;
+        }
+        memcpy(buf + total, chunk, static_cast<size_t>(got));
+        total += static_cast<size_t>(got);
+    }
+    http->Close();
+    if (total < 3 || buf[0] != 0xFF || buf[1] != 0xD8) {
+        heap_caps_free(buf);
+        return nullptr;
+    }
+    if (out_len != nullptr) {
+        *out_len = total;
+    }
+    return buf;
+}
+
+}  // namespace
+
+void FanHoloDisplay::AlbumDecodeTask(void* arg) {
+    auto* self = static_cast<FanHoloDisplay*>(arg);
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        const int index = s_album_index.exchange(-1);
+        const uint32_t gen = self->album_gen_.load();
+        std::string url;
+        int slot = 0;
+        {
+            std::lock_guard<std::mutex> urls(self->album_url_mu_);
+            if (index < 0 || index >= self->album_slot_count_ || !self->album_active_.load() ||
+                gen != self->album_gen_.load()) {
+                self->album_decode_busy_.store(false);
+                continue;
+            }
+            slot = self->album_slots_[index];
+            url = self->album_urls_[index];
+        }
+        if (url.empty()) {
+            self->album_decode_busy_.store(false);
+            continue;
+        }
+
+        size_t jpeg_len = 0;
+        uint8_t* jpeg = DownloadAlbumJpeg(url, &jpeg_len, self->album_active_, self->album_gen_, gen,
+                                           self->metrics_.tag);
+        if (jpeg == nullptr || !self->album_active_.load() || gen != self->album_gen_.load()) {
+            if (jpeg != nullptr) {
+                heap_caps_free(jpeg);
+            }
+            self->album_decode_busy_.store(false);
+            continue;
+        }
+
+        if (!AlbumJpegWithinLimit(jpeg, static_cast<int>(jpeg_len), self->metrics_.tag)) {
+            heap_caps_free(jpeg);
+            self->album_decode_busy_.store(false);
+            continue;
+        }
+        ESP_LOGI(self->metrics_.tag, "Album decode slot %d (%u bytes)", slot, (unsigned)jpeg_len);
+        uint8_t* decoded = nullptr;
+        size_t decoded_len = 0;
+        size_t img_w = 0;
+        size_t img_h = 0;
+        size_t stride = 0;
+        const esp_err_t ret = jpeg_to_image(jpeg, jpeg_len, &decoded, &decoded_len, &img_w, &img_h, &stride);
+        heap_caps_free(jpeg);
+        if (ret != ESP_OK || decoded == nullptr || img_w == 0 || img_h == 0 || img_w > kAlbumMaxEdge ||
+            img_h > kAlbumMaxEdge || img_w * img_h > kAlbumMaxPixels) {
+            if (decoded != nullptr) {
+                jpeg_free_align(decoded);
+            }
+            ESP_LOGW(self->metrics_.tag, "Album decode slot %d failed: %s %ux%u", slot, esp_err_to_name(ret),
+                     (unsigned)img_w, (unsigned)img_h);
+            self->album_decode_busy_.store(false);
+            continue;
+        }
+        self->ApplyAlbumFrame(gen, index, decoded, decoded_len, img_w, img_h, stride);
+        self->album_decode_busy_.store(false);
+    }
+}
+
+void FanHoloDisplay::ScheduleAlbumDecode(int index) {
+    if (!album_active_.load() || s_album_task == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> urls(album_url_mu_);
+        if (index < 0 || index >= album_slot_count_) {
+            return;
+        }
+    }
+    if (album_decode_busy_.exchange(true)) {
+        return;
+    }
+    s_album_index.store(index);
+    xTaskNotifyGive(s_album_task);
+}
+
+void FanHoloDisplay::AlbumStartTimerCb(void* arg) {
+    auto* self = static_cast<FanHoloDisplay*>(arg);
+    if (self == nullptr || !self->album_active_.load()) {
+        return;
+    }
+    int count = 0;
+    {
+        std::lock_guard<std::mutex> urls(self->album_url_mu_);
+        count = self->album_slot_count_;
+    }
+    if (count <= 0) {
+        return;
+    }
+    if (self->album_decode_busy_.load()) {
+        if (self->album_start_timer_ != nullptr) {
+            esp_timer_start_once(self->album_start_timer_, 200 * 1000);
+        }
+        return;
+    }
+    self->ScheduleAlbumDecode(0);
+}
+
+void FanHoloDisplay::AlbumTimerCb(lv_timer_t* timer) {
+    auto* self = static_cast<FanHoloDisplay*>(lv_timer_get_user_data(timer));
+    if (self == nullptr || !self->album_active_.load() || self->current_page_ != Page::Idle) {
+        return;
+    }
+    int index = 0;
+    {
+        std::lock_guard<std::mutex> urls(self->album_url_mu_);
+        if (self->album_slot_count_ <= 1) {
+            return;
+        }
+        self->album_slot_index_ = (self->album_slot_index_ + 1) % self->album_slot_count_;
+        index = self->album_slot_index_;
+    }
+    self->ScheduleAlbumDecode(index);
+}
+
+void FanHoloDisplay::ApplyAlbumFrame(uint32_t gen, int index, uint8_t* decoded, size_t len, size_t w, size_t h,
+                                     size_t stride) {
+    (void)index;
+    if (decoded == nullptr) {
+        return;
+    }
+    if (stride == 0) {
+        stride = w * 2;
+    }
+    if (len == 0) {
+        len = w * h * 2;
+    }
+    if (!album_active_.load() || gen != album_gen_.load() || current_page_ != Page::Idle || w == 0 || h == 0) {
+        jpeg_free_align(decoded);
+        return;
+    }
+
+    DisplayLockGuard lock(this);
+    if (!album_active_.load() || gen != album_gen_.load() || current_page_ != Page::Idle) {
+        jpeg_free_align(decoded);
+        return;
+    }
+    try {
+        auto next = std::make_unique<LvglAllocatedImage>(decoded, len, static_cast<int>(w), static_cast<int>(h),
+                                                         static_cast<int>(stride), LV_COLOR_FORMAT_RGB565);
+        decoded = nullptr;
+        idle_page_.ShowAlbumImage(*this, next->image_dsc());
+        album_image_ = std::move(next);
+    } catch (...) {
+        if (decoded != nullptr) {
+            jpeg_free_align(decoded);
+        }
+    }
+}
+
+void FanHoloDisplay::StartAlbumCarousel() {
+    if (album_active_.load()) {
+        return;
+    }
+    Settings settings("device", false);
+    int sec = settings.GetInt("idle_show_sec", 10);
+    if (sec < 1) {
+        sec = 1;
+    } else if (sec > 60) {
+        sec = 60;
+    }
+    album_interval_sec_ = sec;
+    std::vector<IdleAlbumItem> items;
+    Application::GetInstance().CopyIdleAlbum(&items);
+    int slot_count = 0;
+    {
+        std::lock_guard<std::mutex> urls(album_url_mu_);
+        album_slot_count_ = 0;
+        album_slot_index_ = 0;
+        for (const auto& item : items) {
+            if (album_slot_count_ >= 10 || item.url.empty() || item.slot < 101 || item.slot > 110) {
+                continue;
+            }
+            album_slots_[album_slot_count_] = item.slot;
+            album_urls_[album_slot_count_] = item.url;
+            album_slot_count_++;
+        }
+        slot_count = album_slot_count_;
+    }
+    album_active_.store(true);
+    if (slot_count == 0) {
+        DisplayLockGuard lock(this);
+        idle_page_.HideAlbumImage();
+        return;
+    }
+    if (s_album_task == nullptr) {
+        s_album_stack = static_cast<StackType_t*>(heap_caps_malloc(kAlbumStackBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (s_album_stack == nullptr) {
+            album_active_.store(false);
+            ESP_LOGE(metrics_.tag, "Album decode stack alloc failed");
+            return;
+        }
+        s_album_task = xTaskCreateStaticPinnedToCore(AlbumDecodeTask, "album_jpg", kAlbumStackBytes, this, 1,
+                                                      s_album_stack, &s_album_tcb, 0);
+        if (s_album_task == nullptr) {
+            heap_caps_free(s_album_stack);
+            s_album_stack = nullptr;
+            album_active_.store(false);
+            ESP_LOGE(metrics_.tag, "Album decode task create failed");
+            return;
+        }
+    }
+    if (album_start_timer_ == nullptr) {
+        const esp_timer_create_args_t args = {
+            .callback = &FanHoloDisplay::AlbumStartTimerCb,
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "album_start",
+            .skip_unhandled_events = true,
+        };
+        esp_timer_create(&args, &album_start_timer_);
+    }
+    if (album_start_timer_ != nullptr) {
+        esp_timer_stop(album_start_timer_);
+        /* 唤醒词和提示音起来之后再软件解码，避免和建模型挤在一起。 */
+        esp_timer_start_once(album_start_timer_, 800 * 1000);
+    }
+    if (slot_count > 1) {
+        DisplayLockGuard lock(this);
+        if (album_timer_ != nullptr) {
+            lv_timer_del(album_timer_);
+            album_timer_ = nullptr;
+        }
+        album_timer_ = lv_timer_create(AlbumTimerCb, static_cast<uint32_t>(album_interval_sec_) * 1000, this);
+    }
+}
+
+void FanHoloDisplay::StopAlbumCarousel() {
+    const bool was_active = album_active_.exchange(false);
+    if (!was_active && album_timer_ == nullptr && !album_image_ && !album_decode_busy_.load()) {
+        return;
+    }
+    album_gen_.fetch_add(1);
+    if (album_start_timer_ != nullptr) {
+        esp_timer_stop(album_start_timer_);
+    }
+    {
+        DisplayLockGuard lock(this);
+        if (album_timer_ != nullptr) {
+            lv_timer_del(album_timer_);
+            album_timer_ = nullptr;
+        }
+        idle_page_.HideAlbumImage();
+        album_image_.reset();
+    }
+    std::lock_guard<std::mutex> urls(album_url_mu_);
+    album_slot_count_ = 0;
+    album_slot_index_ = 0;
+    for (int i = 0; i < 10; ++i) {
+        album_urls_[i].clear();
+        album_slots_[i] = 0;
+    }
 }
 
 void FanHoloDisplay::SetupUI() {

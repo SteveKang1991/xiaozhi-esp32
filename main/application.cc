@@ -896,8 +896,18 @@ void Application::ActivationTask() {
     // Initialize the protocol
     InitializeProtocol();
 
-    // 先拉设备信息（含 robot_id），再同步表情：分区只保留当前角色 + default-*
+    // 先拿到待机方式，再决定要不要拉相册列表。表情仍按当前角色同步到分区。
+    {
+        Settings device_settings("device", false);
+        idle_show_type_ = device_settings.GetInt("idle_show_type", 1) == 2 ? 2 : 1;
+    }
     CheckDeviceInfo();
+    if (idle_show_type_ == 2) {
+        FetchAlbumList();
+    } else {
+        std::lock_guard<std::mutex> lock(album_mu_);
+        album_slots_.clear();
+    }
     CheckEmotionFiles();
     ReportDeviceInfo();
 
@@ -965,17 +975,37 @@ void Application::CheckDeviceInfo() {
     } else if (cJSON_IsString(robot_item) && robot_item->valuestring != nullptr) {
         robot_id = atoi(robot_item->valuestring);
     }
+    cJSON* show_item = cJSON_GetObjectItem(data, "idle_show_type");
+    int idle_show_type = 1;
+    if (cJSON_IsNumber(show_item)) {
+        idle_show_type = show_item->valueint;
+    } else if (cJSON_IsString(show_item) && show_item->valuestring != nullptr) {
+        idle_show_type = atoi(show_item->valuestring);
+    }
+    if (idle_show_type != 2) {
+        idle_show_type = 1;
+    }
+    cJSON* interval_item = cJSON_GetObjectItem(data, "idle_show_inteval");
+    int idle_show_interval = 10;
+    if (cJSON_IsNumber(interval_item)) {
+        idle_show_interval = interval_item->valueint;
+    } else if (cJSON_IsString(interval_item) && interval_item->valuestring != nullptr) {
+        idle_show_interval = atoi(interval_item->valuestring);
+    }
+    if (idle_show_interval < 1) {
+        idle_show_interval = 1;
+    } else if (idle_show_interval > 60) {
+        idle_show_interval = 60;
+    }
     {
         Settings device_settings("device", true);
         device_settings.SetInt("robot_id", robot_id);
+        device_settings.SetInt("idle_show_type", idle_show_type);
+        device_settings.SetInt("idle_show_sec", idle_show_interval);
     }
-    ESP_LOGI(TAG, "Device robot_id: %d", robot_id);
-    if (GetDeviceState() == kDeviceStateIdle) {
-        auto idle_display = Board::GetInstance().GetDisplay();
-        if (idle_display != nullptr) {
-            idle_display->OnEmotionsUpdated();
-        }
-    }
+    idle_show_type_ = idle_show_type;
+    ESP_LOGI(TAG, "Device robot_id: %d idle_show_type: %d idle_show_inteval: %d",
+             robot_id, idle_show_type, idle_show_interval);
 
     // 角色名称、唤醒词
     cJSON* command_item = cJSON_GetObjectItem(data, "assistant_command");
@@ -1013,6 +1043,7 @@ void Application::CheckDeviceInfo() {
     auto display = Board::GetInstance().GetDisplay();
     if (display != nullptr) {
         display->SetIdleClockStyle(clock_style);
+        display->ApplyIdleShowMode();
     }
 
     if (!address.empty()) {
@@ -1033,6 +1064,98 @@ void Application::CheckDeviceInfo() {
 
     ESP_LOGI(TAG, "Device wake word: %s (%s) threshold=%d%%", command.c_str(), text.c_str(), threshold_pct);
     audio_service_.UpdateCustomWakeWord(command, text, threshold_pct);
+}
+
+void Application::CopyIdleAlbum(std::vector<IdleAlbumItem>* out) const {
+    if (out == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(album_mu_);
+    *out = album_slots_;
+}
+
+void Application::FetchAlbumList() {
+    auto& board = Board::GetInstance();
+    auto network = board.GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGW(TAG, "No network, keep previous album list");
+        return;
+    }
+    auto http = network->CreateHttp(0);
+    if (http == nullptr) {
+        ESP_LOGW(TAG, "Failed to create HTTP, keep previous album list");
+        return;
+    }
+    std::string mac = SystemInfo::GetMacAddress();
+    std::string url = "https://ai.fanfuture.cn/api/device/album?hardware_id=" + mac;
+    http->SetHeader("Device-Id", mac.c_str());
+    http->SetHeader("Client-Id", board.GetUuid().c_str());
+    if (!http->Open("GET", url)) {
+        ESP_LOGW(TAG, "Failed to open album list, keep previous list");
+        return;
+    }
+    if (http->GetStatusCode() != 200) {
+        ESP_LOGW(TAG, "Album list HTTP %d, keep previous list", http->GetStatusCode());
+        http->Close();
+        return;
+    }
+    std::string response;
+    char buffer[512];
+    int read = 0;
+    while ((read = http->Read(buffer, sizeof(buffer))) > 0) {
+        response.append(buffer, read);
+    }
+    http->Close();
+
+    cJSON* root = cJSON_Parse(response.c_str());
+    if (root == nullptr) {
+        ESP_LOGW(TAG, "Album list JSON invalid, keep previous list");
+        return;
+    }
+    cJSON* data = cJSON_GetObjectItem(root, "data");
+    cJSON* photos = data != nullptr ? cJSON_GetObjectItem(data, "photos") : nullptr;
+    if (!cJSON_IsArray(photos)) {
+        cJSON_Delete(root);
+        ESP_LOGW(TAG, "Album list missing photos, keep previous list");
+        return;
+    }
+
+    std::vector<IdleAlbumItem> next;
+    bool keep[111] = {};
+    const int photo_count = cJSON_GetArraySize(photos);
+    for (int i = 0; i < photo_count; ++i) {
+        cJSON* item = cJSON_GetArrayItem(photos, i);
+        if (!cJSON_IsObject(item)) {
+            continue;
+        }
+        cJSON* type_item = cJSON_GetObjectItem(item, "type");
+        int slot = 0;
+        if (cJSON_IsNumber(type_item)) {
+            slot = type_item->valueint;
+        } else if (cJSON_IsString(type_item) && type_item->valuestring != nullptr) {
+            slot = atoi(type_item->valuestring);
+        }
+        cJSON* url_item = cJSON_GetObjectItem(item, "url");
+        if (slot < 101 || slot > 110 || !cJSON_IsString(url_item) || url_item->valuestring == nullptr ||
+            url_item->valuestring[0] == '\0') {
+            continue;
+        }
+        if (keep[slot]) {
+            continue;
+        }
+        keep[slot] = true;
+        IdleAlbumItem photo;
+        photo.slot = slot;
+        photo.url = url_item->valuestring;
+        next.push_back(std::move(photo));
+    }
+    cJSON_Delete(root);
+    const int slot_count = static_cast<int>(next.size());
+    {
+        std::lock_guard<std::mutex> lock(album_mu_);
+        album_slots_ = std::move(next);
+    }
+    ESP_LOGI(TAG, "Album list slots=%d (download on show)", slot_count);
 }
 
 void Application::RefreshIdleWeather() {
