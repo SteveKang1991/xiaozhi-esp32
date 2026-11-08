@@ -17,7 +17,7 @@ void FanHoloChatPage::Create(FanHoloDisplay& host) {
     lv_obj_set_scrollbar_mode(chat_container_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_scroll_dir(chat_container_, LV_DIR_VER);
     lv_obj_set_size(chat_container_, (lv_coord_t)metrics.chat_strip_w, (lv_coord_t)(host.screen_height() - 300));
-    lv_obj_set_style_bg_color(chat_container_, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(chat_container_, theme->background_color(), 0);
     lv_obj_set_style_bg_opa(chat_container_, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(chat_container_, 0, 0);
     lv_obj_set_style_pad_all(chat_container_, 0, 0);
@@ -27,7 +27,7 @@ void FanHoloChatPage::Create(FanHoloDisplay& host) {
     lv_label_set_text(chat_inner_label_, "");
     lv_obj_set_width(chat_inner_label_, (lv_coord_t)metrics.chat_strip_w);
     lv_obj_set_style_min_height(chat_inner_label_, (lv_coord_t)(host.screen_height() - 300), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(chat_inner_label_, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(chat_inner_label_, theme->background_color(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(chat_inner_label_, LV_OPA_COVER, LV_PART_MAIN);
     lv_label_set_long_mode(chat_inner_label_, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(chat_inner_label_, theme->text_font()->font(), 0);

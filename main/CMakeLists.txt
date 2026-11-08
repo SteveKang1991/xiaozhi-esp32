@@ -781,6 +781,10 @@ elseif(CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ILI9881_WiFI6_LCD_55B)
     set(BOARD_TYPE "fanfuture-p4-holo-ili9881-wifi6-lcd-55b")
     set(BUILTIN_TEXT_FONT font_puhui_basic_30_4)
     set(BUILTIN_ICON_FONT font_awesome_30_4)
+elseif(CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_JD9365_WiFI6_LCD_101B)
+    set(BOARD_TYPE "fanfuture-p4-holo-jd9365-wifi6-lcd-101b")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_30_4)
+    set(BUILTIN_ICON_FONT font_awesome_30_4)
 endif()
 
 if(MANUFACTURER)
@@ -796,18 +800,24 @@ else()
 endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 
-# This board provides its own AXP2101 driver implementation.
-if(CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ST7701_WiFI6_LCD_5B OR CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ILI9881_WiFI6_LCD_55B)
+# These boards use axp2101_fan. The shared axp2101.cc is the other boards' driver.
+if(CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ST7701_WiFI6_LCD_5B OR CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ILI9881_WiFI6_LCD_55B OR CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_JD9365_WiFI6_LCD_101B)
     list(REMOVE_ITEM SOURCES "boards/common/axp2101.cc")
     list(APPEND SOURCES
+        "boards/common/axp2101_fan.cc"
         "boards/common/sd_scanner.c"
         "boards/common/mjpeg_player.c"
     )
 endif()
 
-if(CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ST7701_WiFI6_LCD_5B OR CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ILI9881_WiFI6_LCD_55B)
+if(CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ST7701_WiFI6_LCD_5B OR CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_ILI9881_WiFI6_LCD_55B OR CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_JD9365_WiFI6_LCD_101B)
+    # 开机芯片图只编一张。5B/55B 用黑底，101B 用白底。
+    if(CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_JD9365_WiFI6_LCD_101B)
+        list(APPEND SOURCES "display/fan_holo/microchip_fanfuture_white.c")
+    else()
+        list(APPEND SOURCES "display/fan_holo/microchip_fanfuture.c")
+    endif()
     list(APPEND SOURCES
-        "display/fan_holo/microchip_fanfuture.c"
         "display/fan_holo/gear_fanfuture.c"
         "display/fan_holo/fan_holo_display.cc"
         "display/fan_holo/fan_holo_status_bar.cc"

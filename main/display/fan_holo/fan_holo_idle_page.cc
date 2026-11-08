@@ -11,7 +11,6 @@ constexpr uint32_t kLunarOrange = 0xF07820;
 constexpr uint32_t kCyan = 0x5EEAD4;
 constexpr uint32_t kIconGreen = 0x22C55E;
 constexpr uint32_t kLightGray = 0xC0C0C0;
-constexpr uint32_t kWhite = 0xFFFFFF;
 constexpr uint32_t kLedCardBg = 0x1A4854;
 constexpr uint32_t kLedCardBorder = 0x3A6A78;
 
@@ -27,6 +26,21 @@ void StyleLedCard(lv_obj_t* obj) {
     lv_obj_set_style_border_width(obj, 2, 0);
     lv_obj_set_style_border_color(obj, lv_color_hex(kLedCardBorder), 0);
     lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
+}
+
+void StylePlainCard(lv_obj_t* obj) {
+    lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_radius(obj, 0, 0);
+    lv_obj_set_style_border_width(obj, 0, 0);
+    lv_obj_set_style_border_opa(obj, LV_OPA_TRANSP, 0);
+}
+
+void StyleWeatherCard(lv_obj_t* obj, bool plain) {
+    if (plain) {
+        StylePlainCard(obj);
+    } else {
+        StyleLedCard(obj);
+    }
 }
 
 lv_obj_t* MakeLabel(lv_obj_t* parent, const lv_font_t* font, uint32_t color, const char* text) {
@@ -80,7 +94,8 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
     lv_obj_set_style_pad_top(today_box_, 4, 0);
     lv_obj_set_style_pad_bottom(today_box_, 4, 0);
     lv_obj_set_style_pad_left(today_box_, 8, 0);
-    StyleLedCard(today_box_);
+    const bool plain = metrics.plain_weather != 0;
+    StyleWeatherCard(today_box_, plain);
     NoScroll(today_box_);
 
     lv_obj_t* mid = lv_obj_create(today_box_);
@@ -108,17 +123,17 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
     lv_obj_add_flag(temp_row, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     NoScroll(temp_row);
 
-    temp_label_ = MakeLabel(temp_row, font, kWhite, "--");
+    temp_label_ = MakeLabel(temp_row, font, kLightGray, "--");
     lv_obj_set_style_transform_scale(temp_label_, 480, 0);
     lv_obj_set_style_transform_pivot_x(temp_label_, 0, 0);
     lv_obj_set_style_transform_pivot_y(temp_label_, 0, 0);
     lv_obj_set_width(temp_label_, 72);
     lv_obj_set_height(temp_label_, font->line_height * 2);
     lv_obj_add_flag(temp_label_, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
-    lv_obj_t* deg = MakeLabel(temp_row, font, kWhite, "。");
-    lv_obj_set_style_translate_x(deg, metrics.weather_icon_today >= 80 ? -5 : -24, 0);
-    lv_obj_set_style_translate_y(deg, -4, 0);
-    text_label_ = MakeLabel(temp_col, font, kWhite, "");
+    temp_unit_ = MakeLabel(temp_row, font, kLightGray, "。");
+    lv_obj_set_style_translate_x(temp_unit_, metrics.weather_icon_today >= 80 ? -5 : -24, 0);
+    lv_obj_set_style_translate_y(temp_unit_, -4, 0);
+    text_label_ = MakeLabel(temp_col, font, kLightGray, "");
     lv_obj_set_style_translate_x(text_label_, 20, 0);
 
     today_icon_ = lv_image_create(mid);
@@ -144,11 +159,11 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
     lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_pos(detail_card_, card_w, weather_y + font->line_height + 12);
     lv_obj_set_size(detail_card_, host.screen_width() - card_w, font->line_height);
-    StyleLedCard(detail_card_);
+    StyleWeatherCard(detail_card_, plain);
     lv_obj_set_style_pad_left(detail_card_, metrics.weather_detail_pad_left, 0);
     NoScroll(detail_card_);
 
-    detail_label_ = MakeLabel(detail_card_, font, kWhite, "");
+    detail_label_ = MakeLabel(detail_card_, font, kLightGray, "");
     lv_obj_set_size(detail_label_, LV_PCT(100), LV_PCT(100));
     lv_label_set_long_mode(detail_label_, LV_LABEL_LONG_CLIP);
 
@@ -162,7 +177,7 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
     lv_obj_set_flex_flow(forecast_box_, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(forecast_box_, 18, 0);
     lv_obj_set_style_translate_y(forecast_box_, 5, 0);
-    StyleLedCard(forecast_box_);
+    StyleWeatherCard(forecast_box_, plain);
     NoScroll(forecast_box_);
 
     for (int i = 0; i < 3; ++i) {
@@ -211,7 +226,7 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
         lv_obj_set_style_translate_y(icon_pack, metrics.weather_icon_nudge_y, 0);
         NoScroll(icon_pack);
 
-        day_text_[i] = MakeLabel(icon_pack, font, kWhite, "");
+        day_text_[i] = MakeLabel(icon_pack, font, kLightGray, "");
         lv_obj_set_style_transform_scale(day_text_[i], 210, 0);
         lv_obj_set_style_transform_pivot_x(day_text_[i], 0, 0);
         lv_obj_set_style_transform_pivot_y(day_text_[i], font->line_height / 2, 0);
@@ -260,8 +275,6 @@ void FanHoloIdlePage::Create(FanHoloDisplay& host) {
     lv_image_set_inner_align(album_bg_, LV_IMAGE_ALIGN_CENTER);
     lv_obj_add_flag(album_bg_, LV_OBJ_FLAG_HIDDEN);
     container_ = FanHoloCreateFullBleedContainer(screen_, host);
-    lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(container_, lv_color_black(), 0);
     role_.Create(screen_, host, true);
     preview_image_ = FanHoloCreatePreviewImage(screen_, host);
 
@@ -292,6 +305,7 @@ void FanHoloIdlePage::Destroy() {
     forecast_box_ = nullptr;
     city_label_ = nullptr;
     temp_label_ = nullptr;
+    temp_unit_ = nullptr;
     text_label_ = nullptr;
     today_icon_ = nullptr;
     detail_label_ = nullptr;
@@ -398,13 +412,14 @@ void FanHoloIdlePage::ApplyTextFont(const lv_font_t* font, lv_color_t color) {
         lv_obj_set_style_text_color(lbl, lv_color_hex(hex), 0);
     };
     paint(city_label_, kLunarOrange);
-    paint(temp_label_, kWhite);
-    paint(text_label_, kWhite);
-    paint(detail_label_, kWhite);
+    paint(temp_label_, kLightGray);
+    paint(temp_unit_, kLightGray);
+    paint(text_label_, kLightGray);
+    paint(detail_label_, kLightGray);
     for (int i = 0; i < 3; ++i) {
         paint(day_title_[i], kLightGray);
         paint(day_date_[i], kOrange);
-        paint(day_text_[i], kWhite);
+        paint(day_text_[i], kLightGray);
         paint(day_temp_[i], kLunarOrange);
         paint(day_temp_unit_[i], kLunarOrange);
         paint(day_hum_[i], kCyan);
@@ -418,17 +433,12 @@ void FanHoloIdlePage::ApplyShowMode(FanHoloDisplay& host) {
         return;
     }
     status_bar_.RecreateIdleClock(screen_, host);
-    auto style_card = [this](lv_obj_t* obj) {
+    const bool plain = album_mode_ || host.metrics().plain_weather != 0;
+    auto style_card = [plain](lv_obj_t* obj) {
         if (obj == nullptr) {
             return;
         }
-        if (album_mode_) {
-            lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
-            lv_obj_set_style_border_width(obj, 0, 0);
-            lv_obj_set_style_border_opa(obj, LV_OPA_TRANSP, 0);
-        } else {
-            StyleLedCard(obj);
-        }
+        StyleWeatherCard(obj, plain);
     };
     style_card(today_box_);
     style_card(forecast_box_);

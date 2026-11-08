@@ -1,9 +1,9 @@
 /**
- * @file axp2101.cpp
+ * @file axp2101_fan.cc
  * @brief AXP2101 PMIC driver for ESP-IDF (C++ implementation)
  */
 
-#include "axp2101.h"
+#include "axp2101_fan.h"
 #include "esp_log.h"
 #include <cmath>
 

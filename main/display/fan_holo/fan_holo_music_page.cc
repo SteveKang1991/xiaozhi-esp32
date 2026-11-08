@@ -221,11 +221,12 @@ void FanHoloMusicPage::SetupCoverUI(FanHoloDisplay& host) {
                     (lv_coord_t)metrics.music_cover_w,
                     (lv_coord_t)metrics.music_cover_h);
     lv_obj_set_style_radius(music_cover_container_, 0, 0);
-    lv_obj_set_style_bg_color(music_cover_container_, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(music_cover_container_, host.GetLvglTheme()->background_color(), 0);
     lv_obj_set_style_bg_opa(music_cover_container_, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(music_cover_container_, 0, 0);
     lv_obj_set_style_pad_all(music_cover_container_, 0, 0);
     lv_obj_remove_flag(music_cover_container_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(music_cover_container_, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_set_scrollbar_mode(music_cover_container_, LV_SCROLLBAR_MODE_OFF);
 
     music_cover_bg_img_ = lv_img_create(music_cover_container_);
@@ -239,7 +240,11 @@ void FanHoloMusicPage::SetupCoverUI(FanHoloDisplay& host) {
     {
         const lv_coord_t cover_w = metrics.cover_box;
         const lv_coord_t cover_h = metrics.cover_box;
-        const lv_coord_t cover_x = ((lv_coord_t)metrics.music_cover_w - cover_w) / 2;
+        /* 相对整屏居中。101B 封面容器比屏幕窄，按容器宽会偏左。 */
+        lv_coord_t cover_x = (host.screen_width() - cover_w) / 2;
+        if (cover_x < 0) {
+            cover_x = 0;
+        }
         const lv_coord_t cover_y = metrics.cover_y;
         music_cover_img_ = lv_img_create(music_cover_container_);
         lv_obj_set_pos(music_cover_img_, cover_x, cover_y);
@@ -251,13 +256,20 @@ void FanHoloMusicPage::SetupCoverUI(FanHoloDisplay& host) {
 
     const lv_coord_t side_pad = metrics.side_pad;
     const lv_coord_t inner_w = (lv_coord_t)metrics.music_cover_w - side_pad * 2;
+    const lv_font_t* text_font = host.GetLvglTheme()->text_font()->font();
+    const lv_coord_t line_h = (text_font != nullptr && text_font->line_height > 0)
+                                  ? (lv_coord_t)text_font->line_height
+                                  : 32;
+    /* 行盒要比字高一点，否则缩放后字的底部被裁掉。 */
+    const lv_coord_t row_h = line_h + 8;
 
     auto make_text_label = [&](lv_obj_t* parent, lv_coord_t width, lv_coord_t height) -> lv_obj_t* {
         lv_obj_t* lbl = lv_label_create(parent);
         lv_obj_set_size(lbl, width, height);
         lv_obj_set_style_bg_opa(lbl, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_text_font(lbl, host.GetLvglTheme()->text_font()->font(), 0);
+        lv_obj_set_style_text_font(lbl, text_font, 0);
         lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        lv_obj_add_flag(lbl, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
         lv_label_set_text(lbl, "");
         return lbl;
@@ -266,9 +278,10 @@ void FanHoloMusicPage::SetupCoverUI(FanHoloDisplay& host) {
     {
         const int scale_num = 281;
         const lv_coord_t box_w = inner_w * 256 / scale_num;
-        const lv_coord_t box_h = 50;
+        const lv_coord_t box_h = row_h + 8 < 58 ? 58 : row_h + 8;
         music_lyric_label_ = make_text_label(music_cover_container_, box_w, box_h);
         lv_obj_set_style_text_align(music_lyric_label_, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_color(music_lyric_label_, lv_color_hex(0xC06BFF), 0);
         lv_obj_set_style_transform_scale_x(music_lyric_label_, scale_num, 0);
         lv_obj_set_style_transform_scale_y(music_lyric_label_, scale_num, 0);
         lv_obj_set_style_transform_pivot_x(music_lyric_label_, 0, 0);
@@ -276,18 +289,20 @@ void FanHoloMusicPage::SetupCoverUI(FanHoloDisplay& host) {
         lv_obj_align(music_lyric_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, metrics.lyric_bottom);
     }
 
-    music_lyric_next_label_ = make_text_label(music_cover_container_, inner_w, 30);
+    music_lyric_next_label_ = make_text_label(music_cover_container_, inner_w, row_h);
     lv_obj_set_style_text_align(music_lyric_next_label_, LV_TEXT_ALIGN_LEFT, 0);
     lv_obj_set_style_text_color(music_lyric_next_label_, lv_color_hex(0x9d9183), 0);
     lv_obj_align(music_lyric_next_label_, LV_ALIGN_BOTTOM_LEFT, side_pad, metrics.lyric_next_bottom);
 
+    lv_coord_t song_h = 0;
     {
         const int scale_num = 307;
         const lv_coord_t box_w = inner_w * 256 / scale_num;
-        const lv_coord_t box_h = 32;
-        music_song_name_label_ = make_text_label(music_cover_container_, box_w, box_h);
-        lv_obj_set_size(music_song_name_label_, box_w, box_h);
+        song_h = (lv_coord_t)((int)line_h * scale_num / 256) + 6;
+        music_song_name_label_ = make_text_label(music_cover_container_, box_w, song_h);
+        lv_obj_set_size(music_song_name_label_, box_w, song_h);
         lv_obj_set_style_text_align(music_song_name_label_, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_color(music_song_name_label_, lv_color_hex(0xF07820), 0);
         lv_obj_set_style_transform_scale_x(music_song_name_label_, scale_num, 0);
         lv_obj_set_style_transform_scale_y(music_song_name_label_, scale_num, 0);
         lv_obj_set_style_transform_pivot_x(music_song_name_label_, 0, 0);
@@ -295,18 +310,29 @@ void FanHoloMusicPage::SetupCoverUI(FanHoloDisplay& host) {
         lv_obj_align(music_song_name_label_, LV_ALIGN_TOP_LEFT, side_pad, metrics.song_top);
     }
 
-    music_singer_label_ = make_text_label(music_cover_container_, inner_w, 30);
+    music_singer_label_ = make_text_label(music_cover_container_, inner_w, row_h);
     lv_obj_set_style_text_align(music_singer_label_, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_set_style_text_color(music_singer_label_, lv_color_hex(0xdfd8d0), 0);
-    lv_obj_align(music_singer_label_, LV_ALIGN_TOP_LEFT, side_pad, metrics.singer_top);
+    lv_obj_set_style_text_color(music_singer_label_, lv_color_hex(0xFFB15A), 0);
+    lv_coord_t singer_y = metrics.singer_top;
+    const lv_coord_t min_singer_y = metrics.song_top + song_h + 4;
+    if (singer_y < min_singer_y) {
+        singer_y = min_singer_y;
+    }
+    lv_obj_align(music_singer_label_, LV_ALIGN_TOP_LEFT, side_pad, singer_y);
 
     music_progress_bar_ = lv_bar_create(music_cover_container_);
-    lv_obj_set_size(music_progress_bar_, inner_w, 6);
-    lv_obj_align(music_progress_bar_, LV_ALIGN_BOTTOM_LEFT, side_pad, metrics.bar_bottom);
+    /* 左端与歌词对齐；右端到屏幕右边的距离等于左端到屏幕左边的距离。 */
+    const lv_coord_t bar_left = side_pad;
+    lv_coord_t bar_w = host.screen_width() - bar_left * 2;
+    if (bar_w < 1) {
+        bar_w = 1;
+    }
+    lv_obj_set_size(music_progress_bar_, bar_w, 6);
+    lv_obj_align(music_progress_bar_, LV_ALIGN_BOTTOM_LEFT, bar_left, metrics.bar_bottom);
     lv_bar_set_range(music_progress_bar_, 0, 100);
     lv_bar_set_value(music_progress_bar_, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(music_progress_bar_, lv_color_hex(0x9d9183), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(music_progress_bar_, lv_color_white(), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(music_progress_bar_, lv_color_hex(0xF5C400), LV_PART_INDICATOR);
 
     music_cur_time_label_ = make_text_label(music_cover_container_, inner_w / 2 + 1, 30);
     lv_obj_set_style_text_align(music_cur_time_label_, LV_TEXT_ALIGN_LEFT, 0);
@@ -328,12 +354,15 @@ void FanHoloMusicPage::LoadBackgroundImage(FanHoloDisplay& host) {
     if (music_cover_bg_img_ == nullptr) {
         return;
     }
+    const char* path = host.metrics().music_bg_path;
+    if (path == nullptr || path[0] == '\0') {
+        return;
+    }
     if (!sd_scanner_is_mounted()) {
         ESP_LOGW(host.metrics().tag, "SD card not mounted; music cover will use plain black background");
         return;
     }
 
-    const char* path = host.metrics().music_bg_path;
     FILE* f = fopen(path, "rb");
     if (f == nullptr) {
         ESP_LOGW(host.metrics().tag, "music background not found (%s)", path);
@@ -408,6 +437,17 @@ void FanHoloMusicPage::SetInfo(FanHoloDisplay& host, const char* song_name, cons
     }
     if (music_singer_label_) {
         lv_label_set_text(music_singer_label_, (singer != nullptr && singer[0] != '\0') ? singer : "");
+    }
+    /* 新歌写入歌名时清掉上一首残留的两行歌词。仅重新露出播放页不会走到这里。 */
+    if (song_name != nullptr && song_name[0] != '\0') {
+        last_lyric_.clear();
+        last_lyric_next_.clear();
+        if (music_lyric_label_) {
+            lv_label_set_text(music_lyric_label_, "");
+        }
+        if (music_lyric_next_label_) {
+            lv_label_set_text(music_lyric_next_label_, "");
+        }
     }
     if (interval >= 0) {
         music_total_interval_sec_ = interval;

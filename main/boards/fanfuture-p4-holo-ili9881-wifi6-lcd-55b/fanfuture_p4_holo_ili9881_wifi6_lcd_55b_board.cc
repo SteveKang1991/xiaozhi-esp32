@@ -22,7 +22,7 @@
 #include <rom/ets_sys.h>
 #include "freertos/task.h"
 
-#include "axp2101.h"
+#include "axp2101_fan.h"
 #include "sd_scanner.h"
 #include "wifi_board.h"
 

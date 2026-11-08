@@ -24,7 +24,7 @@ constexpr uint32_t kLunarBg = 0xF07820;
 constexpr uint32_t kLunarMonthFg = 0x8B3D9E;
 constexpr uint32_t kMonthBg = 0xE11D2E;
 constexpr uint32_t kMonthFg = 0xFFFFFF;
-constexpr uint32_t kDayBg = 0xFFFFFF;
+constexpr uint32_t kDayBg = 0xFF6EB4;
 constexpr uint32_t kDayFg = 0x111111;
 constexpr uint32_t kGanzhiBg = 0xF5C400;
 constexpr uint32_t kGanzhiFg = 0x111111;
@@ -942,7 +942,6 @@ lv_obj_t* FanHoloCreateScreen(FanHoloDisplay& host) {
 }
 
 lv_obj_t* FanHoloCreateFullBleedContainer(lv_obj_t* screen, FanHoloDisplay& host) {
-    auto* theme = host.GetLvglTheme();
     lv_obj_t* container = lv_obj_create(screen);
     lv_obj_remove_style_all(container);
     lv_obj_add_flag(container, LV_OBJ_FLAG_FLOATING);
@@ -952,7 +951,7 @@ lv_obj_t* FanHoloCreateFullBleedContainer(lv_obj_t* screen, FanHoloDisplay& host
     lv_obj_set_style_pad_all(container, 0, 0);
     lv_obj_set_style_border_width(container, 0, 0);
     lv_obj_set_style_bg_opa(container, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(container, theme->background_color(), 0);
+    lv_obj_set_style_bg_color(container, host.GetLvglTheme()->background_color(), 0);
     lv_obj_move_background(container);
     return container;
 }

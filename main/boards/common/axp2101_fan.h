@@ -1,10 +1,10 @@
 /**
- * @file axp2101.hpp
+ * @file axp2101_fan.h
  * @brief AXP2101 PMIC driver for ESP-IDF (C++ version)
  */
 
-#ifndef __AXP2101_HPP__
-#define __AXP2101_HPP__
+#ifndef __AXP2101_FAN_H__
+#define __AXP2101_FAN_H__
 
 #include <cstdint>
 #include <cstdbool>
@@ -301,5 +301,5 @@ private:
     uint16_t ReadAdcH5L8(uint8_t reg_h, uint8_t reg_l);
 };
 
-#endif /* __AXP2101_HPP__ */
+#endif /* __AXP2101_FAN_H__ */
 

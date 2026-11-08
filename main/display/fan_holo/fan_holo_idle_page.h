@@ -43,6 +43,7 @@ private:
     lv_obj_t* today_box_ = nullptr;
     lv_obj_t* city_label_ = nullptr;
     lv_obj_t* temp_label_ = nullptr;
+    lv_obj_t* temp_unit_ = nullptr;
     lv_obj_t* text_label_ = nullptr;
     lv_obj_t* today_icon_ = nullptr;
     lv_obj_t* detail_label_ = nullptr;

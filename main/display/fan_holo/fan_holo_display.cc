@@ -70,8 +70,11 @@ FanHoloDisplay::FanHoloDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
                                const FanHoloMetrics& metrics)
     : LcdDisplay(panel_io, panel, width, height), metrics_(metrics) {
 
-    Settings settings("display", false);
-    std::string theme_name = settings.GetString("theme", "dark");
+#if CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_JD9365_WiFI6_LCD_101B
+    const char* theme_name = "light";
+#else
+    const char* theme_name = "dark";
+#endif
     current_theme_ = LvglThemeManager::GetInstance().GetTheme(theme_name);
 
     ESP_LOGI(metrics_.tag, "Initialize LVGL library");
@@ -481,7 +484,11 @@ void FanHoloDisplay::UpdateStatusBar(bool update_all) {
 }
 
 extern "C" {
+#if CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_JD9365_WiFI6_LCD_101B
+extern const lv_image_dsc_t microchip_fanfuture_white;
+#else
 extern const lv_image_dsc_t microchip_fanfuture;
+#endif
 extern const lv_image_dsc_t gear_fanfuture;
 }
 
@@ -490,7 +497,11 @@ const lv_image_dsc_t* FanHoloBrandImage(const char* name) {
         return nullptr;
     }
     if (strcmp(name, "microchip_ai") == 0) {
+#if CONFIG_BOARD_TYPE_FANFUTURE_P4_HOLO_JD9365_WiFI6_LCD_101B
+        return &microchip_fanfuture_white;
+#else
         return &microchip_fanfuture;
+#endif
     }
     if (strcmp(name, "gear") == 0 || strcmp(name, "link") == 0) {
         return &gear_fanfuture;
