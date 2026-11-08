@@ -1,7 +1,7 @@
 #include "codecs/box_audio_codec.h"
 #include "application.h"
-#include "fan_mipiILI988150_display.h"
-#include "esp_lcd_ili9881c.h"
+#include "fan_mipi40_display.h"
+#include "esp_lcd_st7701.h"
 #include "button.h"
 #include "config.h"
 #include "esp_video.h"
@@ -23,9 +23,9 @@
 #include "sd_scanner.h"
 #include "wifi_board.h"
 
-#define TAG "FanFutureP4HoloILI9881WiFi6Lcd5BBoard"
+#define TAG "FanFutureP4ST7701WiFi6Lcd4BBoard"
 
-class FanFutureP4HoloILI9881WiFi6Lcd5BBoard : public WifiBoard {
+class FanFutureP4ST7701WiFi6Lcd4BBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;  // I2C1: Audio Codec + Camera
     i2c_master_bus_handle_t i2c_bus_touch_;  // I2C0: Touch + AXP2101
@@ -186,86 +186,101 @@ private:
         }
     }
 
-    void InitializeIli9881cDisplay() {
-        esp_lcd_panel_io_handle_t panel_io = nullptr;
-        esp_lcd_panel_handle_t panel = nullptr;
-
-        ESP_LOGI(TAG, "Turn on the power for MIPI DSI PHY");
+    static esp_err_t bsp_enable_dsi_phy_power(void) {
+#if MIPI_DSI_PHY_PWR_LDO_CHAN > 0
         static esp_ldo_channel_handle_t phy_pwr_chan = NULL;
-        esp_ldo_channel_config_t ldo_cfg = {
-            .chan_id = MIPI_DSI_PHY_PWR_LDO_CHAN,
-            .voltage_mv = MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV,
-        };
-        esp_ldo_acquire_channel(&ldo_cfg, &phy_pwr_chan);
+        if (phy_pwr_chan == NULL) {
+            esp_ldo_channel_config_t ldo_cfg = {
+                .chan_id = MIPI_DSI_PHY_PWR_LDO_CHAN,
+                .voltage_mv = MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV,
+            };
+            esp_err_t ret = esp_ldo_acquire_channel(&ldo_cfg, &phy_pwr_chan);
+            if (ret == ESP_OK) {
+                ESP_LOGI(TAG, "✅ MIPI DSI & CSI PHY LDO已启用 (2.5V, 通道%d)", MIPI_DSI_PHY_PWR_LDO_CHAN);
+            } else {
+                ESP_LOGE(TAG, "❌ MIPI PHY LDO初始化失败: %s", esp_err_to_name(ret));
+                return ret;
+            }
+        }
+#endif
+        return ESP_OK;
+    }
 
-        ESP_LOGI(TAG, "Install MIPI DSI LCD control panel");
+    void InitializeLCD() {
+        ESP_LOGI(TAG, "🖥️  初始化ST7701 LCD显示屏...");
+        bsp_enable_dsi_phy_power();
+        esp_lcd_panel_io_handle_t io = NULL;
+        esp_lcd_panel_handle_t disp_panel = NULL;
+
         esp_lcd_dsi_bus_handle_t mipi_dsi_bus = NULL;
         esp_lcd_dsi_bus_config_t bus_config = {
-            .bus_id             = 0,            /* 总线ID */
-            .num_data_lanes     = 2,            /* 2路数据信号 */
-            .phy_clk_src        = MIPI_DSI_PHY_CLK_SRC_DEFAULT, /* DPHY时钟源为20M */
-            .lane_bit_rate_mbps = 480,          /* 数据通道比特率(Mbps) */
+            .bus_id = 0,
+            .num_data_lanes = 2,
+            .phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT,
+            .lane_bit_rate_mbps = 500,
         };
-        ESP_ERROR_CHECK(esp_lcd_new_dsi_bus(&bus_config, &mipi_dsi_bus));
+        esp_lcd_new_dsi_bus(&bus_config, &mipi_dsi_bus);
+        ESP_LOGI(TAG, "   MIPI DSI总线: 2通道, %d Mbps", bus_config.lane_bit_rate_mbps);
 
-        ESP_LOGI(TAG, "Install panel IO");
+        ESP_LOGI(TAG, "Install MIPI DSI LCD control panel");
         esp_lcd_dbi_io_config_t dbi_config = {
-            .virtual_channel = 0,                               /* 虚拟通道(只有一个LCD连接,设置0即可) */
-            .lcd_cmd_bits    = 8,                               /* 根据MIPI LCD驱动IC规格设置 命令位宽度 */
-            .lcd_param_bits  = 8,                               /* 根据MIPI LCD驱动IC规格设置 参数位宽度 */
+            .virtual_channel = 0,
+            .lcd_cmd_bits = 8,
+            .lcd_param_bits = 8,
         };
-        ESP_ERROR_CHECK(esp_lcd_new_panel_io_dbi(mipi_dsi_bus, &dbi_config, &panel_io));
+        esp_lcd_new_panel_io_dbi(mipi_dsi_bus, &dbi_config, &io);
 
-        ESP_LOGI(TAG, "Install LCD driver of ili9881c");
-        esp_lcd_dpi_panel_config_t dpi_config = {.virtual_channel    = 0,
-                                                 .dpi_clk_src        = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
-                                                 .dpi_clock_freq_mhz = 46,
-                                                 .pixel_format       = LCD_COLOR_PIXEL_FORMAT_RGB565,
-                                                 .num_fbs            = 1,
-                                                 .video_timing =
-                                                     {
-                                                         .h_size            = 720,
-                                                         .v_size            = 1280,
-                                                         .hsync_pulse_width = 8,
-                                                         .hsync_back_porch  = 52,
-                                                         .hsync_front_porch = 48,
-                                                         .vsync_pulse_width = 5,
-                                                         .vsync_back_porch  = 15,
-                                                         .vsync_front_porch = 16,
-                                                     },
-                                                 .flags = {
-                                                     .use_dma2d = true,
-                                                 }};
-
-
-        ili9881c_vendor_config_t vendor_config = {
-            .init_cmds      = ili9881d_init_cmds,
-            .init_cmds_size = sizeof(ili9881d_init_cmds) /
-                              sizeof(ili9881d_init_cmds[0]),
-            .mipi_config =
-                {
-                    .dsi_bus    = mipi_dsi_bus,
-                    .dpi_config = &dpi_config,
-                    .lane_num   = 2,
-                },
+        esp_lcd_dpi_panel_config_t dpi_config = {
+            .virtual_channel = 0,
+            .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
+            .dpi_clock_freq_mhz = 30,
+            .pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565,
+            .in_color_format = LCD_COLOR_FMT_RGB565,
+            .out_color_format = LCD_COLOR_FMT_RGB565,
+            .num_fbs = 2,
+            .video_timing = {
+                .h_size = 480,
+                .v_size = 800,
+                .hsync_pulse_width = 12,
+                .hsync_back_porch = 42,
+                .hsync_front_porch = 42,
+                .vsync_pulse_width = 8,
+                .vsync_back_porch = 2,
+                .vsync_front_porch = 60,
+            },
+            .flags = {
+                .use_dma2d = true,
+            },
         };
 
-        esp_lcd_panel_dev_config_t lcd_dev_config = {};
-        lcd_dev_config.rgb_ele_order              = LCD_RGB_ELEMENT_ORDER_RGB;
-        lcd_dev_config.reset_gpio_num             = PIN_NUM_LCD_RST;
-        lcd_dev_config.bits_per_pixel             = LCD_BIT_PER_PIXEL;
-        lcd_dev_config.vendor_config              = &vendor_config;
+        st7701_vendor_config_t vendor_config = {
+            .init_cmds = st7701_init_cmds,
+            .init_cmds_size = sizeof(st7701_init_cmds) / sizeof(st7701_lcd_init_cmd_t),
+            .mipi_config = {
+                .dsi_bus = mipi_dsi_bus,
+                .dpi_config = &dpi_config,
+            },
+            .flags = {
+                .use_mipi_interface = 1,
+            },
+        };
 
-        ESP_ERROR_CHECK(esp_lcd_new_panel_ili9881c(panel_io, &lcd_dev_config, &panel));
-        ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
-        ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
+        const esp_lcd_panel_dev_config_t lcd_dev_config = {
+            .reset_gpio_num = PIN_NUM_LCD_RST,
+            .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,  // BGR顺序
+            .bits_per_pixel = 16,
+            .vendor_config = &vendor_config,
+        };
+        esp_lcd_new_panel_st7701(io, &lcd_dev_config, &disp_panel);
+        esp_lcd_panel_reset(disp_panel);
+        esp_lcd_panel_init(disp_panel);
+        esp_lcd_panel_disp_on_off(disp_panel, true);
+        ESP_LOGI(TAG, "   分辨率: %dx%d", DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        ESP_LOGI(TAG, "   DPI时钟: %d MHz", dpi_config.dpi_clock_freq_mhz);
 
-        ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
-
-        display_ = new FanMIPIILI988150Display(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
+        display_ = new FanMIPI40Display(io, disp_panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
                                       DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
-
-        ESP_LOGI(TAG, "ILI9881C display initialization completed");
+        ESP_LOGI(TAG, "✅ ST7701 LCD初始化完成");
     }
 
     void InitializeButtons() {
@@ -346,21 +361,20 @@ private:
     }
 
 public:
-    FanFutureP4HoloILI9881WiFi6Lcd5BBoard() :
+    FanFutureP4ST7701WiFi6Lcd4BBoard() :
         WifiBoard(),
         boot_button_(BOOT_BUTTON_GPIO) {
         InitializeCodecI2c();
         InitializeTouchI2c();
-        // 初始化LCD在电源管理之前，确保屏幕先获得稳定电源
-        InitializeIli9881cDisplay();
         InitializeAXP2101();
-        //InitializeSdForMjpeg();
+        InitializeLCD();
+        InitializeSdForMjpeg();
         //InitializeCamera();
         InitializeButtons();
         GetBacklight()->RestoreBrightness();
     }
 
-    ~FanFutureP4HoloILI9881WiFi6Lcd5BBoard() {
+    ~FanFutureP4ST7701WiFi6Lcd4BBoard() {
         if (pmic_) {
             delete pmic_;
             pmic_ = nullptr;
@@ -399,4 +413,4 @@ public:
 
 };
 
-DECLARE_BOARD(FanFutureP4HoloILI9881WiFi6Lcd5BBoard);
+DECLARE_BOARD(FanFutureP4ST7701WiFi6Lcd4BBoard);
