@@ -157,7 +157,8 @@ void FanHoloIdlePage::CreateWeather(FanHoloDisplay& host) {
     lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_add_flag(detail_card_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_pos(detail_card_, card_w, weather_y + font->line_height + 12);
+    lv_obj_set_pos(detail_card_, card_w,
+                   weather_y + font->line_height + 12 + metrics.weather_detail_nudge_y);
     lv_obj_set_size(detail_card_, host.screen_width() - card_w, font->line_height);
     StyleWeatherCard(detail_card_, plain);
     lv_obj_set_style_pad_left(detail_card_, metrics.weather_detail_pad_left, 0);

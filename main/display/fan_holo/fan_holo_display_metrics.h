@@ -57,6 +57,14 @@ struct FanHoloMetrics {
     uint8_t idle_clock_style;
     /* 1=实时天气、预报、滚动条不要卡片底，文字直接铺在画面上。 */
     uint8_t plain_weather;
+    /* 1=对话动画在屏幕里上下居中。0=贴底，左右仍居中。 */
+    uint8_t chat_mjpeg_center;
+    /* idle 动画底边离屏幕底部的像素。0=贴底。 */
+    uint16_t idle_mjpeg_bottom;
+    /* 1=动画四周留白刷白。0=刷黑。 */
+    uint8_t mjpeg_margin_white;
+    /* 实时天气右侧滚动条的垂直偏移，负数为上移。 */
+    int8_t weather_detail_nudge_y;
 
     static constexpr uint8_t kIdleClockFlipPuhui = 1;
     static constexpr uint8_t kIdleClockLed7Seg = 2;
@@ -72,13 +80,15 @@ struct FanHoloMetrics {
             256, 10, 6, 8, 10, 0, 256, 96, 62, -60, -2, 18,
             kIdleClockFlipPuhui,
             0,
+            0, 0, 0,
+            0,
         };
     }
 
     static constexpr FanHoloMetrics For101B() {
         return FanHoloMetrics{
             "FanMIPI101Display",
-            656, 1232, 560, 896, 24,
+            656, 1136, 560, 896, 24,
             720, 1232, 48, nullptr,
             160, 200, 30,
             486, 224, 110, -420, -385, 90, 150, -310, -265,
@@ -86,6 +96,8 @@ struct FanHoloMetrics {
             256, 10, 6, 8, 10, 0, 256, 96, 62, -60, -2, 18,
             kIdleClockFlipPuhui,
             1,
+            1, 72, 1,
+            -32,
         };
     }
 
@@ -99,6 +111,8 @@ struct FanHoloMetrics {
             236, 192, 44, 52, 84, 7, 28, 56,
             256, 5, 3, 4, 0, 3, 200, 64, 44, -24, -2, 9,
             kIdleClockFlipPuhui,
+            0,
+            0, 0, 0,
             0,
         };
     }

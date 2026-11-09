@@ -52,6 +52,8 @@ typedef struct {
     uint8_t panel_scale_n;
     /** letterbox 顶边保护：不刷 y < 此值（idle 时钟栏）。 */
     uint16_t panel_protect_top;
+    /** true：动画四周留白刷白。false：刷黑。 */
+    bool panel_margin_white;
 } mjpeg_player_cfg_t;
 
 esp_err_t mjpeg_player_start(const mjpeg_player_cfg_t *cfg);

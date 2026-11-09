@@ -905,7 +905,7 @@ bool FanHoloDisplay::StartMjpegEmotion(const char* full_path, bool idle_layout) 
     }
     if (idle_layout) {
         rx = screen_w - static_cast<int>(vid_w);
-        ry = screen_h - static_cast<int>(vid_h);
+        ry = screen_h - static_cast<int>(vid_h) - static_cast<int>(metrics_.idle_mjpeg_bottom);
         if (ry > 0) {
             protect_top = static_cast<uint16_t>(ry);
         }
@@ -913,7 +913,11 @@ bool FanHoloDisplay::StartMjpegEmotion(const char* full_path, bool idle_layout) 
                  rx, ry, vid_w, vid_h, protect_top);
     } else {
         rx = (screen_w - static_cast<int>(vid_w)) / 2;
-        ry = screen_h - static_cast<int>(vid_h);
+        if (metrics_.chat_mjpeg_center) {
+            ry = (screen_h - static_cast<int>(vid_h)) / 2;
+        } else {
+            ry = screen_h - static_cast<int>(vid_h);
+        }
         if (ry > 0) {
             protect_top = static_cast<uint16_t>(ry);
         }
@@ -957,6 +961,7 @@ bool FanHoloDisplay::StartMjpegEmotion(const char* full_path, bool idle_layout) 
     cfg.panel_out_h = out_h;
     cfg.panel_scale_n = scale_n;
     cfg.panel_protect_top = protect_top;
+    cfg.panel_margin_white = metrics_.mjpeg_margin_white != 0;
 
     const esp_err_t ret = mjpeg_player_start(&cfg);
     if (ret != ESP_OK) {

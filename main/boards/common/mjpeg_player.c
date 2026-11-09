@@ -465,6 +465,9 @@ static void mjpeg_h_band_black(esp_lcd_panel_handle_t panel, int y0, int band_h,
             ch = MJPEG_BLACK_TILE_H;
         }
         const size_t bbytes = (size_t)panel_w * (size_t)ch * sizeof(uint16_t);
+        if (s_cfg.panel_margin_white && s_mjpeg_black_tile != NULL) {
+            memset(s_mjpeg_black_tile, 0xFF, bbytes);
+        }
         mjpeg_cache_c2m_cpu_tight(s_mjpeg_black_tile, bbytes);
         (void)mjpeg_panel_draw_bitmap_retry(panel, 0, y0 + y, panel_w, y0 + y + ch, s_mjpeg_black_tile);
         y += ch;
@@ -483,7 +486,7 @@ static void mjpeg_pillar_bands(esp_lcd_panel_handle_t panel, int x0, int col_w, 
             ch = MJPEG_BLACK_TILE_H;
         }
         const size_t bbytes = (size_t)col_w * (size_t)ch * sizeof(uint16_t);
-        (void)memset(s_mjpeg_slab, 0, bbytes);
+        (void)memset(s_mjpeg_slab, s_cfg.panel_margin_white ? 0xFF : 0x00, bbytes);
         mjpeg_cache_c2m_cpu_tight(s_mjpeg_slab, bbytes);
         (void)mjpeg_panel_draw_bitmap_retry(panel, x0, y0 + y, x0 + col_w, y0 + y + ch, s_mjpeg_slab);
         y += ch;
