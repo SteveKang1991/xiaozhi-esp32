@@ -206,6 +206,131 @@ void FanHoloDisplay::ApplyPreview(lv_obj_t* preview) {
     preview_image_ = preview;
 }
 
+void FanHoloDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
+    if (image == nullptr) {
+        const bool was_holding = preview_holding_;
+        preview_holding_ = false;
+        LcdDisplay::SetPreviewImage(nullptr);
+        if (was_holding && !last_role_state_.empty()) {
+            SetRoleAnimation(last_role_state_.c_str());
+        }
+        return;
+    }
+    preview_holding_ = true;
+    StopMjpegIfRunning();
+    LcdDisplay::SetPreviewImage(std::move(image));
+    if (preview_image_ == nullptr || preview_image_cached_ == nullptr) {
+        return;
+    }
+    auto img_dsc = preview_image_cached_->image_dsc();
+    if (img_dsc == nullptr || img_dsc->header.w == 0 || img_dsc->header.h == 0) {
+        return;
+    }
+
+    DisplayLockGuard lock(this);
+    const bool idle = current_page_ == Page::Idle;
+    int vid_w = idle
+        ? (metrics_.mjpeg_idle_w ? metrics_.mjpeg_idle_w : metrics_.mjpeg_w)
+        : metrics_.mjpeg_w;
+    int vid_h = idle
+        ? (metrics_.mjpeg_idle_h ? metrics_.mjpeg_idle_h : metrics_.mjpeg_h)
+        : metrics_.mjpeg_h;
+    if (vid_w <= 0) {
+        vid_w = width_;
+    }
+    if (vid_h <= 0) {
+        vid_h = height_;
+    }
+
+    const int img_w = img_dsc->header.w;
+    const int img_h = img_dsc->header.h;
+    int box_w = vid_w > width_ ? width_ : vid_w;
+    int box_h = static_cast<int>((static_cast<int64_t>(box_w) * img_h) / img_w);
+    if (box_h > height_ && img_h > 0) {
+        box_h = height_;
+        box_w = static_cast<int>((static_cast<int64_t>(box_h) * img_w) / img_h);
+    }
+    if (box_w < 1) {
+        box_w = 1;
+    }
+    if (box_h < 1) {
+        box_h = 1;
+    }
+
+    int rx = 0;
+    int ry = 0;
+    if (idle) {
+        rx = width_ - vid_w;
+        ry = height_ - vid_h - static_cast<int>(metrics_.idle_mjpeg_bottom);
+    } else if (metrics_.chat_mjpeg_center) {
+        rx = (width_ - vid_w) / 2;
+        ry = (height_ - vid_h) / 2;
+    } else {
+        rx = (width_ - vid_w) / 2;
+        ry = height_ - vid_h;
+    }
+    if (rx < 0) {
+        rx = 0;
+    }
+    if (ry < 0) {
+        ry = 0;
+    }
+    int px = rx + (vid_w - box_w) / 2;
+    int py = ry + (vid_h - box_h) / 2;
+    if (px < 0) {
+        px = 0;
+    }
+    if (py < 0) {
+        py = 0;
+    }
+
+    const int stride = img_dsc->header.stride > 0 ? img_dsc->header.stride : img_w * 2;
+    uint8_t* scaled = static_cast<uint8_t*>(
+        heap_caps_malloc(static_cast<size_t>(box_w) * box_h * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (scaled != nullptr && img_dsc->header.cf == LV_COLOR_FORMAT_RGB565 && img_dsc->data != nullptr) {
+        const auto* src = static_cast<const uint8_t*>(img_dsc->data);
+        for (int y = 0; y < box_h; ++y) {
+            const int sy = y * img_h / box_h;
+            const auto* srow = reinterpret_cast<const uint16_t*>(src + static_cast<size_t>(sy) * stride);
+            auto* drow = reinterpret_cast<uint16_t*>(scaled + static_cast<size_t>(y) * box_w * 2);
+            for (int x = 0; x < box_w; ++x) {
+                drow[x] = srow[x * img_w / box_w];
+            }
+        }
+        preview_image_cached_ = std::make_unique<LvglAllocatedImage>(
+            scaled, static_cast<size_t>(box_w) * box_h * 2, box_w, box_h, box_w * 2, LV_COLOR_FORMAT_RGB565);
+        lv_image_set_src(preview_image_, preview_image_cached_->image_dsc());
+    } else {
+        heap_caps_free(scaled);
+    }
+    lv_image_set_scale(preview_image_, 256);
+    lv_image_set_pivot(preview_image_, box_w / 2, box_h / 2);
+    lv_obj_set_size(preview_image_, box_w, box_h);
+    lv_obj_align(preview_image_, LV_ALIGN_TOP_LEFT, px, py);
+    lv_obj_move_foreground(preview_image_);
+    lv_obj_remove_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+    if (preview_timer_ != nullptr) {
+        esp_timer_stop(preview_timer_);
+        esp_timer_start_once(preview_timer_, 15ULL * 1000 * 1000);
+    }
+    /* MJPEG 停掉后最后一帧还在屏上。把整块播放区域标脏，让界面背景盖掉它。 */
+    lv_area_t video_area;
+    video_area.x1 = rx;
+    video_area.y1 = ry;
+    video_area.x2 = rx + vid_w - 1;
+    video_area.y2 = ry + vid_h - 1;
+    lv_obj_t* screen = lv_screen_active();
+    if (screen != nullptr) {
+        lv_obj_invalidate_area(screen, &video_area);
+    }
+    if (container_ != nullptr) {
+        lv_obj_invalidate(container_);
+    }
+    lv_refr_now(nullptr);
+    ESP_LOGI(metrics_.tag, "preview %dx%d -> %dx%d at (%d,%d) mjpeg=%dx%d",
+             img_w, img_h, box_w, box_h, px, py, vid_w, vid_h);
+}
+
 void FanHoloDisplay::ApplyContainer(lv_obj_t* container) {
     container_ = container;
 }
@@ -585,9 +710,17 @@ void FanHoloDisplay::SetEmotion(const char* emotion) {
 }
 
 void FanHoloDisplay::SetRoleAnimation(const char* state) {
+    if (state != nullptr && state[0] != '\0') {
+        last_role_state_ = state;
+    }
     ESP_LOGI(metrics_.tag, "SetRoleAnimation state=%s ready=%d sd_mounted=%d",
              state ? state : "<null>",
              (int)s_system_ready_, (int)sd_scanner_is_mounted());
+    if (preview_holding_) {
+        StopMjpegIfRunning();
+        ESP_LOGI(metrics_.tag, "SetRoleAnimation deferred while photo preview is showing");
+        return;
+    }
 
     if (gif_controller_) {
         DisplayLockGuard lock(this);

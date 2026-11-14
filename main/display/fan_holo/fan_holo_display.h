@@ -30,6 +30,7 @@ public:
     void SetRoleAnimation(const char* state) override;
     void StopRoleAnimation() override;
     void SetChatMessage(const char* role, const char* content) override;
+    void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
     void ClearChatMessages() override;
     void SetStatus(const char* status) override;
     void SetSystemReady() override;
@@ -113,6 +114,8 @@ private:
     FanHoloMetrics metrics_;
     int idle_clock_style_ = 1;
     std::string current_mjpeg_path_;
+    std::string last_role_state_;
+    bool preview_holding_ = false;
     int roi_x_ = 0;
     int roi_y_ = 0;
 

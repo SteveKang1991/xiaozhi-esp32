@@ -57,8 +57,7 @@
 #define TAG "EspVideo"
 
 #if defined(CONFIG_CAMERA_SENSOR_SWAP_PIXEL_BYTE_ORDER) || defined(CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP)
-#warning \
-    "CAMERA_SENSOR_SWAP_PIXEL_BYTE_ORDER or CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP is enabled, which may cause image corruption in YUV422 format!"
+#pragma message("CAMERA_SENSOR_SWAP_PIXEL_BYTE_ORDER or CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP is enabled; verify YUV422 image integrity")
 #endif
 
 #if CONFIG_XIAOZHI_ENABLE_CAMERA_DEBUG_MODE
@@ -191,7 +190,8 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
     uint32_t best_fmt = 0;
     int best_rank = 1 << 30;  // large number
 
-    // 注: 当前版本 esp_video 中 YUV422P 实际输出为 YUYV。
+    // esp_video 2.x 用打包的 YUYV/UYVY。ISP 列出的 YUV422P 是平面 YVU，
+    // 再按打包 YUYV 做字节交换会把人脸编成品红和绿色。有 RGB565 时优先用它。
 #if defined(CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE) && defined(CONFIG_SOC_PPA_SUPPORTED)
     auto get_rank = [](uint32_t fmt) -> int {
         switch (fmt) {
@@ -203,6 +203,9 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
             case V4L2_PIX_FMT_YUV420:  // 软件 JPEG 编码器不支持 YUV420 格式
                 return 2;
 #endif  // CONFIG_XIAOZHI_ENABLE_HARDWARE_JPEG_ENCODER
+            case V4L2_PIX_FMT_YUYV:
+            case V4L2_PIX_FMT_UYVY:
+                return 3;
             case V4L2_PIX_FMT_GREY:
             case V4L2_PIX_FMT_YUV422P:
             default:
@@ -212,15 +215,18 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
 #else
     auto get_rank = [](uint32_t fmt) -> int {
         switch (fmt) {
-            case V4L2_PIX_FMT_YUV422P:
-                return 10;
             case V4L2_PIX_FMT_RGB565:
+                return 10;
+            case V4L2_PIX_FMT_YUYV:
+            case V4L2_PIX_FMT_UYVY:
                 return 11;
-            case V4L2_PIX_FMT_RGB24:
+            case V4L2_PIX_FMT_YUV422P:
                 return 12;
+            case V4L2_PIX_FMT_RGB24:
+                return 13;
 #ifdef CONFIG_XIAOZHI_ENABLE_HARDWARE_JPEG_ENCODER
             case V4L2_PIX_FMT_YUV420:
-                return 13;
+                return 14;
 #endif  // CONFIG_XIAOZHI_ENABLE_HARDWARE_JPEG_ENCODER
 #ifdef CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
             case V4L2_PIX_FMT_JPEG:
@@ -256,7 +262,11 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
         return;
     }
 
-    ESP_LOGD(TAG, "selected pixel format: 0x%08lx", setformat.fmt.pix.pixelformat);
+    ESP_LOGI(TAG, "selected pixel format: %c%c%c%c",
+             (int)(setformat.fmt.pix.pixelformat & 0xFF),
+             (int)((setformat.fmt.pix.pixelformat >> 8) & 0xFF),
+             (int)((setformat.fmt.pix.pixelformat >> 16) & 0xFF),
+             (int)((setformat.fmt.pix.pixelformat >> 24) & 0xFF));
 
     if (ioctl(video_fd_, VIDIOC_S_FMT, &setformat) != 0) {
         ESP_LOGE(TAG, "VIDIOC_S_FMT failed, errno=%d(%s)", errno, strerror(errno));
@@ -433,6 +443,7 @@ bool EspVideo::Capture() {
                 case V4L2_PIX_FMT_RGB565:
                 case V4L2_PIX_FMT_RGB24:
                 case V4L2_PIX_FMT_YUYV:
+                case V4L2_PIX_FMT_UYVY:
                 case V4L2_PIX_FMT_YUV420:
                 case V4L2_PIX_FMT_GREY:
 #ifdef CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
@@ -517,6 +528,8 @@ bool EspVideo::Capture() {
                     rotate_cfg.in_pixel_fmt = ESP_IMGFX_PIXEL_FMT_RGB565_LE;
                     break;
                 case V4L2_PIX_FMT_YUYV:
+                case V4L2_PIX_FMT_UYVY:
+                    // 按不透明的 16 位像素旋转，只使用像素宽度，不在这里转换颜色。
                     rotate_cfg.in_pixel_fmt = ESP_IMGFX_PIXEL_FMT_RGB565_LE;
                     break;
                 case V4L2_PIX_FMT_GREY:
@@ -584,8 +597,9 @@ bool EspVideo::Capture() {
                     rotate_src = (uint8_t*)frame_.data;
                     ppa_color_mode = PPA_SRM_COLOR_MODE_RGB888;
                     break;
-                case V4L2_PIX_FMT_YUYV: {
-                    ESP_LOGW(TAG, "YUYV format is not supported for PPA rotation, using software conversion to RGB888");
+                case V4L2_PIX_FMT_YUYV:
+                case V4L2_PIX_FMT_UYVY: {
+                    ESP_LOGW(TAG, "YUV422 format is not supported for PPA rotation, using software conversion to RGB888");
                     rotate_src = (uint8_t*)heap_caps_malloc(frame_.width * frame_.height * 3,
                                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                     if (rotate_src == nullptr) {
@@ -598,7 +612,7 @@ bool EspVideo::Capture() {
                     esp_imgfx_color_convert_cfg_t convert_cfg = {
                         .in_res = {.width = static_cast<int16_t>(frame_.width),
                                    .height = static_cast<int16_t>(frame_.height)},
-                        .in_pixel_fmt = ESP_IMGFX_PIXEL_FMT_YUYV,
+                        .in_pixel_fmt = static_cast<esp_imgfx_pixel_fmt_t>(frame_.format),
                         .out_pixel_fmt = ESP_IMGFX_PIXEL_FMT_RGB888,
                     };
                     esp_imgfx_color_convert_handle_t convert_handle = nullptr;
@@ -746,6 +760,7 @@ bool EspVideo::Capture() {
         switch (frame_.format) {
             // LVGL 显示 YUV 系的图像似乎都有问题，暂时转换为 RGB565 显示
             case V4L2_PIX_FMT_YUYV:
+            case V4L2_PIX_FMT_UYVY:
             case V4L2_PIX_FMT_YUV420:
             case V4L2_PIX_FMT_RGB24: {
                 color_format = LV_COLOR_FORMAT_RGB565;

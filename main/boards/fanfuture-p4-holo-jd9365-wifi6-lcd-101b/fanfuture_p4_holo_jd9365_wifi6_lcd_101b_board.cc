@@ -164,13 +164,13 @@ private:
             ESP_ERROR_CHECK(pmic_->EnableAldo1(true));
             ESP_LOGI(TAG, "   💡 ALDO1: 3.3V");
 
-            /**ESP_ERROR_CHECK(pmic_->SetAldo2Voltage(1800));
+            ESP_ERROR_CHECK(pmic_->SetAldo2Voltage(1800));
             ESP_ERROR_CHECK(pmic_->EnableAldo2(true));
             ESP_LOGI(TAG, "   🔋 ALDO2: 1.8V");
 
-            ESP_ERROR_CHECK(pmic_->SetAldo4Voltage(3300));
+            ESP_ERROR_CHECK(pmic_->SetAldo4Voltage(2800));
             ESP_ERROR_CHECK(pmic_->EnableAldo4(true));
-            ESP_LOGI(TAG, "   💡 ALDO4: 3.3V");**/
+            ESP_LOGI(TAG, "   💡 ALDO4: 2.8V");
 
             ESP_ERROR_CHECK(pmic_->EnableBatteryVoltageAdc(true));
             ESP_ERROR_CHECK(pmic_->EnableVbusVoltageAdc(true));
@@ -465,7 +465,7 @@ public:
         InitializeAXP2101();
         InitializeSdForMjpeg();
         InitializeJd9365Display();
-        //InitializeCamera();
+        InitializeCamera();
         InitializeButtons();
         GetBacklight()->RestoreBrightness();
 
@@ -518,9 +518,9 @@ public:
         return display_;
     }
 
-    /**virtual Camera* GetCamera() override {
+    virtual Camera* GetCamera() override {
         return camera_;
-    }**/
+    }
 
     virtual Backlight* GetBacklight() override {
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, false);
