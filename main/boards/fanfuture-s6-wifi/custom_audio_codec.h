@@ -233,10 +233,10 @@ public:
     virtual void SetOutputVolume(int volume) override {
         auto& app = Application::GetInstance();
         if (app.GetAecMode() == kAecOnDeviceSide) {
-            ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume*0.7));
+            ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume*0.5));
         }
         else {
-            ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume*0.9));
+            ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume*1.0));
         }
         AudioCodec::SetOutputVolume(volume);
     }

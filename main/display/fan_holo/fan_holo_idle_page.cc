@@ -409,8 +409,28 @@ void FanHoloIdlePage::LayoutWeather(FanHoloDisplay& host) {
             resize_metric(day_precip_[i]);
         }
     }
+    PlaceWeather(host);
     lv_obj_update_layout(weather_root_);
     lv_obj_move_foreground(weather_root_);
+}
+
+void FanHoloIdlePage::PlaceWeather(FanHoloDisplay& host) {
+    if (weather_root_ == nullptr) {
+        return;
+    }
+    const WeatherGeom geom = MakeWeatherGeom(host, WeatherAnchorY(host));
+    if (album_mode_) {
+        lv_obj_set_width(weather_root_, host.screen_width());
+        lv_obj_set_height(weather_root_, LV_SIZE_CONTENT);
+        lv_obj_set_pos(weather_root_, 0, geom.y);
+        lv_obj_set_style_max_width(weather_root_, host.screen_width(), 0);
+        lv_obj_set_flex_align(weather_root_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    } else {
+        lv_obj_set_size(weather_root_, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_pos(weather_root_, geom.x, geom.y);
+        lv_obj_set_style_max_width(weather_root_, geom.max_w, 0);
+        lv_obj_set_flex_align(weather_root_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    }
 }
 
 void FanHoloIdlePage::Create(FanHoloDisplay& host) {
@@ -525,18 +545,19 @@ void FanHoloIdlePage::ApplyShowMode(FanHoloDisplay& host) {
     }
     status_bar_.RecreateIdleClock(screen_, host);
     if (forecast_box_ != nullptr) {
+        StyleLedCard(forecast_box_, 5);
         if (album_mode_) {
-            lv_obj_set_style_bg_opa(forecast_box_, LV_OPA_TRANSP, 0);
-            lv_obj_set_style_border_width(forecast_box_, 0, 0);
-            lv_obj_set_style_border_opa(forecast_box_, LV_OPA_TRANSP, 0);
+            lv_obj_add_flag(forecast_box_, LV_OBJ_FLAG_HIDDEN);
         } else {
-            StyleLedCard(forecast_box_, 5);
+            lv_obj_remove_flag(forecast_box_, LV_OBJ_FLAG_HIDDEN);
         }
     }
     if (album_mode_) {
         HideRole();
     }
+    PlaceWeather(host);
     if (weather_root_ != nullptr) {
+        lv_obj_update_layout(weather_root_);
         lv_obj_move_foreground(weather_root_);
     }
     status_bar_.RaiseOverlays();

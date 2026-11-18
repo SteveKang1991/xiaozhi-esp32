@@ -30,6 +30,7 @@ public:
 private:
     void CreateWeather(FanHoloDisplay& host);
     void LayoutWeather(FanHoloDisplay& host);
+    void PlaceWeather(FanHoloDisplay& host);
 
     lv_obj_t* screen_ = nullptr;
     lv_obj_t* album_bg_ = nullptr;

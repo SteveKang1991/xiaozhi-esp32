@@ -1146,14 +1146,10 @@ function(build_default_assets_bin)
     set(EMOTION_MJPEG_DEPENDS "")
     if(CONFIG_BOARD_TYPE_FANFUTURE_Huanying1_778928_WiFI)
         list(APPEND EMOTION_MJPEG_DEPENDS
-            "${EMOTION_ASSETS_DIR}/default-idle-160x208.mjpeg"
-            "${EMOTION_ASSETS_DIR}/default-listen-240x290.mjpeg"
-            "${EMOTION_ASSETS_DIR}/default-speak-240x290.mjpeg")
+            "${EMOTION_ASSETS_DIR}/default-idle-160x208.mjpeg")
     elseif(CONFIG_BOARD_TYPE_FANFUTURE_S6_WIFI)
         list(APPEND EMOTION_MJPEG_DEPENDS
-            "${EMOTION_ASSETS_DIR}/default-idle-192x144.mjpeg"
-            "${EMOTION_ASSETS_DIR}/default-listen-288x208.mjpeg"
-            "${EMOTION_ASSETS_DIR}/default-speak-288x208.mjpeg")
+            "${EMOTION_ASSETS_DIR}/default-idle-192x144.mjpeg")
     endif()
 
     list(APPEND BUILD_ARGS "--esp_sr_model_path" "${ESP_SR_MODEL_PATH}")

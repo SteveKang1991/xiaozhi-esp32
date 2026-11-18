@@ -461,17 +461,14 @@ def read_board_type_from_sdkconfig(sdkconfig_path):
     return None
 
 
-# 按板型打包出厂默认表情（写入 emotions 分区）。name 即 flash 内资产名。
+# 按板型打包出厂默认表情（写入 emotions 分区）。只打 default-idle，
+# listen/speak 缺省时播放这份并居中，给自定义角色留分区空间。
 BOARD_DEFAULT_EMOTION_MJPEGS = {
     "CONFIG_BOARD_TYPE_FANFUTURE_Huanying1_778928_WiFI": [
         "default-idle-160x208.mjpeg",
-        "default-listen-240x290.mjpeg",
-        "default-speak-240x290.mjpeg",
     ],
     "CONFIG_BOARD_TYPE_FANFUTURE_S6_WIFI": [
         "default-idle-192x144.mjpeg",
-        "default-listen-288x208.mjpeg",
-        "default-speak-288x208.mjpeg",
     ],
 }
 

@@ -48,7 +48,7 @@ private:
     esp_lcd_panel_handle_t panel_ = nullptr;
     Pca9557* pca9557_;
     Esp32Camera* camera_;
-    bool aec_device = true;
+    bool aec_device = false;
     As5600* as5600_ = nullptr;
 
     static void As5600LogTask(void* arg) {
@@ -318,12 +318,12 @@ public:
             GetBacklight()->RestoreBrightness();
         } 
 
-        /**#if CONFIG_USE_DEVICE_AEC
+        #if CONFIG_USE_DEVICE_AEC
         Settings settings("aecMode", false);
         aec_device = settings.GetBool("aec_device", aec_device);
         auto& app = Application::GetInstance();
         app.SetAecMode(aec_device ? kAecOnDeviceSide : kAecOff);
-        #endif**/
+        #endif
     }
 
     /**virtual Led* GetLed() override {

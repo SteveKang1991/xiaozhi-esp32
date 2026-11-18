@@ -944,7 +944,7 @@ void FanHoloDisplay::ScanEmotionClips() {
         }
     }
 
-    /* 各状态独立 default-{state}-{WxH}，分辨率随状态变 */
+    /* 各状态都只回落到 default-idle；listen/speak 不再单独打包 default。 */
     char dn[96];
     FillClipName(dn, sizeof(dn), "default-idle");
     clip_cache_.default_clip = try_find(dn);
@@ -1020,7 +1020,8 @@ void FindByPrefixCb(const char* name, uint32_t offset, uint32_t size, void* user
 }  // namespace
 
 FanHoloDisplay::ClipLoc FanHoloDisplay::FindRoleAnimation(const char* state) {
-    /* 优先 {state}-{WxH}.mjpeg，再扫同前缀自定义文件，最后 default-{state}-{WxH} */
+    /* 优先角色自己的 {robot}-{state}-{WxH}，再兼容同前缀其它分辨率。
+     * 没有时统一回落 default-idle（分区里不再放 default-listen / default-speak）。 */
     if (state == nullptr || state[0] == '\0') {
         state = "idle";
     }
@@ -1066,10 +1067,13 @@ FanHoloDisplay::ClipLoc FanHoloDisplay::FindRoleAnimation(const char* state) {
         }
     }
 
-    snprintf(path, sizeof(path), "default-%s-%ux%u.mjpeg", state, cw, ch);
+    unsigned iw = 0;
+    unsigned ih = 0;
+    MjpegResForClip("idle", &iw, &ih);
+    snprintf(path, sizeof(path), "default-idle-%ux%u.mjpeg", iw, ih);
     if (emotion_partition_storage_find(path, &loc.offset, &loc.size)) {
         loc.name = path;
-        ESP_LOGI(metrics_.tag, "FindRoleAnimation: found default %s", path);
+        ESP_LOGI(metrics_.tag, "FindRoleAnimation: %s fallback %s", state, path);
         return loc;
     }
 
@@ -1144,14 +1148,17 @@ bool FanHoloDisplay::StartMjpegEmotion(const ClipLoc& loc_in, bool idle_layout) 
         vid_h = file_h;
     }
 
-    /* idle：右下角原尺寸贴图，不缩放；chat：底部水平居中（位置/大小与原先一致）
-     * rx/ry 为 LVGL 逻辑坐标；直刷 panel 须再加 offset（CONFIG_LCD_CUSTOM 的 OFFSET_X=23），
-     * 否则 MJPEG 相对 LVGL 内容偏左，与预报栏重叠。 */
+    /* idle：右下角原尺寸。角色自己的 listen/speak：底部水平居中，尺寸用文件名里的分辨率。
+     * 缺 listen/speak 时回落的 default-idle 比听/说小，改到屏幕正中。 */
+    const bool fallback_idle = loc.name.rfind("default-idle", 0) == 0;
     int rx = 0;
     int ry = 0;
     if (idle_layout) {
         rx = screen_w - static_cast<int>(vid_w);
         ry = screen_h - static_cast<int>(vid_h);
+    } else if (fallback_idle) {
+        rx = (screen_w - static_cast<int>(vid_w)) / 2;
+        ry = (screen_h - static_cast<int>(vid_h)) / 2;
     } else {
         rx = (screen_w - static_cast<int>(vid_w)) / 2;
         ry = screen_h - static_cast<int>(vid_h);
@@ -1452,6 +1459,40 @@ void FanHoloDisplay::AlbumTimerCb(lv_timer_t* timer) {
     self->ScheduleAlbumDecode(index);
 }
 
+static void BoostAlbumVivid(uint8_t* rgb565, size_t w, size_t h, size_t stride) {
+    if (rgb565 == nullptr || w == 0 || h == 0 || stride < w * 2) {
+        return;
+    }
+    for (size_t y = 0; y < h; ++y) {
+        auto* row = reinterpret_cast<uint16_t*>(rgb565 + y * stride);
+        for (size_t x = 0; x < w; ++x) {
+            const uint16_t p = row[x];
+            const int r5 = (p >> 11) & 31;
+            const int g6 = (p >> 5) & 63;
+            const int b5 = p & 31;
+            int r = (r5 << 3) | (r5 >> 2);
+            int g = (g6 << 2) | (g6 >> 4);
+            int b = (b5 << 3) | (b5 >> 2);
+            const int luma = (r * 77 + g * 150 + b * 29) >> 8;
+            auto vivid = [luma](int c) {
+                int v = luma + (c - luma) * 7 / 5;
+                v = v * 28 / 25;
+                if (v < 0) {
+                    return 0;
+                }
+                if (v > 255) {
+                    return 255;
+                }
+                return v;
+            };
+            r = vivid(r);
+            g = vivid(g);
+            b = vivid(b);
+            row[x] = static_cast<uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+        }
+    }
+}
+
 void FanHoloDisplay::ApplyAlbumFrame(uint32_t gen, int index, uint8_t* decoded, size_t len, size_t w, size_t h,
                                      size_t stride) {
     (void)index;
@@ -1468,6 +1509,7 @@ void FanHoloDisplay::ApplyAlbumFrame(uint32_t gen, int index, uint8_t* decoded, 
         jpeg_free_align(decoded);
         return;
     }
+    BoostAlbumVivid(decoded, w, h, stride);
 
     DisplayLockGuard lock(this);
     if (!album_active_.load() || gen != album_gen_.load() || current_page_ != Page::Idle) {
