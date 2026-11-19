@@ -1329,7 +1329,21 @@ uint8_t* DownloadAlbumJpeg(const std::string& url, size_t* out_len, const std::a
         total += static_cast<size_t>(got);
     }
     http->Close();
-    if (total < 3 || buf[0] != 0xFF || buf[1] != 0xD8) {
+    const size_t expect = http->GetBodyLength();
+    bool has_eoi = false;
+    if (total >= 4) {
+        const size_t begin = total > 16 ? total - 16 : 2;
+        for (size_t i = total - 1; i >= begin; --i) {
+            if (buf[i] == 0xD9 && buf[i - 1] == 0xFF) {
+                has_eoi = true;
+                break;
+            }
+        }
+    }
+    if (got < 0 || total < 4 || buf[0] != 0xFF || buf[1] != 0xD8 || !has_eoi || (expect > 0 && total != expect)) {
+        if (got < 0 || !has_eoi || (expect > 0 && total != expect)) {
+            ESP_LOGW(tag, "Album jpeg incomplete %u/%u", (unsigned)total, (unsigned)expect);
+        }
         heap_caps_free(buf);
         return nullptr;
     }

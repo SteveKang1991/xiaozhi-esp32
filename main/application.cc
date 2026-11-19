@@ -2098,19 +2098,25 @@ void Application::SetAecMode(AecMode mode) {
     Schedule([this]() {
         auto& board = Board::GetInstance();
         auto display = board.GetDisplay();
+        const char* notice = nullptr;
         switch (aec_mode_) {
         case kAecOff:
             audio_service_.EnableDeviceAec(false);
-            display->ShowNotification(Lang::Strings::RTC_MODE_OFF);
+            notice = Lang::Strings::RTC_MODE_OFF;
             break;
         case kAecOnServerSide:
             audio_service_.EnableDeviceAec(false);
-            display->ShowNotification(Lang::Strings::RTC_MODE_ON);
+            notice = Lang::Strings::RTC_MODE_ON;
             break;
         case kAecOnDeviceSide:
             audio_service_.EnableDeviceAec(true);
-            display->ShowNotification(Lang::Strings::RTC_MODE_ON);
+            notice = Lang::Strings::RTC_MODE_ON;
             break;
+        }
+
+        /* 无已存 WiFi 时会先进配网再跑到这里。配网文案已经在状态栏上，这里再提示会盖掉它。 */
+        if (notice != nullptr && !board.IsInWifiConfigMode()) {
+            display->ShowNotification(notice);
         }
 
         // If the AEC mode is changed, close the audio channel

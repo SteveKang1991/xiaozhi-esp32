@@ -63,7 +63,7 @@ public:
     /**
      * Check if in WiFi config mode
      */
-    bool IsInWifiConfigMode() const;
+    bool IsInWifiConfigMode() const override;
 };
 
 #endif // WIFI_BOARD_H

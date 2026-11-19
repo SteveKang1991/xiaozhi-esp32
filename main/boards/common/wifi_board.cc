@@ -237,7 +237,7 @@ void WifiBoard::EnterWifiConfigMode() {
 }
 
 bool WifiBoard::IsInWifiConfigMode() const {
-    return WifiManager::GetInstance().IsConfigMode();
+    return in_config_mode_ || WifiManager::GetInstance().IsConfigMode();
 }
 
 NetworkInterface* WifiBoard::GetNetwork() {
