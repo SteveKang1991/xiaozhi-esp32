@@ -163,14 +163,8 @@ private:
             ESP_ERROR_CHECK(pmic_->SetAldo1Voltage(3300));
             ESP_ERROR_CHECK(pmic_->EnableAldo1(true));
             ESP_LOGI(TAG, "   💡 ALDO1: 3.3V");
-
-            ESP_ERROR_CHECK(pmic_->SetAldo2Voltage(1800));
-            ESP_ERROR_CHECK(pmic_->EnableAldo2(true));
-            ESP_LOGI(TAG, "   🔋 ALDO2: 1.8V");
-
-            ESP_ERROR_CHECK(pmic_->SetAldo4Voltage(2800));
-            ESP_ERROR_CHECK(pmic_->EnableAldo4(true));
-            ESP_LOGI(TAG, "   💡 ALDO4: 2.8V");
+            /* ALDO2/ALDO4 是摄像头供电。复位后 PMIC 会保持上次的输出，先关掉。 */
+            SetCameraRails(false);
 
             ESP_ERROR_CHECK(pmic_->EnableBatteryVoltageAdc(true));
             ESP_ERROR_CHECK(pmic_->EnableVbusVoltageAdc(true));
@@ -398,6 +392,24 @@ private:
         ESP_LOGI(TAG, "✅ SD卡已挂载并完成扫描");
     }
 
+    void SetCameraRails(bool enable) {
+        if (pmic_ == nullptr) {
+            return;
+        }
+        if (enable) {
+            ESP_ERROR_CHECK(pmic_->SetAldo2Voltage(1800));
+            ESP_ERROR_CHECK(pmic_->EnableAldo2(true));
+            ESP_ERROR_CHECK(pmic_->SetAldo4Voltage(2800));
+            ESP_ERROR_CHECK(pmic_->EnableAldo4(true));
+            ESP_LOGI(TAG, "   🔋 摄像头电源: ALDO2 1.8V, ALDO4 2.8V");
+            vTaskDelay(pdMS_TO_TICKS(20));
+        } else {
+            ESP_ERROR_CHECK(pmic_->EnableAldo2(false));
+            ESP_ERROR_CHECK(pmic_->EnableAldo4(false));
+            ESP_LOGI(TAG, "   🔋 已关闭摄像头电源 ALDO2/ALDO4");
+        }
+    }
+
     void InitializeCamera() {
 #if CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE
         ESP_LOGI(TAG, "📷 初始化MIPI CSI摄像头...");
@@ -408,26 +420,16 @@ private:
                 return;
             }
 
-            ESP_LOGI(TAG, "   扫描I2C1总线检测摄像头设备...");
-            bool camera_found = false;
-            for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
-                esp_err_t ret = i2c_master_probe(i2c_bus_, addr, 100);
-                if (ret == ESP_OK) {
-                    ESP_LOGI(TAG, "   发现I2C设备: 0x%02X%s", addr,
-                             (addr == CAMERA_SCCB_ADDR) ? " [摄像头]" :
-                             (addr == AUDIO_CODEC_ES8311_ADDR) ? " [ES8311]" :
-                             (addr == AUDIO_CODEC_ES7210_ADDR) ? " [ES7210]" : "");
-                    if (addr == CAMERA_SCCB_ADDR) {
-                        camera_found = true;
-                    }
-                }
-            }
-
+            /* 只探摄像头地址。这条总线和 ES8311/ES7210 共用，扫全总线会打到编解码器。 */
+            SetCameraRails(true);
+            const bool camera_found = i2c_master_probe(i2c_bus_, CAMERA_SCCB_ADDR, 50) == ESP_OK;
             if (!camera_found) {
                 ESP_LOGW(TAG, "⚠️  未检测到摄像头 @ 0x%02X", CAMERA_SCCB_ADDR);
+                SetCameraRails(false);
                 camera_ = nullptr;
                 return;
             }
+            ESP_LOGI(TAG, "   发现摄像头 @ 0x%02X", CAMERA_SCCB_ADDR);
 
             esp_video_init_csi_config_t csi_config = {
                 .sccb_config = {
@@ -438,19 +440,19 @@ private:
                 .reset_pin = (gpio_num_t)CAMERA_RESET_PIN,
                 .pwdn_pin = (gpio_num_t)CAMERA_PWDN_PIN,
             };
-
             esp_video_init_config_t cam_config = {
                 .csi = &csi_config,
             };
-
             camera_ = new EspVideo(cam_config);
             ESP_LOGI(TAG, "✅ 摄像头初始化完成");
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "❌ 摄像头初始化失败: %s", e.what());
             camera_ = nullptr;
+            SetCameraRails(false);
         } catch (...) {
             ESP_LOGE(TAG, "❌ 摄像头初始化失败");
             camera_ = nullptr;
+            SetCameraRails(false);
         }
 #else
         ESP_LOGW(TAG, "⚠️  MIPI CSI未启用，跳过摄像头初始化");

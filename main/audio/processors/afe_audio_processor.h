@@ -40,9 +40,12 @@ private:
     bool is_speaking_ = false;
     std::vector<int16_t> input_buffer_;
     std::mutex input_buffer_mutex_;
+    std::mutex process_mutex_;
     std::vector<int16_t> output_buffer_;
+    TaskHandle_t feed_task_ = nullptr;
 
+    void FeedTask();
     void AudioProcessorTask();
 };
 
-#endif 
+#endif

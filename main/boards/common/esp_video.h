@@ -34,6 +34,17 @@ private:
 #endif  // CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
     int video_fd_ = -1;
     bool streaming_on_ = false;
+    bool video_inited_ = false;
+    bool StartStream();
+    void StopStream();
+    class StreamSession {
+    public:
+        explicit StreamSession(EspVideo* self);
+        ~StreamSession();
+        bool ok = false;
+    private:
+        EspVideo* self_ = nullptr;
+    };
     struct MmapBuffer { void *start = nullptr; size_t length = 0; };
     std::vector<MmapBuffer> mmap_buffers_;
     std::string explain_url_;
@@ -42,7 +53,7 @@ private:
 
 public:
     EspVideo(const esp_video_init_config_t& config);
-    ~EspVideo();
+    virtual ~EspVideo() override;
 
     virtual void SetExplainUrl(const std::string& url, const std::string& token);
     virtual bool Capture();

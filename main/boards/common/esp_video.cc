@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "esp_timer.h"
 #include "esp_imgfx_color_convert.h"
 #include "esp_video_device.h"
 #include "esp_video_init.h"
@@ -100,6 +101,7 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
         ESP_LOGE(TAG, "esp_video_init failed");
         return;
     }
+    video_inited_ = true;
 
 #ifdef CONFIG_XIAOZHI_ENABLE_CAMERA_DEBUG_MODE
     esp_log_level_set(TAG, ESP_LOG_DEBUG);
@@ -319,60 +321,72 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
         }
         mmap_buffers_[i].start = start;
         mmap_buffers_[i].length = buf.length;
+    }
 
+    /* 只完成打开和缓冲映射。视频流留到拍照时再开，拍完即关。 */
+    ESP_LOGI(TAG, "camera ready, stream off");
+}
+
+bool EspVideo::StartStream() {
+    if (video_fd_ < 0) {
+        return false;
+    }
+    if (streaming_on_) {
+        return true;
+    }
+    for (uint32_t i = 0; i < mmap_buffers_.size(); i++) {
+        struct v4l2_buffer buf = {};
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
         if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
-            ESP_LOGE(TAG, "VIDIOC_QBUF failed");
-            close(video_fd_);
-            video_fd_ = -1;
-            sensor_format_ = 0;
-            return;
+            ESP_LOGE(TAG, "VIDIOC_QBUF failed, index=%u errno=%d", (unsigned)i, errno);
+            int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            ioctl(video_fd_, VIDIOC_STREAMOFF, &type);
+            return false;
         }
     }
-
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(video_fd_, VIDIOC_STREAMON, &type) != 0) {
-        ESP_LOGE(TAG, "VIDIOC_STREAMON failed");
-        close(video_fd_);
-        video_fd_ = -1;
-        sensor_format_ = 0;
+        ESP_LOGE(TAG, "VIDIOC_STREAMON failed errno=%d", errno);
+        ioctl(video_fd_, VIDIOC_STREAMOFF, &type);
+        return false;
+    }
+    streaming_on_ = true;
+    ESP_LOGI(TAG, "camera stream on");
+    return true;
+}
+
+void EspVideo::StopStream() {
+    if (!streaming_on_ || video_fd_ < 0) {
         return;
     }
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(video_fd_, VIDIOC_STREAMOFF, &type) != 0) {
+        ESP_LOGW(TAG, "VIDIOC_STREAMOFF failed errno=%d", errno);
+    }
+    streaming_on_ = false;
+    ESP_LOGI(TAG, "camera stream off");
+}
 
-#ifdef CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE
-    // 当启用 ISP 时，ISP 需要一些照片来初始化参数，因此开启后后台拍摄5s照片并丢弃
-    xTaskCreate(
-        [](void* arg) {
-            EspVideo* self = static_cast<EspVideo*>(arg);
-            uint16_t capture_count = 0;
-            TickType_t start = xTaskGetTickCount();
-            TickType_t duration = 5000 / portTICK_PERIOD_MS;  // 5s
-            while ((xTaskGetTickCount() - start) < duration) {
-                struct v4l2_buffer buf = {};
-                buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                buf.memory = V4L2_MEMORY_MMAP;
-                if (ioctl(self->video_fd_, VIDIOC_DQBUF, &buf) != 0) {
-                    ESP_LOGE(TAG, "VIDIOC_DQBUF failed during init");
-                    vTaskDelay(10 / portTICK_PERIOD_MS);
-                    continue;
-                }
-                if (ioctl(self->video_fd_, VIDIOC_QBUF, &buf) != 0) {
-                    ESP_LOGE(TAG, "VIDIOC_QBUF failed during init");
-                }
-                capture_count++;
-            }
-            ESP_LOGI(TAG, "Camera init success, captured %d frames in %lums", capture_count,
-                     (unsigned long)((xTaskGetTickCount() - start) * portTICK_PERIOD_MS));
-            self->streaming_on_ = true;
-            vTaskDelete(NULL);
-        },
-        "CameraInitTask", 4096, this, 5, nullptr);
-#else
-    ESP_LOGI(TAG, "Camera init success");
-    streaming_on_ = true;
-#endif  // CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE
+EspVideo::StreamSession::StreamSession(EspVideo* self) : self_(self) {
+    ok = self_ != nullptr && self_->StartStream();
+}
+
+EspVideo::StreamSession::~StreamSession() {
+    if (ok && self_ != nullptr) {
+        self_->StopStream();
+    }
 }
 
 EspVideo::~EspVideo() {
+    if (encoder_thread_.joinable()) {
+        encoder_thread_.join();
+    }
+    if (frame_.data) {
+        heap_caps_free(frame_.data);
+        frame_.data = nullptr;
+    }
     if (streaming_on_ && video_fd_ >= 0) {
         int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         ioctl(video_fd_, VIDIOC_STREAMOFF, &type);
@@ -387,7 +401,10 @@ EspVideo::~EspVideo() {
         video_fd_ = -1;
     }
     sensor_format_ = 0;
-    esp_video_deinit();
+    if (video_inited_) {
+        esp_video_deinit();
+        video_inited_ = false;
+    }
 }
 
 void EspVideo::SetExplainUrl(const std::string& url, const std::string& token) {
@@ -400,11 +417,16 @@ bool EspVideo::Capture() {
         encoder_thread_.join();
     }
 
-    if (!streaming_on_ || video_fd_ < 0) {
+    /* 函数返回时关流。传感器一直供电，这里只在拍照时出图。 */
+    StreamSession session(this);
+    if (!session.ok) {
         return false;
     }
 
-    for (int i = 0; i < 3; i++) {
+    constexpr int kAeWarmupMs = 600;
+    const int64_t keep_after_us = esp_timer_get_time() + (int64_t)kAeWarmupMs * 1000;
+    int discarded = 0;
+    for (;;) {
         struct v4l2_buffer buf = {};
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
@@ -412,7 +434,14 @@ bool EspVideo::Capture() {
             ESP_LOGE(TAG, "VIDIOC_DQBUF failed");
             return false;
         }
-        if (i == 2) {
+        const int64_t frame_us = esp_timer_get_time();
+        const bool keep = frame_us >= keep_after_us;
+        if (!keep) {
+            discarded++;
+        } else {
+            ESP_LOGI(TAG, "AE/AWB warmup discarded %d frames", discarded);
+        }
+        if (keep) {
             // 保存帧副本到PSRAM
             if (frame_.data) {
                 heap_caps_free(frame_.data);
@@ -740,6 +769,9 @@ bool EspVideo::Capture() {
 
         if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
             ESP_LOGE(TAG, "VIDIOC_QBUF failed");
+        }
+        if (keep) {
+            break;
         }
     }
 
