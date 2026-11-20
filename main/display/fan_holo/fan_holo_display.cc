@@ -423,6 +423,13 @@ void FanHoloDisplay::ShowVolumeSlider(int volume, int duration_ms) {
     }
 }
 
+void FanHoloDisplay::HideNotificationLabel() {
+    boot_bar_.HideNotification();
+    idle_page_.status_bar().HideNotification();
+    chat_page_.status_bar().HideNotification();
+    music_page_.status_bar().HideNotification();
+}
+
 void FanHoloDisplay::ShowNotification(const char* notification, int duration_ms) {
     int volume = 0;
     if (ParseHoloVolumeNotification(notification, &volume)) {
@@ -496,6 +503,12 @@ void FanHoloDisplay::SwitchTo(Page page) {
     if (page == current_page_ && want != nullptr && lv_screen_active() == want) {
         return;
     }
+
+    /* 提示只画在当前页。切走后定时器会改绑到新页，旧页的字就清不掉。 */
+    if (notification_timer_ != nullptr) {
+        esp_timer_stop(notification_timer_);
+    }
+    HideNotificationLabel();
 
     current_page_ = page;
     switch (page) {

@@ -77,6 +77,7 @@ struct FanHoloStatusBar {
     void Bind(FanHoloDisplay& host) const;
     void RaiseOverlays() const;
     void SetStatusText(const char* status);
+    void HideNotification();
     void ApplyTextFont(const lv_font_t* font, lv_color_t color);
     void Tick();
 };

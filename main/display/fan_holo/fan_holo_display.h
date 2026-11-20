@@ -74,6 +74,7 @@ public:
 
 protected:
     void SetupUI() override;
+    void HideNotificationLabel() override;
 
 private:
     friend class FanHoloIdlePage;

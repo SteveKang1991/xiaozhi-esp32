@@ -9,6 +9,7 @@
 #include "led/circular_strip.h"
 #include "config.h"
 #include "esp_video.h"
+#include "bt_uart.h"
 
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_mipi_dsi.h"
@@ -40,6 +41,7 @@ private:
     bool aec_device = true;
     int volume_direction_ = -1; // io_button 默认减小方向，撞到边界时反向
     bool sd_format_running_ = false;
+    BtUart bt_uart_;
 
     void RunSdFormat() {
         esp_err_t ret = sd_card_format_fat();
@@ -163,6 +165,7 @@ private:
             ESP_ERROR_CHECK(pmic_->SetAldo1Voltage(3300));
             ESP_ERROR_CHECK(pmic_->EnableAldo1(true));
             ESP_LOGI(TAG, "   💡 ALDO1: 3.3V");
+            
             /* ALDO2/ALDO4 是摄像头供电。复位后 PMIC 会保持上次的输出，先关掉。 */
             SetCameraRails(false);
 
@@ -352,7 +355,9 @@ private:
         });
 
         io_button_.OnLongPress([this]() {
-            if (!sd_card_fs_mount_failed() || sd_format_running_) {
+            bt_uart_.Toggle();
+            // 以下是格式化sd卡的代码，先注释留着备用，不要删！
+            /**if (!sd_card_fs_mount_failed() || sd_format_running_) {
                 return;
             }
             if (pmic_ != nullptr) {
@@ -374,6 +379,7 @@ private:
                 sd_format_running_ = false;
                 GetDisplay()->ShowNotification("SD卡格式化失败");
             }
+            }**/
         });
     }
 
@@ -468,6 +474,12 @@ public:
         InitializeSdForMjpeg();
         InitializeIli9881cDisplay();
         //InitializeCamera();
+        bt_uart_.Start([this](const char* text) {
+            auto* display = GetDisplay();
+            if (display != nullptr) {
+                display->ShowNotification(text);
+            }
+        });
         InitializeButtons();
         GetBacklight()->RestoreBrightness();
 

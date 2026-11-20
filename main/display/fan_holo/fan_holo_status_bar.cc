@@ -1109,6 +1109,18 @@ void FanHoloStatusBar::Create(lv_obj_t* screen, FanHoloDisplay& host, Kind kind)
     (void)icon_font;
 }
 
+void FanHoloStatusBar::HideNotification() {
+    if (notification_label != nullptr) {
+        lv_label_set_text(notification_label, "");
+        lv_obj_add_flag(notification_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    /* 聊天/音乐顶栏的状态字被提示盖住过，收回提示时露出来。idle 的状态字是屏外占位，不动。 */
+    if (status_pill != nullptr && status_label != nullptr) {
+        lv_obj_remove_flag(status_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(status_pill, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 void FanHoloStatusBar::SetStatusText(const char* status) {
     if (status_label == nullptr || status == nullptr) {
         return;

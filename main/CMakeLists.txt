@@ -55,6 +55,7 @@ list(APPEND SOURCES
     "boards/common/afsk_demod.cc"
     "boards/common/axp2101.cc"
     "boards/common/backlight.cc"
+    "boards/common/bt_uart.cc"
     "boards/common/button.cc"
     "boards/common/i2c_device.cc"
     "boards/common/knob.cc"

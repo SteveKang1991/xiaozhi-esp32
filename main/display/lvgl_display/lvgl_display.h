@@ -45,6 +45,9 @@ protected:
     std::chrono::system_clock::time_point last_status_update_time_;
     esp_timer_handle_t notification_timer_ = nullptr;
 
+    /* 到时收起当前提示。多屏显示可覆盖，把每一页的提示都收掉。 */
+    virtual void HideNotificationLabel();
+
     friend class DisplayLockGuard;
     virtual bool Lock(int timeout_ms = 0) = 0;
     virtual void Unlock() = 0;

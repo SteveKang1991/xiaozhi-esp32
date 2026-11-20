@@ -21,8 +21,7 @@ LvglDisplay::LvglDisplay() {
         .callback = [](void *arg) {
             LvglDisplay *display = static_cast<LvglDisplay*>(arg);
             DisplayLockGuard lock(display);
-            lv_obj_add_flag(display->notification_label_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(display->status_label_, LV_OBJ_FLAG_HIDDEN);
+            display->HideNotificationLabel();
         },
         .arg = this,
         .dispatch_method = ESP_TIMER_TASK,
@@ -66,6 +65,15 @@ LvglDisplay::~LvglDisplay() {
     }
     if (pm_lock_ != nullptr) {
         esp_pm_lock_delete(pm_lock_);
+    }
+}
+
+void LvglDisplay::HideNotificationLabel() {
+    if (notification_label_ != nullptr) {
+        lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (status_label_ != nullptr) {
+        lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
